@@ -199,3 +199,4 @@ Latest execution trace:
 - [x] harden `clustered_pg_pkidx_vacuumcleanup` by splitting maintenance into independent callback blocks so `segment_map_tids_gc` still runs when metadata rebuild/touch fails.
 - [x] remove cached-plan execution path in `clustered_pg_pkidx_gc_segment_tids` to avoid vacuum callback prepare instability.
 - [x] harden PK index rescan path against stale `scan->keyData` after mark/restore cycles by driving scan predicates from stable state-backed keys and falling back safely to table scan if no valid source exists.
+- [x] fix `clustered_pg_pkidx_allocate_locator()` by assigning `locatorRaw = DatumGetByteaP(locatorDatum)` before null-check/copy, preventing uninitialized-bytea copy crashes under insert pressure.
