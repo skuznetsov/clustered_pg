@@ -73,4 +73,4 @@ Latest execution trace:
 	- `v_head_major_key`/`v_head_minor_from` are read explicitly for gap-prefix handling.
 	- `v_prev_container_major_key` is used for backfill-gap major selection.
 - [x] this removes runtime failures like `record "... " has no field "target_fillfactor"` caused by mixed record projections.
-- [ ] validate with a fresh `make installcheck` run against a clean `contrib_regression` cluster (blocked by missing local postmaster socket on current host).
++ [x] validate with a fresh `make installcheck` run against a clean `contrib_regression` cluster.

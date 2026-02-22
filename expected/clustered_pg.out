@@ -128,8 +128,8 @@ CREATE INDEX clustered_pk_int8_build_table_idx
 SELECT * FROM segment_map_stats('clustered_pk_int8_build_table'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          1 |       16 |        16 |                1
-         1 |         17 |       18 |         2 |                1
+         0 |          1 |       12 |        12 |                1
+         1 |         13 |       18 |         6 |                1
 (2 rows)
 
 DROP TABLE clustered_pk_int8_build_table;
@@ -142,8 +142,8 @@ SELECT generate_series(1,18);
 SELECT * FROM segment_map_stats('clustered_pk_int8_table_opts'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          1 |       16 |        16 |                0
-         1 |         17 |       18 |         2 |                0
+         0 |          1 |       12 |        12 |                0
+         1 |         13 |       18 |         6 |                0
 (2 rows)
 
 DROP TABLE clustered_pk_int8_table_opts;
@@ -156,8 +156,8 @@ CREATE INDEX clustered_pk_int8_vacuum_table_idx
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          1 |       16 |        16 |                1
-         1 |         17 |       18 |         2 |                1
+         0 |          1 |       12 |        12 |                1
+         1 |         13 |       18 |         6 |                1
 (2 rows)
 
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0::double precision) AS due_repack_before_vacuum;
@@ -171,8 +171,8 @@ VACUUM clustered_pk_int8_vacuum_table;
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          1 |       16 |        16 |                2
-         1 |         17 |       18 |         2 |                2
+         0 |          1 |       12 |        12 |                2
+         1 |         13 |       18 |         6 |                2
 (2 rows)
 
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0::double precision) AS due_repack_after_vacuum;
@@ -204,8 +204,9 @@ SELECT segment_map_rebuild_from_index('clustered_pk_int8_rebuild_table_idx'::reg
 SELECT * FROM segment_map_stats('clustered_pk_int8_rebuild_table'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          5 |       18 |        14 |                2
-(1 row)
+         0 |          5 |       16 |        12 |                2
+         1 |         17 |       18 |         2 |                2
+(2 rows)
 
 DROP TABLE clustered_pk_int8_rebuild_table;
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
