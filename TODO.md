@@ -16,6 +16,10 @@
 - [x] add regression/protocol tests (locator contract + segment_map allocation policy)
 - [x] wire operator class and planner path for `clustered_locator` (`btree`-class)
 - [x] expose regclass-friendly segment locator APIs (`segment_map_allocate_locator_regclass`, `segment_map_next_locator`)
+- [x] enable functional index AM scan callbacks by translating index scan keys to heap scan
+	- [x] implement `ambeginscan/endscan/rescan/amgettuple/amgetbitmap` lifecycle with table scan state
+	- [x] add regression coverage for constrained index predicates through clustered index AM
+	- [x] document/query-guard mark/restore behavior
 
 Current local plan:
 
@@ -36,6 +40,7 @@ Execution loop status:
 - [x] add VACUUM-aware segment maintenance hook (`amvacuumcleanup`) to execute due-segment rebuilds via `segment_map_rebuild_from_index()`.
 - [x] synchronize regression test fixture output (expected/clustered_pg.out) with current SQL runtime behavior.
 - [x] add SQL helper `segment_map_count_repack_due()` for maintenance window heuristics.
+- [x] implement index AM scan lifecycle scaffolding and functional `amgettuple`/`amgetbitmap` path using table scan fallback.
 
 Locator contract draft (v0.1):
 - Format: fixed 16-byte `bytea`, payload-only (no varlena metadata in locator value).

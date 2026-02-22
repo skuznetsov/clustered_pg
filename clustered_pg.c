@@ -3,6 +3,7 @@
 #include "access/amapi.h"
 #include "access/genam.h"
 #include "access/relscan.h"
+#include "access/table.h"
 #include "access/tableam.h"
 #include "access/reloptions.h"
 #include "catalog/pg_type.h"
@@ -12,12 +13,16 @@
 #include "nodes/execnodes.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
+#include "executor/tuptable.h"
 #include "fmgr.h"
+#include "nodes/tidbitmap.h"
 #include "utils/snapmgr.h"
 #include "utils/builtins.h"
 #include "utils/errcodes.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include <inttypes.h>
+#include <string.h>
 
 PG_MODULE_MAGIC;
 
@@ -54,6 +59,15 @@ typedef struct ClusteredPgPkidxBuildState
 	int64		index_tuples;
 } ClusteredPgPkidxBuildState;
 
+typedef struct ClusteredPgPkidxScanState
+{
+	TableScanDesc	table_scan;
+	ScanKeyData		*table_scan_keys;
+	TupleTableSlot *table_scan_slot;
+	int				key_count;
+	bool			owns_heap_relation;
+} ClusteredPgPkidxScanState;
+
 static SPIPlanPtr clustered_pg_pkidx_allocate_locator_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_count_repack_due_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_rebuild_segment_map_plan = NULL;
@@ -63,6 +77,10 @@ static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 Relation heapRelation,
 									 IndexUniqueCheck checkUnique,
 									 bool indexUnchanged, IndexInfo *indexInfo);
+static Relation clustered_pg_pkidx_get_heap_relation(IndexScanDesc scan,
+													ClusteredPgPkidxScanState *state);
+static void clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
+									ScanKey orderbys, int norderbys);
 
 static const char *
 clustered_pg_qualified_extension_name(const char *name)
@@ -401,16 +419,6 @@ clustered_pg_pkidx_rebuild_segment_map(Relation indexRelation,
  * to avoid forcing catalog/binary compatibility too early.
  */
 
-static void
-clustered_pg_pkidx_unsupported(const char *op_name)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("clustered_pk_index is a scaffold implementation"),
-			 errdetail("operation \"%s\" is not implemented in this version.", op_name),
-			 errhint("Current release is metadata-safe and intentionally minimal.")));
-}
-
 static bool
 clustered_pg_pkidx_int_key_to_int64(Datum value, Oid valueType, int64 *minor_key)
 {
@@ -691,61 +699,247 @@ clustered_pg_pkidx_canreturn(Relation indexRelation, int attno)
 	return false;
 }
 
+static Relation
+clustered_pg_pkidx_get_heap_relation(IndexScanDesc scan,
+									ClusteredPgPkidxScanState *state)
+{
+	Relation	heapRelation;
+
+	if (scan == NULL)
+		return NULL;
+	if (scan->heapRelation != NULL)
+		return scan->heapRelation;
+
+	if (scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
+		return NULL;
+
+	heapRelation = table_open(scan->indexRelation->rd_index->indrelid, NoLock);
+	scan->heapRelation = heapRelation;
+
+	if (state != NULL)
+		state->owns_heap_relation = true;
+
+	return heapRelation;
+}
+
 static bool
 clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 {
-	(void)scan;
-	(void)direction;
-	clustered_pg_pkidx_unsupported("amgettuple");
+	ClusteredPgPkidxScanState *state;
+	Relation	heapRelation;
+
+	if (scan == NULL || scan->indexRelation == NULL)
+		return false;
+
+	state = (ClusteredPgPkidxScanState *) scan->opaque;
+	if (state == NULL)
+		ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index scan state is not initialized")));
+
+	if (state->table_scan == NULL)
+	{
+		heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
+		if (heapRelation == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index cannot resolve heap relation for index scan")));
+
+		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
+								  scan->orderByData, scan->numberOfOrderBys);
+	}
+
+	if (table_scan_getnextslot(state->table_scan, direction, state->table_scan_slot))
+	{
+		ItemPointerCopy(&state->table_scan_slot->tts_tid, &scan->xs_heaptid);
+		scan->xs_recheck = false;
+		return true;
+	}
+
 	return false;
 }
 
 static int64
 clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
-	(void)scan;
-	(void)tbm;
-	clustered_pg_pkidx_unsupported("amgetbitmap");
-	return 0;
+	ClusteredPgPkidxScanState *state;
+	int64		rows = 0;
+	Relation	heapRelation;
+
+	if (scan == NULL || scan->indexRelation == NULL || tbm == NULL)
+		return 0;
+
+	state = (ClusteredPgPkidxScanState *) scan->opaque;
+	if (state == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index scan state is not initialized")));
+
+	if (state->table_scan == NULL)
+	{
+		heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
+		if (heapRelation == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index cannot resolve heap relation for bitmap index scan")));
+
+		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
+								  scan->orderByData, scan->numberOfOrderBys);
+	}
+
+	while (table_scan_getnextslot(state->table_scan, ForwardScanDirection,
+								 state->table_scan_slot))
+	{
+		tbm_add_tuples(tbm, &state->table_scan_slot->tts_tid, 1, false);
+		rows++;
+	}
+
+	return rows;
 }
 
 static void
 clustered_pg_pkidx_markpos(IndexScanDesc scan)
 {
-	(void)scan;
-	clustered_pg_pkidx_unsupported("ammarkpos");
+	(void) scan;
 }
 
 static void
 clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 {
-	(void)scan;
-	clustered_pg_pkidx_unsupported("amrestrpos");
+	(void) scan;
 }
 
 static void
 clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 						ScanKey orderbys, int norderbys)
 {
-	(void)scan;
-	(void)keys;
-	(void)nkeys;
-	(void)orderbys;
-	(void)norderbys;
-	clustered_pg_pkidx_unsupported("amrescan");
+	ClusteredPgPkidxScanState *state;
+	int			i;
+	int16		key_attr_count;
+	Relation	heapRelation;
+
+	(void) orderbys;
+	(void) norderbys;
+
+	if (scan == NULL)
+		return;
+
+	state = (ClusteredPgPkidxScanState *) scan->opaque;
+	if (state == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index scan state is not initialized")));
+
+	heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
+	if (heapRelation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_pk_index requires a valid heap relation")));
+
+	scan->numberOfKeys = nkeys;
+	scan->numberOfOrderBys = norderbys;
+	if (scan->keyData == NULL && scan->numberOfKeys > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index key storage is not initialized")));
+
+	if (scan->xs_snapshot == InvalidSnapshot)
+		scan->xs_snapshot = GetTransactionSnapshot();
+
+	if (scan->numberOfKeys > 0 && keys != NULL)
+		memcpy(scan->keyData, keys, sizeof(ScanKeyData) * scan->numberOfKeys);
+
+	if (scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_pk_index requires a valid index relation")));
+	key_attr_count = IndexRelationGetNumberOfKeyAttributes(scan->indexRelation);
+
+	if (scan->numberOfKeys > key_attr_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("clustered_pk_index supports up to %d key columns", key_attr_count),
+				 errhint("Use only index key columns from the index definition.")));
+
+	if (state->key_count != scan->numberOfKeys)
+	{
+		if (state->table_scan_keys != NULL)
+		{
+			pfree(state->table_scan_keys);
+			state->table_scan_keys = NULL;
+		}
+		state->key_count = scan->numberOfKeys;
+		if (state->key_count > 0)
+			state->table_scan_keys = (ScanKeyData *) palloc0_array(ScanKeyData, state->key_count);
+	}
+
+	for (i = 0; i < scan->numberOfKeys; i++)
+	{
+		AttrNumber	index_attno = scan->keyData[i].sk_attno;
+		AttrNumber	heap_attno;
+
+		if (index_attno < 1 || index_attno > key_attr_count)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("clustered_pk_index uses explicit index keys only")));
+		}
+
+		heap_attno = scan->indexRelation->rd_index->indkey.values[index_attno - 1];
+		if (heap_attno <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("clustered_pk_index does not support expression keys")));
+
+		state->table_scan_keys[i] = scan->keyData[i];
+		state->table_scan_keys[i].sk_attno = heap_attno;
+	}
+
+	if (state->table_scan != NULL)
+		table_endscan(state->table_scan);
+	if (state->table_scan_slot == NULL)
+		state->table_scan_slot = table_slot_create(heapRelation, NULL);
+	state->table_scan = table_beginscan(heapRelation, scan->xs_snapshot,
+									   state->key_count,
+									   state->key_count > 0 ? state->table_scan_keys : NULL);
+	scan->xs_recheck = false;
 }
 
 static IndexScanDesc
 clustered_pg_pkidx_beginscan(Relation indexRelation, int nkeys, int norderbys)
 {
-	return RelationGetIndexScan(indexRelation, nkeys, norderbys);
+	IndexScanDesc scan = RelationGetIndexScan(indexRelation, nkeys, norderbys);
+	ClusteredPgPkidxScanState *state;
+
+	state = (ClusteredPgPkidxScanState *) palloc0(sizeof(ClusteredPgPkidxScanState));
+	state->key_count = nkeys;
+	scan->opaque = state;
+	return scan;
 }
 
 static void
 clustered_pg_pkidx_endscan(IndexScanDesc scan)
 {
 	if (scan != NULL)
+	{
+		ClusteredPgPkidxScanState *state = (ClusteredPgPkidxScanState *) scan->opaque;
+
+		if (state != NULL)
+		{
+			if (state->table_scan_slot != NULL)
+				ExecDropSingleTupleTableSlot(state->table_scan_slot);
+			if (state->table_scan_keys != NULL)
+				pfree(state->table_scan_keys);
+			if (state->table_scan != NULL)
+				table_endscan(state->table_scan);
+			if (scan->heapRelation != NULL && state->owns_heap_relation)
+				table_close(scan->heapRelation, NoLock);
+			scan->heapRelation = NULL;
+			pfree(state);
+			scan->opaque = NULL;
+		}
 		index_endscan(scan);
+	}
 }
 
 Datum
@@ -1128,16 +1322,15 @@ clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 
 static void
 clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path,
-						double loop_count, Cost *startup_cost,
-						Cost *total_cost, Selectivity *selectivity,
-						double *correlation, double *pages)
+							double loop_count, Cost *startup_cost,
+							Cost *total_cost, Selectivity *selectivity,
+							double *correlation, double *pages)
 {
-	/* Intentionally huge costs to avoid accidental query usage for now. */
 	(void)root;
 	(void)path;
 	(void)loop_count;
-	*startup_cost = 1e10;
-	*total_cost = 1e10;
+	*startup_cost = 100.0;
+	*total_cost = 200.0;
 	*selectivity = 1.0;
 	*correlation = 0.0;
 	*pages = 1.0;
@@ -1157,8 +1350,8 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.type = T_IndexAmRoutine,
 		.amstrategies = 5,
 		.amsupport = 1,
-		.amcanorder = true,
-		.amcanorderbyop = true,
+		.amcanorder = false,
+		.amcanorderbyop = false,
 		.amcanhash = false,
 		.amconsistentequality = true,
 		.amconsistentordering = true,

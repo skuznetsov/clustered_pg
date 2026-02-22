@@ -364,8 +364,39 @@ FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
 (1 row)
 
 DROP TABLE clustered_pg_am_churn_smoke;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLE clustered_pg_am_filter_query(id bigint);
+CREATE INDEX clustered_pg_am_filter_query_idx
+	ON clustered_pg_am_filter_query USING clustered_pk_index (id)
+		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_filter_query(id)
+SELECT generate_series(1,40);
+SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
+ id 
+----
+ 17
+(1 row)
+
+SELECT array_agg(id ORDER BY id) AS am_filter_ids
+FROM (SELECT id FROM clustered_pg_am_filter_query WHERE id BETWEEN 10 AND 20) q;
+        am_filter_ids        
+----------------------------
+ {10,11,12,13,14,15,16,17,18,19,20}
+(1 row)
+
+SELECT count(*) AS am_filter_count
+FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
+ am_filter_count 
+----------------
+             6
+(1 row)
+
+DROP TABLE clustered_pg_am_filter_query;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
- major_key | minor_from | minor_to | row_count | split_generation 
+major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
          3 |          3 |        3 |         1 |                0
          4 |          1 |      100 |         7 |                0

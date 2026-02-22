@@ -15,7 +15,9 @@ Experimental PostgreSQL extension scaffold for custom clustered storage experime
   intentionally conservative baseline for safe bootstrap.
 - INDEX AM insert callback is active for single-column integer keys:
   - `aminsert` assigns ordered segment locators via `segment_map_allocate_locator(...)`.
-- INDEX AM insert and build callbacks are wired to the split-policy allocator; scan/maintenance callbacks still return `ERRCODE_FEATURE_NOT_SUPPORTED` while advanced planner/runtime paths are TODO.
+- INDEX AM insert and build callbacks are wired to the split-policy allocator.
+- INDEX AM scan callbacks now run through a table-scan fallback (`RelationGetIndexScan` + `table_beginscan`) so constrained index queries can execute through `clustered_pk_index` while retaining full heap fallback semantics.
+- `ammarkpos`/`amrestrpos` are intentionally no-op for this prototype, which is documented in SQL regression as a known limitation.
 - Locator helpers are exposed via SQL functions:
   - `locator_pack(major, minor) -> bytea`
   - `locator_pack_int8(bigint) -> bytea` (single PK-value mapping)
@@ -37,7 +39,7 @@ Experimental PostgreSQL extension scaffold for custom clustered storage experime
 
 ## Safety notes
 
-- The INDEX AM scan and full read/merge callbacks still return `ERRCODE_FEATURE_NOT_SUPPORTED`.
+- The INDEX AM scan callbacks are functional (tuple fetch, bitmap, and rescan). mark/restore is intentionally unsupported behavior-wise and remains a documented no-op.
 - `ambuildempty` now clears stale segment-map rows for the target relation.
 - `amvacuumcleanup` evaluates due segments and runs `segment_map_rebuild_from_index(...)` when maintenance is needed, which rebuilds segment_map state from current table key order.
 - Added SQL helpers:

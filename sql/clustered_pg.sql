@@ -162,6 +162,23 @@ SELECT count(*) AS am_churn_segment_count,
 FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
 DROP TABLE clustered_pg_am_churn_smoke;
 
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLE clustered_pg_am_filter_query(id bigint);
+CREATE INDEX clustered_pg_am_filter_query_idx
+	ON clustered_pg_am_filter_query USING clustered_pk_index (id)
+		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_filter_query(id)
+SELECT generate_series(1,40);
+SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
+SELECT array_agg(id ORDER BY id) AS am_filter_ids
+FROM (SELECT id FROM clustered_pg_am_filter_query WHERE id BETWEEN 10 AND 20) q;
+SELECT count(*) AS am_filter_count
+FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
+DROP TABLE clustered_pg_am_filter_query;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
 
 SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,

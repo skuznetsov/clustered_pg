@@ -630,5 +630,5 @@ AS $$
 $$;
 
 COMMENT ON ACCESS METHOD clustered_heap IS 'Prototype clustered table access method (delegates to heap semantics in v0.1.0).';
-COMMENT ON ACCESS METHOD clustered_pk_index IS 'Prototype clustered logical index AM (skeleton, inactive in v0.1.0).';
+COMMENT ON ACCESS METHOD clustered_pk_index IS 'Prototype clustered logical index AM with active index-insert and scan callbacks for constrained predicate evaluation.';
 COMMENT ON EXTENSION clustered_pg IS 'Experimental clustered storage and index access method scaffold.';
