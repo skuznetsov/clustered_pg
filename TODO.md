@@ -109,6 +109,7 @@ Current engineering status:
 - [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.
 - [x] extend clustered table AM wrapper with additional lifecycle callbacks (`relation_copy_data`, `relation_copy_for_cluster`) to keep segment metadata coherent after physical rewrites.
 - [x] harmonize `segment_map` writer lock strategy: `segment_map_allocate_locator`, `segment_map_rebuild_from_index`, and `segment_map_touch` now use the same `pg_advisory_xact_lock(relation_oid::bigint)` contract to remove hash collision ambiguity.
+- [x] add maintenance-call hardening in C layer: `clustered_pg_pkidx_execute_segment_map_maintenance` now acquires `pg_advisory_xact_lock(relation_oid::bigint)` before all SPI writes/deletes.
 
 Known environment blockers:
 

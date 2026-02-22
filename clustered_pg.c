@@ -410,6 +410,7 @@ clustered_pg_pkidx_execute_segment_map_maintenance(Relation indexRelation,
 	Oid			relationOid = InvalidOid;
 	Datum		args[1];
 	Oid			argtypes[1];
+	const char *lock_sql = "SELECT pg_advisory_xact_lock($1::bigint)";
 
 	if (indexRelation == NULL || indexRelation->rd_index == NULL)
 		return;
@@ -431,6 +432,20 @@ clustered_pg_pkidx_execute_segment_map_maintenance(Relation indexRelation,
 
 	PG_TRY();
 	{
+		rc = SPI_execute_with_args(
+			lock_sql,
+			1,
+			argtypes,
+			args,
+			NULL,
+			false,
+			0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map maintenance lock acquisition failed"),
+					 errdetail("SPI status code %d", rc)));
+
 		rc = SPI_execute_with_args(sql,
 								   1,
 								   argtypes,
