@@ -58,6 +58,32 @@ Locator contract draft (v0.1):
 - Helper `locator_pack_int8(pk)` emits `{major=0, minor=pk}` to support single-column PK prototypes.
 - Forward rule: future versions may only append semantics through new helper versions, not mutate existing byte layout.
 
+Production hardening program (next):
+
+- [ ] P0 (CAUTION): define and implement a production-grade concurrent maintenance model for `segment_map` (`SPI` paths) to avoid cross-backend allocator race windows.
+	- DoD: add lock/ordering strategy, reproduce with `pgbench` style concurrent inserts, and publish a test demonstrating no duplicate locator allocation.
+	- Verification: `make installcheck` with new concurrent regression; add adversary check for `unique_violation` under parallel insert pressure.
+- [ ] P0 (CAUTION): implement native clustered index scan primitives (locator -> heap TID index) instead of full table scan fallback.
+	- DoD: add path with low fan-out direct scan and regression for `SELECT ... WHERE id = ...` under large tables.
+	- Adversary checks: reorder-heavy inserts + duplicate inner merge join + mark/restore under backward scan.
+- [ ] P1 (CAUTION): add crash-recovery resilience around metadata rebuild (`repack`) and VACUUM callbacks.
+	- DoD: partial failure in maintenance leaves `segment_map` in consistent state and recovers on next maintenance run.
+	- Verification: inject SPI failures in unit harness and assert no orphaned map rows for dropped/rebuilt relations.
+- [ ] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
+	- DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
+- [ ] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
+	- DoD: selective lookups continue choosing clustered index; full scans remain preferred for sequential workloads.
+	- Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.
+- [ ] P2 (SAFE): add observability: extension versioned settings, function-level counters, and actionable warning context.
+	- DoD: every maintenance short-fail path logs relation OID + operation context and does not suppress root cause.
+- [ ] P2 (SAFE): broaden test coverage for copy/update lifecycles (`REINDEX`, `ALTER INDEX ... SET`, `COPY`, `TRUNCATE`, drop/recreate index).
+	- DoD: stable `make installcheck` with explicit pass/fail per fixture and zero flaky expectations.
+
+Decision protocol (Quadrumvirate):
+- For each milestone, run one `Cassandra` precheck, then implement one focused patch, then `Adversary` checks (edge/concurrency/regression) before marking it `COMPLETED`.
+- If two attempts do not increase confidence, run `Daedalus` pivot and switch design before continuing.
+- If any claim reaches “VERIFIED”, attach command-level evidence in this file and update this status block.
+
 Next milestone (explicit):
 
 - [x] segment-map phase: persist mapping from `major` locator bucket to ordered segment metadata.
@@ -73,7 +99,7 @@ Current engineering status:
 - [x] removed per-row segment-map maintenance work from `ambuild` by switching build callback to count-only and rebuilding segment map once post-scan (`segment_map_rebuild_from_index` path).
 - [x] verified extension C code builds successfully with `make` using local PostgreSQL 18.
 - [x] hardened SQL allocator/rebuild path against `search_path` resolution by schema-qualifying `locator_pack` calls with `@extschema@`.
-- [x] run full extension regression (`make installcheck`) after all pending SQL/runtime fixes (pass on PG 18 local temp cluster).
+- [ ] run full extension regression (`make installcheck`) on a stable `contrib_regression` cluster (currently blocked by missing local socket path).
 - [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
 - [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.
 - [x] extend clustered table AM wrapper with additional lifecycle callbacks (`relation_copy_data`, `relation_copy_for_cluster`) to keep segment metadata coherent after physical rewrites.
