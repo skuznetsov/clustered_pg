@@ -74,6 +74,33 @@ SELECT segment_map_rebuild_from_index('clustered_pk_int8_rebuild_table_idx'::reg
 SELECT * FROM segment_map_stats('clustered_pk_int8_rebuild_table'::regclass::oid) ORDER BY major_key;
 DROP TABLE clustered_pk_int8_rebuild_table;
 
+CREATE TABLE clustered_pg_perf_smoke(locator bytea);
+INSERT INTO clustered_pg_perf_smoke(locator)
+SELECT segment_map_allocate_locator('clustered_pg_perf_smoke'::regclass::oid, g, 1, 100, 100)
+FROM generate_series(1,10000) g;
+SELECT count(*) AS perf_smoke_rows FROM clustered_pg_perf_smoke;
+SELECT count(*) AS perf_smoke_segment_count,
+       sum(row_count) AS perf_smoke_segment_rows,
+       max(major_key) AS perf_smoke_max_major
+FROM segment_map_stats('clustered_pg_perf_smoke'::regclass::oid);
+DROP TABLE clustered_pg_perf_smoke;
+
+CREATE TABLE clustered_pg_fillfactor_bounds(locator bytea);
+INSERT INTO clustered_pg_fillfactor_bounds(locator)
+SELECT segment_map_allocate_locator('clustered_pg_fillfactor_bounds'::regclass::oid, g, 1, 4, 100)
+FROM generate_series(1,18) g;
+SELECT * FROM segment_map_stats('clustered_pg_fillfactor_bounds'::regclass::oid) ORDER BY major_key;
+
+CREATE TABLE clustered_pg_fillfactor_floor(locator bytea);
+INSERT INTO clustered_pg_fillfactor_floor(locator)
+SELECT segment_map_allocate_locator('clustered_pg_fillfactor_floor'::regclass::oid, g, 1, 4, 1)
+FROM generate_series(1,6) g;
+SELECT count(*) AS fillfactor_floor_segment_count,
+       sum(row_count) AS fillfactor_floor_rows
+FROM segment_map_stats('clustered_pg_fillfactor_floor'::regclass::oid);
+DROP TABLE clustered_pg_fillfactor_floor;
+DROP TABLE clustered_pg_fillfactor_bounds;
+
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
 
 SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,

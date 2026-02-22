@@ -209,6 +209,54 @@ SELECT * FROM segment_map_stats('clustered_pk_int8_rebuild_table'::regclass::oid
 (2 rows)
 
 DROP TABLE clustered_pk_int8_rebuild_table;
+CREATE TABLE clustered_pg_perf_smoke(locator bytea);
+INSERT INTO clustered_pg_perf_smoke(locator)
+SELECT segment_map_allocate_locator('clustered_pg_perf_smoke'::regclass::oid, g, 1, 100, 100)
+FROM generate_series(1,10000) g;
+SELECT count(*) AS perf_smoke_rows FROM clustered_pg_perf_smoke;
+ perf_smoke_rows 
+-----------------
+           10000
+(1 row)
+
+SELECT count(*) AS perf_smoke_segment_count,
+       sum(row_count) AS perf_smoke_segment_rows,
+       max(major_key) AS perf_smoke_max_major
+FROM segment_map_stats('clustered_pg_perf_smoke'::regclass::oid);
+ perf_smoke_segment_count | perf_smoke_segment_rows | perf_smoke_max_major 
+--------------------------+-------------------------+----------------------
+                      100 |                   10000 |                   99
+(1 row)
+
+DROP TABLE clustered_pg_perf_smoke;
+CREATE TABLE clustered_pg_fillfactor_bounds(locator bytea);
+INSERT INTO clustered_pg_fillfactor_bounds(locator)
+SELECT segment_map_allocate_locator('clustered_pg_fillfactor_bounds'::regclass::oid, g, 1, 4, 100)
+FROM generate_series(1,18) g;
+SELECT * FROM segment_map_stats('clustered_pg_fillfactor_bounds'::regclass::oid) ORDER BY major_key;
+ major_key | minor_from | minor_to | row_count | split_generation 
+-----------+------------+----------+-----------+------------------
+         0 |          1 |        4 |         4 |                0
+         1 |          5 |        8 |         4 |                0
+         2 |          9 |       12 |         4 |                0
+         3 |         13 |       16 |         4 |                0
+         4 |         17 |       18 |         2 |                0
+(5 rows)
+
+CREATE TABLE clustered_pg_fillfactor_floor(locator bytea);
+INSERT INTO clustered_pg_fillfactor_floor(locator)
+SELECT segment_map_allocate_locator('clustered_pg_fillfactor_floor'::regclass::oid, g, 1, 4, 1)
+FROM generate_series(1,6) g;
+SELECT count(*) AS fillfactor_floor_segment_count,
+       sum(row_count) AS fillfactor_floor_rows
+FROM segment_map_stats('clustered_pg_fillfactor_floor'::regclass::oid);
+ fillfactor_floor_segment_count | fillfactor_floor_rows 
+--------------------------------+-----------------------
+                              6 |                     6
+(1 row)
+
+DROP TABLE clustered_pg_fillfactor_floor;
+DROP TABLE clustered_pg_fillfactor_bounds;
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
