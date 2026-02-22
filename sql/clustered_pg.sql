@@ -1,5 +1,19 @@
 CREATE EXTENSION clustered_pg;
 SELECT public.version();
+
+CREATE TABLE clustered_pg_tableam_smoke(i int) USING clustered_heap;
+INSERT INTO clustered_pg_tableam_smoke(i) VALUES (1), (3), (7), (9);
+SELECT am.amname AS tableam_name
+FROM pg_class c
+JOIN pg_am am ON c.relam = am.oid
+WHERE c.relname = 'clustered_pg_tableam_smoke';
+SELECT array_agg(i ORDER BY i) AS tableam_values FROM clustered_pg_tableam_smoke;
+UPDATE clustered_pg_tableam_smoke
+SET i = i + 1
+WHERE i = 3;
+SELECT count(*) AS tableam_rows_after_update FROM clustered_pg_tableam_smoke;
+DROP TABLE clustered_pg_tableam_smoke;
+
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
 SELECT locator_pack_int8(12345) = locator_pack(0,12345) as pack_int8_matches_pair;
 SELECT locator_major(locator_pack_int8(12345)) as major_part,

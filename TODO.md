@@ -88,3 +88,4 @@ Latest execution trace:
 - [x] add scale-focused AM smoke test (50k-row append) to guard split-policy growth behavior under larger volume.
 - [x] add descending-order and churn AM smoke test to validate allocator behavior under anti-pattern and delete/reinsert workload.
 - [x] optimize reverse-order allocator path: reuse head segment for descending backfill when it still has split capacity (improves segment count from row-per-segment to capacity-bounded behavior).
+- [x] add clustered_heap table AM bootstrap smoke test proving CREATE TABLE USING clustered_heap and key scan behavior on inherited heap semantics.
