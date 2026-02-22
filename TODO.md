@@ -67,6 +67,10 @@ Production hardening program (next):
 		- DoD: lock-key collision risk removed for OID-sized relation identities; writer-ordering for allocator and manual touch paths is aligned.
 	- Verification (next): add concurrent-maintenance regression (`pgbench` / `pgbench`-driver `INSERT` script) and run `make installcheck`.
 	- Adversary checks pending: duplicate locator collision under parallel writes and advisory lock starvation behavior.
+- [x] Added local concurrency smoke harness (`scripts/clustered_pg_concurrency_smoke.sh`) to run pgbench-based parallel insert pressure for allocator invariants.
+	- Verifies that `segment_map.sum(row_count)` matches table cardinality and no segment overflows its configured capacity under concurrent inserts.
+	- Skipped automatically when `psql`/`pgbench` are unavailable.
+	- Make target available: `make concurrency-smoke CONCURRENCY_SMOKE_DB=<your-db>`.
 - [ ] P0 (CAUTION): implement native clustered index scan primitives (locator -> heap TID index) instead of full table scan fallback.
 	- DoD: add path with low fan-out direct scan and regression for `SELECT ... WHERE id = ...` under large tables.
 	- Adversary checks: reorder-heavy inserts + duplicate inner merge join + mark/restore under backward scan.
