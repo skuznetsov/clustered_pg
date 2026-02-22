@@ -168,6 +168,9 @@ Current engineering status:
 	- caller no longer reads from SPI context memory after cleanup, which removes intermittent `pfree`/lifetime crashes.
 - [x] enable PostgreSQL `CLUSTER` support for the custom index AM by setting `.amclusterable = true`.
 - [x] remove dependent-order `ORDER BY` inside `segment_map_rebuild_from_index` rebuild loop to avoid ordering via the target index during concurrent reindex/maintenance.
+- [x] guard `clustered_pg_pkidx_ambuild()` maintenance for reindex paths:
+	- `CLUSTER/TRUNCATE/VACUUM FULL` no longer triggers `segment_map_rebuild_from_index(...)` while index is in reindex context.
+	- this prevents `cannot access index ... while it is being reindexed` regressions and preserves expected `segment_map` zero-state after physical rewrites.
 
 Known environment blockers:
 

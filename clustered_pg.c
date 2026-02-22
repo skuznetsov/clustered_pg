@@ -2428,6 +2428,7 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 	int			split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD;
 	int			target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR;
 	double		auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL;
+	bool		skip_rebuild_maintenance = false;
 
 	if (heapRelation == NULL || indexRelation == NULL)
 		ereport(ERROR,
@@ -2456,7 +2457,10 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 										&target_fillfactor,
 										&auto_repack_interval);
 
-	clustered_pg_pkidx_purge_segment_map(indexRelation);
+	skip_rebuild_maintenance = ReindexIsProcessingIndex(RelationGetRelid(indexRelation));
+
+	if (!skip_rebuild_maintenance)
+		clustered_pg_pkidx_purge_segment_map(indexRelation);
 
 	result = palloc0_object(IndexBuildResult);
 
@@ -2464,15 +2468,17 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 													indexRelation,
 													indexInfo,
 												(indexInfo == NULL || !indexInfo->ii_Concurrent),
-												false,
+													false,
 													clustered_pg_pkidx_build_callback,
 													(void *) &buildstate,
 													NULL);
 	result->index_tuples = (double) buildstate.index_tuples;
-	clustered_pg_pkidx_rebuild_segment_map(indexRelation,
-										  split_threshold,
-										  target_fillfactor,
-										  auto_repack_interval);
+
+	if (!skip_rebuild_maintenance)
+		clustered_pg_pkidx_rebuild_segment_map(indexRelation,
+											  split_threshold,
+											  target_fillfactor,
+											  auto_repack_interval);
 
 	return result;
 }
