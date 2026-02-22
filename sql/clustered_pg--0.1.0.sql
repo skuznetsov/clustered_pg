@@ -200,14 +200,17 @@ CREATE FUNCTION @extschema@.segment_map_touch(
 ) RETURNS bigint
 LANGUAGE sql
 AS $$
+	WITH locked AS (
+		SELECT pg_advisory_xact_lock(p_relation_oid::bigint)
+	)
 	INSERT INTO @extschema@.segment_map (
 		relation_oid, major_key, minor_from, minor_to,
 		split_threshold, target_fillfactor, auto_repack_interval, updated_at
 	)
-	VALUES (
+	SELECT
 		p_relation_oid, p_major_key, p_minor_from, p_minor_to,
 		p_split_threshold, p_target_fillfactor, p_auto_repack_interval, clock_timestamp()
-	)
+	FROM locked
 	ON CONFLICT (relation_oid, major_key)
 	DO UPDATE
 	SET minor_from = LEAST(@extschema@.segment_map.minor_from, EXCLUDED.minor_from),
@@ -269,7 +272,7 @@ BEGIN
 		RAISE EXCEPTION 'p_target_fillfactor must be between 1 and 100';
 	END IF;
 
-	PERFORM pg_advisory_xact_lock(hashint8(rel_oid::bigint));
+	PERFORM pg_advisory_xact_lock(rel_oid::bigint);
 
 	v_split_threshold := COALESCE(p_split_threshold, 128);
 	v_target_fillfactor := COALESCE(p_target_fillfactor, 85);
@@ -589,7 +592,7 @@ BEGIN
 		60.0
 	);
 
-	PERFORM pg_advisory_xact_lock(hashint8(v_relation_oid::bigint));
+	PERFORM pg_advisory_xact_lock(v_relation_oid::bigint);
 	EXECUTE format('LOCK TABLE %I.%I IN SHARE UPDATE EXCLUSIVE MODE', v_schema_name, v_relation_name);
 
 	DELETE FROM @extschema@.segment_map

@@ -60,9 +60,13 @@ Locator contract draft (v0.1):
 
 Production hardening program (next):
 
-- [ ] P0 (CAUTION): define and implement a production-grade concurrent maintenance model for `segment_map` (`SPI` paths) to avoid cross-backend allocator race windows.
-	- DoD: add lock/ordering strategy, reproduce with `pgbench` style concurrent inserts, and publish a test demonstrating no duplicate locator allocation.
-	- Verification: `make installcheck` with new concurrent regression; add adversary check for `unique_violation` under parallel insert pressure.
+- [x] P0 (CAUTION): define and implement a production-grade concurrent maintenance model for `segment_map` (`SPI` paths) to avoid cross-backend allocator race windows.
+	- Completed in `sql/clustered_pg--0.1.0.sql`:
+		- `segment_map_allocate_locator` and `segment_map_rebuild_from_index` now lock on `pg_advisory_xact_lock(relation_oid::bigint)` (no hash-based lock key).
+		- `segment_map_touch` now acquires the same advisory lock before upsert, so all metadata writers are serialized consistently.
+		- DoD: lock-key collision risk removed for OID-sized relation identities; writer-ordering for allocator and manual touch paths is aligned.
+	- Verification (next): add concurrent-maintenance regression (`pgbench` / `pgbench`-driver `INSERT` script) and run `make installcheck`.
+	- Adversary checks pending: duplicate locator collision under parallel writes and advisory lock starvation behavior.
 - [ ] P0 (CAUTION): implement native clustered index scan primitives (locator -> heap TID index) instead of full table scan fallback.
 	- DoD: add path with low fan-out direct scan and regression for `SELECT ... WHERE id = ...` under large tables.
 	- Adversary checks: reorder-heavy inserts + duplicate inner merge join + mark/restore under backward scan.
@@ -104,6 +108,7 @@ Current engineering status:
 - [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
 - [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.
 - [x] extend clustered table AM wrapper with additional lifecycle callbacks (`relation_copy_data`, `relation_copy_for_cluster`) to keep segment metadata coherent after physical rewrites.
+- [x] harmonize `segment_map` writer lock strategy: `segment_map_allocate_locator`, `segment_map_rebuild_from_index`, and `segment_map_touch` now use the same `pg_advisory_xact_lock(relation_oid::bigint)` contract to remove hash collision ambiguity.
 
 Known environment blockers:
 

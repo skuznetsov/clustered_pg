@@ -176,6 +176,20 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 
 	PG_TRY();
 	{
+		rc = SPI_execute_with_args(
+			"SELECT pg_advisory_xact_lock($1::bigint)",
+			1,
+			argtypes,
+			args,
+			NULL,
+			false,
+			0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map cleanup lock acquisition failed"),
+					 errdetail("SPI status code %d", rc)));
+
 		rc = SPI_execute_with_args(sql, 1, argtypes, args, NULL, false, 0);
 		if (rc != SPI_OK_DELETE)
 			ereport(ERROR,
