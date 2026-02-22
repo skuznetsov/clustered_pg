@@ -87,8 +87,12 @@ static Relation clustered_pg_pkidx_get_heap_relation(IndexScanDesc scan,
 static bool clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
 												   ClusteredPgPkidxScanState *state,
 												   ScanDirection direction);
+static void clustered_pg_pkidx_reset_mark(ClusteredPgPkidxScanState *state);
 static void clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 									ScanKey orderbys, int norderbys);
+static void clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
+									ScanKey orderbys, int norderbys,
+									bool preserve_mark);
 
 static const char *
 clustered_pg_qualified_extension_name(const char *name)
@@ -777,6 +781,18 @@ clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
 	return false;
 }
 
+static void
+clustered_pg_pkidx_reset_mark(ClusteredPgPkidxScanState *state)
+{
+	if (state == NULL)
+		return;
+
+	state->mark_valid = false;
+	state->mark_at_start = false;
+	state->restore_pending = false;
+	ItemPointerSetInvalid(&state->mark_tid);
+}
+
 static bool
 clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 {
@@ -800,8 +816,9 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("clustered_pk_index cannot resolve heap relation for index scan")));
 
-		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
-								  scan->orderByData, scan->numberOfOrderBys);
+		clustered_pg_pkidx_rescan_internal(scan, scan->keyData, scan->numberOfKeys,
+										  scan->orderByData, scan->numberOfOrderBys,
+										  true);
 	}
 	else if (state->restore_pending)
 	{
@@ -849,8 +866,9 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("clustered_pk_index cannot resolve heap relation for bitmap index scan")));
 
-		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
-								  scan->orderByData, scan->numberOfOrderBys);
+		clustered_pg_pkidx_rescan_internal(scan, scan->keyData, scan->numberOfKeys,
+										  scan->orderByData, scan->numberOfOrderBys,
+										  true);
 	}
 
 	while (table_scan_getnextslot(state->table_scan, ForwardScanDirection,
@@ -906,8 +924,9 @@ clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 	}
 	else
 	{
-		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
-								  scan->orderByData, scan->numberOfOrderBys);
+		clustered_pg_pkidx_rescan_internal(scan, scan->keyData, scan->numberOfKeys,
+										  scan->orderByData, scan->numberOfOrderBys,
+										  true);
 	}
 
 	scan->xs_recheck = false;
@@ -917,6 +936,14 @@ clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 static void
 clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 						ScanKey orderbys, int norderbys)
+{
+	clustered_pg_pkidx_rescan_internal(scan, keys, nkeys, orderbys, norderbys, false);
+}
+
+static void
+clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
+								  ScanKey orderbys, int norderbys,
+								  bool preserve_mark)
 {
 	ClusteredPgPkidxScanState *state;
 	int			i;
@@ -934,6 +961,9 @@ clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("clustered_pk_index scan state is not initialized")));
+
+	if (!preserve_mark)
+		clustered_pg_pkidx_reset_mark(state);
 
 	heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
 	if (heapRelation == NULL)

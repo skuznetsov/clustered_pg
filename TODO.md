@@ -20,6 +20,7 @@
 - [x] implement `ambeginscan/endscan/rescan/amgettuple/amgetbitmap` lifecycle with table scan state
 	- [x] add regression coverage for constrained index predicates through clustered index AM
 	- [x] implement scan mark/restore behavior with restart + saved TID replay on the heap fallback path
+	- [x] preserve mark/restore state through amrestrpos-initiated table scan bootstrap path
 
 Current local plan:
 
