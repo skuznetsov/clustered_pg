@@ -35,14 +35,14 @@ INSERT INTO clustered_pk_int8_build_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_build_table_idx
 	ON clustered_pk_int8_build_table USING clustered_pk_index (id)
-	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 SELECT * FROM segment_map_stats('clustered_pk_int8_build_table'::regclass::oid) ORDER BY major_key;
 DROP TABLE clustered_pk_int8_build_table;
 
 CREATE TABLE clustered_pk_int8_table_opts(id bigint);
 CREATE INDEX clustered_pk_int8_table_opts_idx
 	ON clustered_pk_int8_table_opts USING clustered_pk_index (id)
-	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 INSERT INTO clustered_pk_int8_table_opts(id)
 SELECT generate_series(1,18);
 SELECT * FROM segment_map_stats('clustered_pk_int8_table_opts'::regclass::oid) ORDER BY major_key;
@@ -53,7 +53,7 @@ INSERT INTO clustered_pk_int8_vacuum_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_vacuum_table_idx
 	ON clustered_pk_int8_vacuum_table USING clustered_pk_index (id)
-	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0) AS due_repack_before_vacuum;
 DELETE FROM clustered_pk_int8_vacuum_table WHERE id BETWEEN 1 AND 4;
@@ -67,7 +67,7 @@ INSERT INTO clustered_pk_int8_rebuild_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_rebuild_table_idx
 	ON clustered_pk_int8_rebuild_table USING clustered_pk_index (id)
-	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 DELETE FROM clustered_pk_int8_rebuild_table WHERE id BETWEEN 1 AND 4;
 SELECT segment_map_count_repack_due('clustered_pk_int8_rebuild_table'::regclass::oid, 3600.0) AS due_repack_before_manual_rebuild;
 SELECT segment_map_rebuild_from_index('clustered_pk_int8_rebuild_table_idx'::regclass, 1, 16, 75, 30.0) AS rebuilt_rows;

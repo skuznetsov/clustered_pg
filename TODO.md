@@ -58,7 +58,7 @@ Current engineering status:
 - [x] fixed compile-time regression in `clustered_pg_pkidx_vacuumcleanup` logging block (`ereport` parentheses).
 - [x] removed per-row segment-map maintenance work from `ambuild` by switching build callback to count-only and rebuilding segment map once post-scan (`segment_map_rebuild_from_index` path).
 - [x] verified extension C code builds successfully with `make` using local PostgreSQL 18.
-- [ ] run full extension regression (`make installcheck`) on this machine.
+- [ ] run full extension regression (`make installcheck`) after fixing SQL reloption literals.
 
 Known environment blockers:
 
