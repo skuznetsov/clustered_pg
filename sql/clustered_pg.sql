@@ -176,6 +176,36 @@ FROM (SELECT id FROM clustered_pg_am_filter_query WHERE id BETWEEN 10 AND 20) q;
 SELECT count(*) AS am_filter_count
 FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
 DROP TABLE clustered_pg_am_filter_query;
+
+SET enable_mergejoin = on;
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+CREATE TABLE clustered_pg_am_merge_fixture(id bigint);
+CREATE TABLE clustered_pg_am_merge_fixture_b(id bigint);
+CREATE INDEX clustered_pg_am_merge_fixture_a_idx
+	ON clustered_pg_am_merge_fixture USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+CREATE INDEX clustered_pg_am_merge_fixture_b_idx
+	ON clustered_pg_am_merge_fixture_b USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_merge_fixture(id)
+SELECT generate_series(1,20);
+INSERT INTO clustered_pg_am_merge_fixture_b(id)
+SELECT generate_series(10,30);
+SELECT count(*) AS am_merge_join_count
+FROM clustered_pg_am_merge_fixture l
+JOIN clustered_pg_am_merge_fixture_b r USING (id);
+SELECT count(*) AS am_merge_join_filter_count
+FROM clustered_pg_am_merge_fixture l
+JOIN clustered_pg_am_merge_fixture_b r ON l.id = r.id
+WHERE l.id BETWEEN 12 AND 16;
+DROP TABLE clustered_pg_am_merge_fixture;
+DROP TABLE clustered_pg_am_merge_fixture_b;
+RESET enable_hashjoin;
+RESET enable_nestloop;
+RESET enable_mergejoin;
 RESET enable_seqscan;
 RESET enable_bitmapscan;
 

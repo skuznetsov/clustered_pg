@@ -21,6 +21,7 @@
 #include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "storage/itemptr.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -66,6 +67,10 @@ typedef struct ClusteredPgPkidxScanState
 	TupleTableSlot *table_scan_slot;
 	int				key_count;
 	bool			owns_heap_relation;
+	bool			mark_valid;
+	bool			mark_at_start;
+	bool			restore_pending;
+	ItemPointerData	mark_tid;
 } ClusteredPgPkidxScanState;
 
 static SPIPlanPtr clustered_pg_pkidx_allocate_locator_plan = NULL;
@@ -79,6 +84,9 @@ static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 bool indexUnchanged, IndexInfo *indexInfo);
 static Relation clustered_pg_pkidx_get_heap_relation(IndexScanDesc scan,
 													ClusteredPgPkidxScanState *state);
+static bool clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
+												   ClusteredPgPkidxScanState *state,
+												   ScanDirection direction);
 static void clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 									ScanKey orderbys, int norderbys);
 
@@ -723,6 +731,53 @@ clustered_pg_pkidx_get_heap_relation(IndexScanDesc scan,
 }
 
 static bool
+clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
+										ClusteredPgPkidxScanState *state,
+										ScanDirection direction)
+{
+	if (scan == NULL || scan->opaque == NULL || state == NULL)
+		return false;
+
+	if (scan->table_scan == NULL)
+		return false;
+	if (state->table_scan_slot == NULL)
+		return false;
+
+	if (!state->mark_valid)
+		return false;
+
+	if (state->mark_at_start)
+	{
+		if (table_scan_getnextslot(state->table_scan, direction,
+								  state->table_scan_slot))
+		{
+			ItemPointerCopy(&state->table_scan_slot->tts_tid, &scan->xs_heaptid);
+			scan->xs_recheck = false;
+			return true;
+		}
+
+		return false;
+	}
+
+	if (!ItemPointerIsValid(&state->mark_tid))
+		return false;
+
+	while (table_scan_getnextslot(state->table_scan, direction,
+								 state->table_scan_slot))
+	{
+		if (ItemPointerEquals(&state->table_scan_slot->tts_tid,
+							  &state->mark_tid))
+		{
+			ItemPointerCopy(&state->table_scan_slot->tts_tid, &scan->xs_heaptid);
+			scan->xs_recheck = false;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool
 clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 {
 	ClusteredPgPkidxScanState *state;
@@ -747,6 +802,17 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 
 		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
 								  scan->orderByData, scan->numberOfOrderBys);
+	}
+	else if (state->restore_pending)
+	{
+		if (clustered_pg_pkidx_restore_marked_tuple(scan, state, direction))
+		{
+			state->restore_pending = false;
+			return true;
+		}
+
+		state->restore_pending = false;
+		return false;
 	}
 
 	if (table_scan_getnextslot(state->table_scan, direction, state->table_scan_slot))
@@ -800,13 +866,52 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 static void
 clustered_pg_pkidx_markpos(IndexScanDesc scan)
 {
-	(void) scan;
+	ClusteredPgPkidxScanState *state;
+
+	if (scan == NULL)
+		return;
+	state = (ClusteredPgPkidxScanState *) scan->opaque;
+	if (state == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index scan state is not initialized")));
+
+	state->mark_valid = true;
+	state->mark_at_start = !ItemPointerIsValid(&scan->xs_heaptid);
+	if (!state->mark_at_start)
+		ItemPointerCopy(&scan->xs_heaptid, &state->mark_tid);
 }
 
 static void
 clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 {
-	(void) scan;
+	ClusteredPgPkidxScanState *state;
+
+	if (scan == NULL || scan->indexRelation == NULL)
+		return;
+
+	state = (ClusteredPgPkidxScanState *) scan->opaque;
+	if (state == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index scan state is not initialized")));
+
+	if (!state->mark_valid)
+		return;
+
+	if (scan->table_scan != NULL)
+	{
+		table_rescan(scan->table_scan,
+					 state->key_count > 0 ? state->table_scan_keys : NULL);
+	}
+	else
+	{
+		clustered_pg_pkidx_rescan(scan, scan->keyData, scan->numberOfKeys,
+								  scan->orderByData, scan->numberOfOrderBys);
+	}
+
+	scan->xs_recheck = false;
+	state->restore_pending = true;
 }
 
 static void
@@ -896,13 +1001,26 @@ clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 	}
 
 	if (state->table_scan != NULL)
-		table_endscan(state->table_scan);
+		table_rescan(state->table_scan,
+					 state->key_count > 0 ? state->table_scan_keys : NULL);
+	else
+	{
+		if (state->table_scan_slot == NULL)
+			state->table_scan_slot = table_slot_create(heapRelation, NULL);
+		state->table_scan = table_beginscan(heapRelation, scan->xs_snapshot,
+										   state->key_count,
+										   state->key_count > 0 ? state->table_scan_keys : NULL);
+	}
+
 	if (state->table_scan_slot == NULL)
 		state->table_scan_slot = table_slot_create(heapRelation, NULL);
-	state->table_scan = table_beginscan(heapRelation, scan->xs_snapshot,
-									   state->key_count,
-									   state->key_count > 0 ? state->table_scan_keys : NULL);
+
+	if (state->table_scan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("clustered_pk_index failed to initialize table scan")));
 	scan->xs_recheck = false;
+	state->restore_pending = false;
 }
 
 static IndexScanDesc

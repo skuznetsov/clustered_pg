@@ -17,7 +17,7 @@ Experimental PostgreSQL extension scaffold for custom clustered storage experime
   - `aminsert` assigns ordered segment locators via `segment_map_allocate_locator(...)`.
 - INDEX AM insert and build callbacks are wired to the split-policy allocator.
 - INDEX AM scan callbacks now run through a table-scan fallback (`RelationGetIndexScan` + `table_beginscan`) so constrained index queries can execute through `clustered_pk_index` while retaining full heap fallback semantics.
-- `ammarkpos`/`amrestrpos` are intentionally no-op for this prototype, which is documented in SQL regression as a known limitation.
+- `ammarkpos` and `amrestrpos` are implemented on top of the heap-fallback scan path: mark stores the current tuple TID (or start-of-scan), and restore repositions via an internal table rescan to the saved point.
 - Locator helpers are exposed via SQL functions:
   - `locator_pack(major, minor) -> bytea`
   - `locator_pack_int8(bigint) -> bytea` (single PK-value mapping)
@@ -39,7 +39,7 @@ Experimental PostgreSQL extension scaffold for custom clustered storage experime
 
 ## Safety notes
 
-- The INDEX AM scan callbacks are functional (tuple fetch, bitmap, and rescan). mark/restore is intentionally unsupported behavior-wise and remains a documented no-op.
+- The INDEX AM scan callbacks are functional (tuple fetch, bitmap, and rescan) and `amrescan` now reuses the underlying heap scan descriptor through `table_rescan` when possible, reducing per-rescan overhead.
 - `ambuildempty` now clears stale segment-map rows for the target relation.
 - `amvacuumcleanup` evaluates due segments and runs `segment_map_rebuild_from_index(...)` when maintenance is needed, which rebuilds segment_map state from current table key order.
 - Added SQL helpers:

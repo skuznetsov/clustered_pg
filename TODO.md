@@ -17,9 +17,9 @@
 - [x] wire operator class and planner path for `clustered_locator` (`btree`-class)
 - [x] expose regclass-friendly segment locator APIs (`segment_map_allocate_locator_regclass`, `segment_map_next_locator`)
 - [x] enable functional index AM scan callbacks by translating index scan keys to heap scan
-	- [x] implement `ambeginscan/endscan/rescan/amgettuple/amgetbitmap` lifecycle with table scan state
+- [x] implement `ambeginscan/endscan/rescan/amgettuple/amgetbitmap` lifecycle with table scan state
 	- [x] add regression coverage for constrained index predicates through clustered index AM
-	- [x] document/query-guard mark/restore behavior
+	- [x] implement scan mark/restore behavior with restart + saved TID replay on the heap fallback path
 
 Current local plan:
 
