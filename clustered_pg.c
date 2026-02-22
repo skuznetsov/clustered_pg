@@ -63,6 +63,9 @@ typedef struct ClusteredLocator
 	uint64		minor_key;
 } ClusteredLocator;
 
+static bool			clustered_pg_clustered_heapam_initialized = false;
+static TableAmRoutine clustered_pg_clustered_heapam_routine;
+
 typedef struct ClusteredPgPkidxBuildState
 {
 	Relation	heapRelation;
@@ -103,6 +106,14 @@ static void clustered_pg_pkidx_rescan(IndexScanDesc scan, ScanKey keys, int nkey
 static void clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 									ScanKey orderbys, int norderbys,
 									bool preserve_mark);
+static void clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
+																	const RelFileLocator *rlocator,
+																	char persistence,
+																	TransactionId *freezeXid,
+																	MultiXactId *minmulti);
+static void clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel);
+static void clustered_pg_clustered_heap_clear_segment_map(Oid relationOid);
+static void clustered_pg_clustered_heap_init_tableam_routine(void);
 
 static const char *
 clustered_pg_qualified_extension_name(const char *name)
@@ -124,6 +135,105 @@ clustered_pg_qualified_extension_name(const char *name)
 	snprintf(result, sizeof(result), "%s.%s",
 			 quote_identifier(nsName), quote_identifier(name));
 	return result;
+}
+
+static void
+clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
+{
+	char		sql[256];
+	Datum		args[1];
+	Oid			argtypes[1];
+	int			rc;
+
+	if (!OidIsValid(relationOid))
+		return;
+
+	args[0] = ObjectIdGetDatum(relationOid);
+	argtypes[0] = OIDOID;
+
+	snprintf(sql, sizeof(sql),
+			 "DELETE FROM %s WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map"));
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed while cleaning clustered_pg segment map")));
+
+	PG_TRY();
+	{
+		rc = SPI_execute_with_args(sql, 1, argtypes, args, NULL, false, 0);
+		if (rc != SPI_OK_DELETE)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map cleanup failed"),
+					 errdetail("SPI status code %d", rc)));
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+}
+
+static void
+clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
+														const RelFileLocator *rlocator,
+														char persistence,
+														TransactionId *freezeXid,
+														MultiXactId *minmulti)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	if (heap == NULL || heap->relation_set_new_filelocator == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method is unavailable")));
+
+	heap->relation_set_new_filelocator(rel, rlocator, persistence, freezeXid, minmulti);
+
+	clustered_pg_clustered_heap_clear_segment_map(RelationGetRelid(rel));
+}
+
+static void
+clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	if (heap == NULL || heap->relation_nontransactional_truncate == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method is unavailable")));
+
+	heap->relation_nontransactional_truncate(rel);
+	clustered_pg_clustered_heap_clear_segment_map(RelationGetRelid(rel));
+}
+
+static void
+clustered_pg_clustered_heap_init_tableam_routine(void)
+{
+	const TableAmRoutine *heap;
+
+	if (clustered_pg_clustered_heapam_initialized)
+		return;
+
+	heap = GetHeapamTableAmRoutine();
+	if (heap == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method is unavailable")));
+
+	clustered_pg_clustered_heapam_routine = *heap;
+	clustered_pg_clustered_heapam_routine.type = T_TableAmRoutine;
+	clustered_pg_clustered_heapam_routine.relation_set_new_filelocator =
+		clustered_pg_clustered_heap_relation_set_new_filelocator;
+	clustered_pg_clustered_heapam_routine.relation_nontransactional_truncate =
+		clustered_pg_clustered_heap_relation_nontransactional_truncate;
+	clustered_pg_clustered_heapam_initialized = true;
 }
 
 static SPIPlanPtr
@@ -1311,14 +1421,14 @@ clustered_pg_version(PG_FUNCTION_ARGS)
 /*
  * Table AM handler: bootstrap phase delegates to heapam implementation.
  *
- * TODO (later): replace with custom clustered table AM implementation once
- * ordered split policy, MVCC-aware locator remap, and maintenance worker are
- * added.
+ * Current behavior keeps heap semantics, but exposes a dedicated clustered table
+ * AM entry point so future locator-aware hooks can be layered in safely.
  */
 Datum
 clustered_pg_tableam_handler(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_POINTER(GetHeapamTableAmRoutine());
+	clustered_pg_clustered_heap_init_tableam_routine();
+	PG_RETURN_POINTER(&clustered_pg_clustered_heapam_routine);
 }
 
 /*

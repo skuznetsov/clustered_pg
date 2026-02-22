@@ -4,6 +4,7 @@
 - [x] add C entry points for extension identity and AM handlers
 - [x] fix extension script install-time schema binding (use @extschema@)
 - [x] define TABLE AM handler binding path (heap delegate)
+- [x] convert TABLE AM handler to explicit clustered heap routine wrapper with maintenance cleanup hooks (truncate/rewrite path)
 - [x] implement index AM handler skeleton with safe no-op callbacks
 - [x] define clustered locator helper API (`locator_pack`, `locator_major`, `locator_minor`, `locator_to_hex`)
 - [x] define clustered locator format and key-to-location mapping contract
@@ -26,7 +27,7 @@
 
 Current local plan:
 
-- Step 1: keep TABLE AM delegating to heap for bootstrap stability.
+- Step 1: keep TABLE AM delegating to heap for bootstrap stability, but return a dedicated wrapper routine (now implemented) to allow non-block/offset policy extensions.
 - Step 2: keep INDEX AM installable and non-usable by planner via large cost, while unsupported index operations fail fast.
 - Step 3: introduce a PK-oriented locator encoding contract and expose helper SQL functions for deterministic key-location materialization.
 - Step 4: segment-map persistence + ordered split policy now has SQL allocator helper; next cycle is callback wiring.
@@ -69,6 +70,7 @@ Current engineering status:
 - [x] hardened SQL allocator/rebuild path against `search_path` resolution by schema-qualifying `locator_pack` calls with `@extschema@`.
 - [x] run full extension regression (`make installcheck`) after all pending SQL/runtime fixes (pass on PG 18 local temp cluster).
 - [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
+- [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.
 
 Known environment blockers:
 

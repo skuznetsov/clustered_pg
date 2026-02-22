@@ -2,13 +2,13 @@ CREATE EXTENSION clustered_pg;
 SELECT public.version();
 
 CREATE TABLE clustered_pg_tableam_smoke(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_tableam_smoke_idx ON clustered_pg_tableam_smoke (i);
 INSERT INTO clustered_pg_tableam_smoke(i) VALUES (1), (3), (7), (9);
 SELECT am.amname AS tableam_name
 FROM pg_class c
 JOIN pg_am am ON c.relam = am.oid
 WHERE c.relname = 'clustered_pg_tableam_smoke';
 SELECT array_agg(i ORDER BY i) AS tableam_values FROM clustered_pg_tableam_smoke;
-CREATE INDEX clustered_pg_tableam_smoke_idx ON clustered_pg_tableam_smoke (i);
 SELECT count(*) AS tableam_filter_count
 FROM clustered_pg_tableam_smoke
 WHERE i IN (3,9);
@@ -23,6 +23,19 @@ SELECT count(*) AS tableam_rows_after_delete FROM clustered_pg_tableam_smoke;
 TRUNCATE clustered_pg_tableam_smoke;
 SELECT count(*) AS tableam_rows_after_truncate FROM clustered_pg_tableam_smoke;
 DROP TABLE clustered_pg_tableam_smoke;
+
+CREATE TABLE clustered_pg_tableam_segmented(i bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_tableam_segmented_idx
+	ON clustered_pg_tableam_segmented USING clustered_pk_index (i)
+	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_tableam_segmented(i)
+SELECT generate_series(1,12);
+SELECT count(*) AS tableam_segment_rows_before_truncate
+FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
+TRUNCATE clustered_pg_tableam_segmented;
+SELECT count(*) AS tableam_segment_rows_after_truncate
+FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
+DROP TABLE clustered_pg_tableam_segmented;
 
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
 SELECT locator_pack_int8(12345) = locator_pack(0,12345) as pack_int8_matches_pair;
