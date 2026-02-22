@@ -145,6 +145,8 @@ static bool clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state
 static void clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
 												int64 minor_key, ItemPointer heap_tid);
 static void clustered_pg_pkidx_gc_segment_tids(Relation indexRelation);
+static bool clustered_pg_pkidx_ensure_table_scan(IndexScanDesc scan,
+												ClusteredPgPkidxScanState *state);
 static SPIPlanPtr clustered_pg_pkidx_segment_rowcount_plan_init(void);
 static int64 clustered_pg_pkidx_estimate_segment_rows(Oid relationOid);
 static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
@@ -740,10 +742,7 @@ clustered_pg_pkidx_segment_rowcount_plan_init(void)
 
 	clustered_pg_pkidx_segment_rowcount_plan = SPI_prepare(query, 1, argtypes);
 	if (clustered_pg_pkidx_segment_rowcount_plan == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map row-count"),
-				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+		return NULL;
 	SPI_keepplan(clustered_pg_pkidx_segment_rowcount_plan);
 
 	return clustered_pg_pkidx_segment_rowcount_plan;
@@ -1351,6 +1350,9 @@ clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state,
 	if (state == NULL || tid == NULL)
 		return false;
 
+	if (state->segment_tids == NULL)
+		return false;
+
 	if (!state->use_segment_tids)
 		return false;
 	if (state->segment_tid_count <= 0)
@@ -1429,6 +1431,39 @@ clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
 	PG_END_TRY();
 
 	SPI_finish();
+}
+
+static bool
+clustered_pg_pkidx_ensure_table_scan(IndexScanDesc scan, ClusteredPgPkidxScanState *state)
+{
+	Relation	heapRelation;
+
+	if (scan == NULL || state == NULL)
+		return false;
+
+	heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
+	if (heapRelation == NULL)
+		return false;
+
+	if (scan->xs_snapshot == InvalidSnapshot)
+		scan->xs_snapshot = GetTransactionSnapshot();
+
+	if (state->table_scan_slot == NULL)
+		state->table_scan_slot = table_slot_create(heapRelation, NULL);
+
+	if (state->table_scan == NULL)
+		state->table_scan = table_beginscan(heapRelation,
+										   scan->xs_snapshot,
+										   state->key_count,
+										   state->key_count > 0 ? state->table_scan_keys : NULL);
+	else
+		table_rescan(state->table_scan,
+					 state->key_count > 0 ? state->table_scan_keys : NULL);
+
+	if (state->table_scan == NULL)
+		return false;
+
+	return true;
 }
 
 static IndexBulkDeleteResult *
@@ -1757,6 +1792,8 @@ clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
 	{
 		if (!state->mark_valid || state->segment_tid_count <= 0)
 			return false;
+		if (state->segment_tids == NULL)
+			return false;
 
 		if (state->mark_at_start)
 		{
@@ -1879,6 +1916,14 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 	if (state->use_segment_tids)
 		return clustered_pg_pkidx_next_segment_tid(state, direction, &scan->xs_heaptid);
 
+	if (state->table_scan == NULL || state->table_scan_slot == NULL)
+	{
+		if (!clustered_pg_pkidx_ensure_table_scan(scan, state))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index failed to initialize table scan for index tuple lookup")));
+	}
+
 	if (table_scan_getnextslot(state->table_scan, direction, state->table_scan_slot))
 	{
 		ItemPointerCopy(&state->table_scan_slot->tts_tid, &scan->xs_heaptid);
@@ -1915,14 +1960,27 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 	if (state->use_segment_tids)
 	{
-		int			i;
-
-		for (i = 0; i < state->segment_tid_count; i++)
+		if (state->segment_tids == NULL || state->segment_tid_count <= 0)
+			state->use_segment_tids = false;
+		else
 		{
-			tbm_add_tuples(tbm, &state->segment_tids[i], 1, false);
-			rows++;
+			int			i;
+
+			for (i = 0; i < state->segment_tid_count; i++)
+			{
+				tbm_add_tuples(tbm, &state->segment_tids[i], 1, false);
+				rows++;
+			}
+			return rows;
 		}
-		return rows;
+	}
+
+	if (state->table_scan == NULL || state->table_scan_slot == NULL)
+	{
+		if (!clustered_pg_pkidx_ensure_table_scan(scan, state))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index failed to initialize table scan for bitmap index lookup")));
 	}
 
 	while (table_scan_getnextslot(state->table_scan, ForwardScanDirection,
@@ -1973,6 +2031,17 @@ clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 
 	if (state->use_segment_tids)
 	{
+		state->use_segment_tids = false;
+		state->segment_tid_count = 0;
+		state->segment_tid_pos = 0;
+		state->segment_tid_direction = ForwardScanDirection;
+
+		if (!clustered_pg_pkidx_ensure_table_scan(scan, state))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("clustered_pk_index restore_marked_tuple requires table scan"),
+					 errhint("segment_map_tids restore path is unavailable.")));
+
 		scan->xs_recheck = false;
 		state->restore_pending = true;
 		return;
@@ -2012,6 +2081,7 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 	Relation	heapRelation;
 	int64		target_minor_key = 0;
 	bool		use_segment_lookup = false;
+	ScanKeyData *source_keys = NULL;
 
 	(void) orderbys;
 	(void) norderbys;
@@ -2031,15 +2101,26 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 
 	scan->numberOfKeys = nkeys;
 	scan->numberOfOrderBys = norderbys;
-	if (scan->keyData == NULL && scan->numberOfKeys > 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("clustered_pk_index key storage is not initialized")));
+	if (scan->numberOfKeys > 0 && keys != NULL)
+	{
+		if (preserve_mark &&
+			keys == scan->keyData &&
+			state->table_scan_keys != NULL &&
+			state->key_count == scan->numberOfKeys)
+			source_keys = state->table_scan_keys;
+		else
+			source_keys = keys;
+	}
+	else if (state->table_scan_keys != NULL && state->key_count == scan->numberOfKeys)
+	{
+		source_keys = state->table_scan_keys;
+	}
 
 	if (scan->xs_snapshot == InvalidSnapshot)
 		scan->xs_snapshot = GetTransactionSnapshot();
 
-	if (scan->numberOfKeys > 0 && keys != NULL && keys != scan->keyData)
+	if (scan->numberOfKeys > 0 && keys != NULL &&
+		scan->keyData != NULL && keys != scan->keyData)
 		memcpy(scan->keyData, keys, sizeof(ScanKeyData) * scan->numberOfKeys);
 
 	if (scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
@@ -2066,26 +2147,38 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 			state->table_scan_keys = (ScanKeyData *) palloc0_array(ScanKeyData, state->key_count);
 	}
 
-	for (i = 0; i < scan->numberOfKeys; i++)
+	if (scan->numberOfKeys > 0 && source_keys == NULL)
 	{
-		AttrNumber	index_attno = scan->keyData[i].sk_attno;
-		AttrNumber	heap_attno;
-
-		if (index_attno < 1 || index_attno > key_attr_count)
+		/* No stable scan key source available: fallback to heap-only scan */
+		if (state->table_scan_keys != NULL)
+			pfree(state->table_scan_keys);
+		state->table_scan_keys = NULL;
+		state->key_count = 0;
+		scan->numberOfKeys = 0;
+	}
+	else if (scan->numberOfKeys > 0)
+	{
+		for (i = 0; i < scan->numberOfKeys; i++)
 		{
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("clustered_pk_index uses explicit index keys only")));
+			AttrNumber	index_attno = source_keys[i].sk_attno;
+			AttrNumber	heap_attno;
+
+			if (index_attno < 1 || index_attno > key_attr_count)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("clustered_pk_index uses explicit index keys only")));
+			}
+
+			heap_attno = scan->indexRelation->rd_index->indkey.values[index_attno - 1];
+			if (heap_attno <= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("clustered_pk_index does not support expression keys")));
+
+			state->table_scan_keys[i] = source_keys[i];
+			state->table_scan_keys[i].sk_attno = heap_attno;
 		}
-
-		heap_attno = scan->indexRelation->rd_index->indkey.values[index_attno - 1];
-		if (heap_attno <= 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("clustered_pk_index does not support expression keys")));
-
-		state->table_scan_keys[i] = scan->keyData[i];
-		state->table_scan_keys[i].sk_attno = heap_attno;
 	}
 
 	state->scan_ready = false;
@@ -2714,6 +2807,8 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 	{
 		relation_rows = Max(index->rel->tuples, 0.0);
 		segment_rows = clustered_pg_pkidx_estimate_segment_rows(index->rel->relid);
+		if (segment_rows < 0)
+			segment_rows = -1;
 		if (segment_rows > 0 && segment_rows > relation_rows)
 			relation_rows = (double) segment_rows;
 	}
