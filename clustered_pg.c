@@ -54,6 +54,10 @@ typedef struct ClusteredPgPkidxBuildState
 	int64		index_tuples;
 } ClusteredPgPkidxBuildState;
 
+static SPIPlanPtr clustered_pg_pkidx_allocate_locator_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_count_repack_due_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_rebuild_segment_map_plan = NULL;
+
 static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 bool *isnull, ItemPointer heap_tid,
 									 Relation heapRelation,
@@ -80,6 +84,94 @@ clustered_pg_qualified_extension_name(const char *name)
 	snprintf(result, sizeof(result), "%s.%s",
 			 quote_identifier(nsName), quote_identifier(name));
 	return result;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_allocate_locator_plan_init(void)
+{
+	Oid			argtypes[6];
+	char		query[256];
+
+	if (clustered_pg_pkidx_allocate_locator_plan != NULL)
+		return clustered_pg_pkidx_allocate_locator_plan;
+
+	argtypes[0] = OIDOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT8OID;
+	argtypes[3] = INT4OID;
+	argtypes[4] = INT4OID;
+	argtypes[5] = FLOAT8OID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::oid, $2::bigint, $3::bigint, $4::integer, $5::integer, $6::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_allocate_locator"));
+
+	clustered_pg_pkidx_allocate_locator_plan = SPI_prepare(query, 6, argtypes);
+	if (clustered_pg_pkidx_allocate_locator_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_allocate_locator"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_allocate_locator_plan);
+
+	return clustered_pg_pkidx_allocate_locator_plan;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_count_repack_due_plan_init(void)
+{
+	Oid			argtypes[2];
+	char		query[256];
+
+	if (clustered_pg_pkidx_count_repack_due_plan != NULL)
+		return clustered_pg_pkidx_count_repack_due_plan;
+
+	argtypes[0] = OIDOID;
+	argtypes[1] = FLOAT8OID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::oid, $2::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_count_repack_due"));
+
+	clustered_pg_pkidx_count_repack_due_plan = SPI_prepare(query, 2, argtypes);
+	if (clustered_pg_pkidx_count_repack_due_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_count_repack_due"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_count_repack_due_plan);
+
+	return clustered_pg_pkidx_count_repack_due_plan;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_rebuild_segment_map_plan_init(void)
+{
+	Oid			argtypes[5];
+	char		query[256];
+
+	if (clustered_pg_pkidx_rebuild_segment_map_plan != NULL)
+		return clustered_pg_pkidx_rebuild_segment_map_plan;
+
+	argtypes[0] = REGCLASSOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT4OID;
+	argtypes[3] = INT4OID;
+	argtypes[4] = FLOAT8OID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::regclass, $2::bigint, $3::integer, $4::integer, $5::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_rebuild_from_index"));
+
+	clustered_pg_pkidx_rebuild_segment_map_plan = SPI_prepare(query, 5, argtypes);
+	if (clustered_pg_pkidx_rebuild_segment_map_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_rebuild_from_index"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_rebuild_segment_map_plan);
+
+	return clustered_pg_pkidx_rebuild_segment_map_plan;
 }
 
 static void
@@ -134,75 +226,6 @@ clustered_pg_pkidx_execute_segment_map_maintenance(Relation indexRelation,
 	SPI_finish();
 }
 
-static int64
-clustered_pg_pkidx_execute_segment_map_scalar(Relation indexRelation,
-											 const char *sql, Datum *args,
-											 Oid *argtypes, int nargs)
-{
-	int			rc;
-	int64		result = 0;
-	bool		isnull = false;
-
-	if (indexRelation == NULL || sql == NULL || sql[0] == '\0')
-		return 0;
-
-	if (args == NULL && nargs != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid SQL callback arguments for segment map helper"),
-				 errdetail("Args were NULL but nargs was set to %d.", nargs)));
-	if (nargs < 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid SQL argument count for segment map helper")));
-
-	rc = SPI_connect();
-	if (rc != SPI_OK_CONNECT)
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("SPI_connect() failed in clustered_pk_index maintenance callback")));
-
-	PG_TRY();
-	{
-		rc = SPI_execute_with_args(sql,
-								   nargs,
-								   argtypes,
-								   args,
-								   NULL,
-								   false,
-								   0);
-		if (rc != SPI_OK_SELECT)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("segment map helper query failed"),
-					 errdetail("SPI_execute_with_args returned %d", rc)));
-
-		if (SPI_processed != 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("segment map helper query returned unexpected row count"),
-					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
-
-		result = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-											SPI_tuptable->tupdesc,
-											1,
-											&isnull));
-		if (isnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("segment map helper query returned NULL")));
-	}
-	PG_CATCH();
-	{
-		SPI_finish();
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	SPI_finish();
-	return result;
-}
-
 static void
 clustered_pg_pkidx_purge_segment_map(Relation indexRelation)
 {
@@ -236,9 +259,11 @@ clustered_pg_pkidx_count_repack_due(Relation indexRelation,
 								   double auto_repack_interval)
 {
 	Datum		args[2];
-	Oid			argtypes[2];
-	char		sql[256];
 	Oid			relationOid = InvalidOid;
+	bool		isnull = false;
+	SPIPlanPtr	plan;
+	int			rc;
+	int64		result = 0;
 
 	if (indexRelation == NULL || indexRelation->rd_index == NULL)
 		return 0;
@@ -249,18 +274,51 @@ clustered_pg_pkidx_count_repack_due(Relation indexRelation,
 
 	args[0] = ObjectIdGetDatum(relationOid);
 	args[1] = Float8GetDatum(auto_repack_interval);
-	argtypes[0] = OIDOID;
-	argtypes[1] = FLOAT8OID;
 
-	snprintf(sql, sizeof(sql),
-			 "SELECT %s($1::oid, $2::double precision)",
-			 clustered_pg_qualified_extension_name("segment_map_count_repack_due"));
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed in clustered_pk_index maintenance callback")));
+	plan = clustered_pg_pkidx_count_repack_due_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_count_repack_due")));
 
-	return clustered_pg_pkidx_execute_segment_map_scalar(indexRelation,
-													   sql,
-													   args,
-													   argtypes,
-													   2);
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query failed"),
+					 errdetail("SPI_execute_plan returned %d", rc)));
+
+		if (SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query returned unexpected row count"),
+					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
+
+		result = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											SPI_tuptable->tupdesc,
+											1,
+											&isnull));
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query returned NULL")));
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+	return result;
 }
 
 static void
@@ -270,9 +328,10 @@ clustered_pg_pkidx_rebuild_segment_map(Relation indexRelation,
 									  double auto_repack_interval)
 {
 	Datum		args[5];
-	Oid			argtypes[5];
-	char		sql[256];
+	SPIPlanPtr	plan;
+	int			rc;
 	int64		repacked_rows;
+	bool		isnull = false;
 
 	if (indexRelation == NULL || indexRelation->rd_index == NULL)
 		return;
@@ -282,22 +341,51 @@ clustered_pg_pkidx_rebuild_segment_map(Relation indexRelation,
 	args[2] = Int32GetDatum(split_threshold);
 	args[3] = Int32GetDatum(target_fillfactor);
 	args[4] = Float8GetDatum(auto_repack_interval);
-	argtypes[0] = REGCLASSOID;
-	argtypes[1] = INT8OID;
-	argtypes[2] = INT4OID;
-	argtypes[3] = INT4OID;
-	argtypes[4] = FLOAT8OID;
 
-	snprintf(sql, sizeof(sql),
-			 "SELECT %s($1::regclass, $2::bigint, $3::integer, $4::integer, $5::double precision)",
-			 clustered_pg_qualified_extension_name("segment_map_rebuild_from_index"));
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed in clustered_pk_index maintenance callback")));
+	plan = clustered_pg_pkidx_rebuild_segment_map_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_rebuild_from_index")));
 
-	repacked_rows = clustered_pg_pkidx_execute_segment_map_scalar(
-					indexRelation,
-					sql,
-					args,
-					argtypes,
-					5);
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query failed"),
+					 errdetail("SPI_execute_plan returned %d", rc)));
+
+		if (SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query returned unexpected row count"),
+					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
+
+		repacked_rows = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+												   SPI_tuptable->tupdesc,
+												   1,
+												   &isnull));
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment map helper query returned NULL")));
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+
 	(void) repacked_rows;
 }
 
@@ -391,18 +479,14 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 {
 	int			rc;
 	Datum		args[6];
-	Oid			argtypes[6];
-	char		query[256];
-
-	snprintf(query, sizeof(query),
-			 "SELECT %s($1::oid, $2::bigint, $3::bigint, $4::integer, $5::integer, $6::double precision)",
-			 clustered_pg_qualified_extension_name("segment_map_allocate_locator"));
+	SPIPlanPtr	plan;
 
 	if (heapRelation == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("clustered_pk_index requires a valid heap relation for insertion"),
 				 errhint("Create and populate indexes on a real heap table relation.")));
+
 	elog(LOG, "clustered_pk_index: allocator start, relid=%u minor=%" PRIi64,
 		 RelationGetRelid(heapRelation), minor_key);
 
@@ -412,33 +496,26 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 	args[3] = Int32GetDatum(split_threshold);
 	args[4] = Int32GetDatum(target_fillfactor);
 	args[5] = Float8GetDatum(auto_repack_interval);
-	argtypes[0] = OIDOID;
-	argtypes[1] = INT8OID;
-	argtypes[2] = INT8OID;
-	argtypes[3] = INT4OID;
-	argtypes[4] = INT4OID;
-	argtypes[5] = FLOAT8OID;
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
 				 errmsg("SPI_connect() failed in clustered_pk_index insert path")));
+	plan = clustered_pg_pkidx_allocate_locator_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_allocate_locator")));
 
 	PG_TRY();
 	{
-		rc = SPI_execute_with_args(query,
-						  6,
-						  argtypes,
-						  args,
-						  NULL,
-						  false,
-						  0);
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
 		if (rc != SPI_OK_SELECT)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("segment_map_allocate_locator call failed"),
-					 errdetail("SPI_execute_with_args returned %d", rc)));
+					 errdetail("SPI_execute_plan returned %d", rc)));
 		if (SPI_processed != 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),

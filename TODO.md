@@ -60,7 +60,17 @@ Current engineering status:
 - [x] verified extension C code builds successfully with `make` using local PostgreSQL 18.
 - [x] hardened SQL allocator/rebuild path against `search_path` resolution by schema-qualifying `locator_pack` calls with `@extschema@`.
 - [x] run full extension regression (`make installcheck`) after all pending SQL/runtime fixes (pass on PG 18 local temp cluster).
+- [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
 
 Known environment blockers:
 
 - no active blockers.
+
+Latest execution trace:
+
+- [x] `segment_map_allocate_locator` now computes split thresholds using explicit local columns:
+	- `v_container_*` and `v_last_*` scalar fields are read directly from `SELECT ... INTO`.
+	- `v_head_major_key`/`v_head_minor_from` are read explicitly for gap-prefix handling.
+	- `v_prev_container_major_key` is used for backfill-gap major selection.
+- [x] this removes runtime failures like `record "... " has no field "target_fillfactor"` caused by mixed record projections.
+- [ ] validate with a fresh `make installcheck` run against a clean `contrib_regression` cluster (blocked by missing local postmaster socket on current host).

@@ -236,15 +236,30 @@ DECLARE
 	v_target_fillfactor int;
 	v_auto_repack_interval double precision;
 	v_effective_split_threshold int;
-	v_last record;
-	v_head record;
-	v_container record;
+	v_effective_row_capacity int;
+	v_last_major_key bigint;
+	v_last_minor_to bigint;
+	v_last_row_count bigint;
+	v_last_split_threshold int;
+	v_last_target_fillfactor int;
+	v_head_major_key bigint;
+	v_head_minor_from bigint;
+	v_container_major_key bigint;
+	v_container_minor_from bigint;
+	v_container_minor_to bigint;
+	v_container_row_count bigint;
+	v_container_split_threshold int;
+	v_container_target_fillfactor int;
+	v_prev_container_major_key bigint;
 BEGIN
 	IF p_minor IS NULL THEN
 		RAISE EXCEPTION 'p_minor cannot be NULL';
 	END IF;
 	IF p_row_count_delta IS NULL OR p_row_count_delta < 1 THEN
 		RAISE EXCEPTION 'p_row_count_delta must be > 0';
+	END IF;
+	IF p_target_fillfactor IS NOT NULL AND (p_target_fillfactor < 1 OR p_target_fillfactor > 100) THEN
+		RAISE EXCEPTION 'p_target_fillfactor must be between 1 and 100';
 	END IF;
 
 	PERFORM pg_advisory_xact_lock(hashint8(rel_oid::bigint));
@@ -254,8 +269,9 @@ BEGIN
 	v_auto_repack_interval := COALESCE(p_auto_repack_interval, 60.0);
 
 	-- 1) Reuse an existing containing segment when it still has capacity.
-	SELECT major_key, minor_from, minor_to, row_count, split_threshold
-	INTO v_container
+	SELECT major_key, minor_from, minor_to, row_count, split_threshold, target_fillfactor
+	INTO v_container_major_key, v_container_minor_from, v_container_minor_to,
+		v_container_row_count, v_container_split_threshold, v_container_target_fillfactor
 	FROM @extschema@.segment_map
 	WHERE relation_oid = rel_oid
 		AND p_minor BETWEEN minor_from AND minor_to
@@ -263,8 +279,12 @@ BEGIN
 	LIMIT 1;
 
 	IF FOUND THEN
-		v_effective_split_threshold := COALESCE(p_split_threshold, v_container.split_threshold);
-		IF v_container.row_count + p_row_count_delta <= v_effective_split_threshold THEN
+		v_effective_split_threshold := COALESCE(p_split_threshold, v_container_split_threshold);
+		v_effective_row_capacity := GREATEST(
+			1,
+			(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_container_target_fillfactor, v_target_fillfactor))) / 100
+		);
+		IF v_container_row_count + p_row_count_delta <= v_effective_row_capacity THEN
 			UPDATE @extschema@.segment_map
 			SET minor_from = LEAST(minor_from, p_minor),
 				minor_to = GREATEST(minor_to, p_minor),
@@ -273,14 +293,14 @@ BEGIN
 				target_fillfactor = COALESCE(p_target_fillfactor, target_fillfactor),
 				auto_repack_interval = COALESCE(p_auto_repack_interval, auto_repack_interval),
 				updated_at = clock_timestamp()
-			WHERE relation_oid = rel_oid AND major_key = v_container.major_key;
-			RETURN @extschema@.locator_pack(v_container.major_key, p_minor);
+			WHERE relation_oid = rel_oid AND major_key = v_container_major_key;
+			RETURN @extschema@.locator_pack(v_container_major_key, p_minor);
 		END IF;
 	END IF;
 
 	-- 2) Choose major using boundaries and split policy for append cases.
-	SELECT major_key, minor_to, row_count, split_threshold
-	INTO v_last
+	SELECT major_key, minor_to, row_count, split_threshold, target_fillfactor
+	INTO v_last_major_key, v_last_minor_to, v_last_row_count, v_last_split_threshold, v_last_target_fillfactor
 	FROM @extschema@.segment_map
 	WHERE relation_oid = rel_oid
 	ORDER BY major_key DESC
@@ -290,24 +310,29 @@ BEGIN
 		v_major := 0;
 	ELSE
 		SELECT major_key, minor_from
-		INTO v_head
+		INTO v_head_major_key, v_head_minor_from
 		FROM @extschema@.segment_map
 		WHERE relation_oid = rel_oid
 		ORDER BY major_key ASC
 		LIMIT 1;
 
-		IF p_minor < v_head.minor_from THEN
-			v_major := v_head.major_key - 1;
-		ELSIF p_minor > v_last.minor_to THEN
-			IF v_last.row_count + p_row_count_delta > COALESCE(v_last.split_threshold, v_split_threshold) THEN
-				v_major := v_last.major_key + 1;
+		IF p_minor < v_head_minor_from THEN
+			v_major := v_head_major_key - 1;
+		ELSIF p_minor > v_last_minor_to THEN
+			v_effective_split_threshold := COALESCE(v_last_split_threshold, v_split_threshold);
+			v_effective_row_capacity := GREATEST(
+				1,
+				(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_last_target_fillfactor, v_target_fillfactor))) / 100
+			);
+			IF v_last_row_count + p_row_count_delta > v_effective_row_capacity THEN
+				v_major := v_last_major_key + 1;
 			ELSE
-				v_major := v_last.major_key;
+				v_major := v_last_major_key;
 			END IF;
 		ELSE
 			-- backfill or gap: allocate segment after the last preceding segment.
 			SELECT major_key
-			INTO v_container
+			INTO v_prev_container_major_key
 			FROM @extschema@.segment_map
 			WHERE relation_oid = rel_oid
 				AND minor_to < p_minor
@@ -315,9 +340,9 @@ BEGIN
 			LIMIT 1;
 
 			IF FOUND THEN
-				v_major := v_container.major_key + 1;
+				v_major := v_prev_container_major_key + 1;
 			ELSE
-				v_major := v_head.major_key - 1;
+				v_major := v_last_major_key - 1;
 			END IF;
 		END IF;
 	END IF;
@@ -420,8 +445,8 @@ BEGIN
 	IF p_split_threshold IS NOT NULL AND p_split_threshold < 1 THEN
 		RAISE EXCEPTION 'p_split_threshold must be greater than 0';
 	END IF;
-	IF p_target_fillfactor IS NOT NULL AND p_target_fillfactor < 1 THEN
-		RAISE EXCEPTION 'p_target_fillfactor must be greater than 0';
+	IF p_target_fillfactor IS NOT NULL AND (p_target_fillfactor < 1 OR p_target_fillfactor > 100) THEN
+		RAISE EXCEPTION 'p_target_fillfactor must be between 1 and 100';
 	END IF;
 	IF p_auto_repack_interval IS NOT NULL AND p_auto_repack_interval < 0.0 THEN
 		RAISE EXCEPTION 'p_auto_repack_interval must be greater than or equal to 0';
@@ -572,7 +597,10 @@ AS $$
 	SELECT count(*)::bigint
 	FROM @extschema@.segment_map
 	WHERE relation_oid = p_relation_oid
-		AND row_count >= split_threshold
+		AND row_count >= GREATEST(
+			1,
+			(split_threshold * LEAST(100, GREATEST(1, target_fillfactor))) / 100
+		)
 		AND (
 			last_split_at IS NULL
 			OR last_split_at <= clock_timestamp() - (
