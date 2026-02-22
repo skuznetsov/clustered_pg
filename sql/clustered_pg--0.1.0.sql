@@ -189,6 +189,59 @@ CREATE INDEX segment_map_relation_idx
 CREATE INDEX segment_map_relation_range_idx
 	ON @extschema@.segment_map (relation_oid, minor_from, minor_to);
 
+CREATE TABLE @extschema@.segment_map_tids
+(
+	relation_oid oid NOT NULL,
+	major_key bigint NOT NULL,
+	minor_key bigint NOT NULL,
+	tuple_tid tid NOT NULL,
+	updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+	CONSTRAINT segment_map_tids_pk PRIMARY KEY (relation_oid, tuple_tid)
+);
+
+CREATE INDEX segment_map_tids_relation_minor_idx
+	ON @extschema@.segment_map_tids (relation_oid, minor_key, major_key, tuple_tid);
+
+CREATE INDEX segment_map_tids_relation_major_idx
+	ON @extschema@.segment_map_tids (relation_oid, major_key, tuple_tid);
+
+CREATE FUNCTION @extschema@.segment_map_tids_gc(
+	p_relation regclass
+) RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	v_relation_oid oid := p_relation::oid;
+	v_schema_name name;
+	v_relation_name name;
+	v_sql text;
+	v_deleted_count bigint;
+BEGIN
+	SELECT n.nspname, c.relname
+	INTO v_schema_name, v_relation_name
+	FROM pg_class c
+	JOIN pg_namespace n ON n.oid = c.relnamespace
+	WHERE c.oid = v_relation_oid;
+
+	IF v_schema_name IS NULL OR v_relation_name IS NULL THEN
+		RETURN 0;
+	END IF;
+
+	v_sql := format(
+		'DELETE FROM @extschema@.segment_map_tids s '
+		'WHERE s.relation_oid = $1::oid '
+		'AND NOT EXISTS ('
+		'	SELECT 1 FROM %I.%I h WHERE h.ctid = s.tuple_tid)',
+		v_schema_name,
+		v_relation_name
+	);
+
+	EXECUTE v_sql USING p_relation::oid;
+	GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+	RETURN v_deleted_count;
+END;
+$$;
+
 CREATE FUNCTION @extschema@.segment_map_touch(
 	p_relation_oid oid,
 	p_major_key bigint,
@@ -497,6 +550,9 @@ DECLARE
 	v_effective_target_fillfactor int;
 	v_effective_auto_repack_interval double precision;
 	v_row record;
+	v_locator bytea;
+	v_locator_major bigint;
+	v_locator_minor bigint;
 	v_sql text;
 BEGIN
 	IF p_row_count_delta IS NULL OR p_row_count_delta < 1 THEN
@@ -597,9 +653,11 @@ BEGIN
 
 	DELETE FROM @extschema@.segment_map
 	WHERE relation_oid = v_relation_oid;
+	DELETE FROM @extschema@.segment_map_tids
+	WHERE relation_oid = v_relation_oid;
 
 	v_sql := format(
-		'SELECT %I::bigint AS major_value FROM %I.%I ORDER BY %I::bigint',
+		'SELECT ctid, %I::bigint AS major_value FROM %I.%I ORDER BY %I::bigint',
 		v_key_attr,
 		v_schema_name,
 		v_relation_name,
@@ -608,7 +666,7 @@ BEGIN
 	FOR v_row IN EXECUTE v_sql
 	LOOP
 		v_key_oid := v_row.major_value;
-		PERFORM @extschema@.segment_map_allocate_locator(
+		v_locator := @extschema@.segment_map_allocate_locator(
 			v_relation_oid,
 			v_key_oid,
 			p_row_count_delta,
@@ -616,6 +674,19 @@ BEGIN
 			v_effective_target_fillfactor,
 			v_effective_auto_repack_interval
 		);
+		v_locator_major := @extschema@.locator_major(v_locator);
+		v_locator_minor := @extschema@.locator_minor(v_locator);
+		INSERT INTO @extschema@.segment_map_tids (
+			relation_oid, major_key, minor_key, tuple_tid, updated_at
+		)
+		VALUES (
+			v_relation_oid, v_locator_major, v_locator_minor, v_row.ctid, clock_timestamp()
+		)
+		ON CONFLICT (relation_oid, tuple_tid)
+		DO UPDATE
+		SET major_key = EXCLUDED.major_key,
+			minor_key = EXCLUDED.minor_key,
+			updated_at = clock_timestamp();
 		v_repacked_count := v_repacked_count + 1;
 	END LOOP;
 

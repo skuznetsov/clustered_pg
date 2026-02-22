@@ -131,8 +131,18 @@ CREATE INDEX clustered_pk_int8_vacuum_table_idx
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0::double precision) AS due_repack_before_vacuum;
 DELETE FROM clustered_pk_int8_vacuum_table WHERE id BETWEEN 1 AND 4;
+SELECT count(*) AS table_segment_map_tids_count_before_cleanup
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
+SELECT segment_map_tids_gc('clustered_pk_int8_vacuum_table'::regclass) AS segment_map_tids_gc_before_vacuum;
+SELECT count(*) AS table_segment_map_tids_count_after_gc
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
 VACUUM clustered_pk_int8_vacuum_table;
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
+SELECT count(*) AS table_segment_map_tids_count_after_vacuum
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0::double precision) AS due_repack_after_vacuum;
 DROP TABLE clustered_pk_int8_vacuum_table;
 

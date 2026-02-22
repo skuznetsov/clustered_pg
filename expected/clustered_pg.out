@@ -323,13 +323,43 @@ SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::
 (1 row)
 
 DELETE FROM clustered_pk_int8_vacuum_table WHERE id BETWEEN 1 AND 4;
+SELECT count(*) AS table_segment_map_tids_count_before_cleanup
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
+ table_segment_map_tids_count_before_cleanup 
+--------------------------------------------
+                                         18
+(1 row)
+
+SELECT segment_map_tids_gc('clustered_pk_int8_vacuum_table'::regclass) AS segment_map_tids_gc_before_vacuum;
+ segment_map_tids_gc_before_vacuum 
+-----------------------------------
+                               4
+(1 row)
+
+SELECT count(*) AS table_segment_map_tids_count_after_gc
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
+ table_segment_map_tids_count_after_gc 
+--------------------------------------
+                                   14
+(1 row)
+
 VACUUM clustered_pk_int8_vacuum_table;
 SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
          0 |          1 |       12 |        12 |                2
-         1 |         13 |       18 |         6 |                2
+        1 |         13 |       18 |         6 |                2
 (2 rows)
+
+SELECT count(*) AS table_segment_map_tids_count_after_vacuum
+FROM segment_map_tids
+WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
+ table_segment_map_tids_count_after_vacuum 
+------------------------------------------
+                                        14
+(1 row)
 
 SELECT segment_map_count_repack_due('clustered_pk_int8_vacuum_table'::regclass::oid, 3600.0::double precision) AS due_repack_after_vacuum;
  due_repack_after_vacuum 

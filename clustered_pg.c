@@ -6,6 +6,7 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/reloptions.h"
+#include "access/skey.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
 #include "commands/vacuum.h"
@@ -80,6 +81,12 @@ typedef struct ClusteredPgPkidxScanState
 	ScanKeyData		*table_scan_keys;
 	TupleTableSlot *table_scan_slot;
 	int				key_count;
+	bool			use_segment_tids;
+	ItemPointerData	*segment_tids;
+	int				segment_tid_count;
+	int				segment_tid_pos;
+	ScanDirection	segment_tid_direction;
+	bool			scan_ready;
 	bool			owns_heap_relation;
 	bool			mark_valid;
 	bool			mark_at_start;
@@ -90,7 +97,24 @@ typedef struct ClusteredPgPkidxScanState
 static SPIPlanPtr clustered_pg_pkidx_allocate_locator_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_count_repack_due_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_rebuild_segment_map_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_segment_tid_touch_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_segment_tid_lookup_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_segment_tid_gc_plan = NULL;
 
+static bytea *clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
+												int split_threshold, int target_fillfactor,
+												double auto_repack_interval);
+static void clustered_pg_pack_u64_be(uint8_t *dst, uint64 src);
+static uint64 clustered_pg_unpack_u64_be(const uint8_t *src);
+static void clustered_pg_pkidx_collect_segment_tids(Relation indexRelation, int64 minor_key,
+												  ClusteredPgPkidxScanState *state,
+												  ScanDirection direction);
+static void clustered_pg_pkidx_free_segment_tids(ClusteredPgPkidxScanState *state);
+static bool clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state,
+											  ScanDirection direction, ItemPointer tid);
+static void clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
+												int64 minor_key, ItemPointer heap_tid);
+static void clustered_pg_pkidx_gc_segment_tids(Relation indexRelation);
 static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 bool *isnull, ItemPointer heap_tid,
 									 Relation heapRelation,
@@ -154,6 +178,7 @@ static void
 clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 {
 	char		sql[256];
+	char		sql_tids[256];
 	Datum		args[1];
 	Oid			argtypes[1];
 	int			rc;
@@ -167,6 +192,9 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 	snprintf(sql, sizeof(sql),
 			 "DELETE FROM %s WHERE relation_oid = $1::oid",
 			 clustered_pg_qualified_extension_name("segment_map"));
+	snprintf(sql_tids, sizeof(sql_tids),
+			 "DELETE FROM %s WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map_tids"));
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
@@ -195,6 +223,13 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("clustered_pg segment_map cleanup failed"),
+					 errdetail("SPI status code %d", rc)));
+
+		rc = SPI_execute_with_args(sql_tids, 1, argtypes, args, NULL, false, 0);
+		if (rc != SPI_OK_DELETE)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map_tids cleanup failed"),
 					 errdetail("SPI status code %d", rc)));
 	}
 	PG_CATCH();
@@ -402,6 +437,95 @@ clustered_pg_pkidx_rebuild_segment_map_plan_init(void)
 	return clustered_pg_pkidx_rebuild_segment_map_plan;
 }
 
+static SPIPlanPtr
+clustered_pg_pkidx_segment_tid_touch_plan_init(void)
+{
+	Oid			argtypes[4];
+	char		query[256];
+
+	if (clustered_pg_pkidx_segment_tid_touch_plan != NULL)
+		return clustered_pg_pkidx_segment_tid_touch_plan;
+
+	argtypes[0] = OIDOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT8OID;
+	argtypes[3] = TIDOID;
+
+	snprintf(query, sizeof(query),
+			 "INSERT INTO %s (relation_oid, major_key, minor_key, tuple_tid, updated_at) "
+			 "VALUES ($1::oid, $2::bigint, $3::bigint, $4::tid, clock_timestamp()) "
+			 "ON CONFLICT (relation_oid, tuple_tid) "
+			 "DO UPDATE SET major_key = EXCLUDED.major_key, "
+			 "minor_key = EXCLUDED.minor_key, "
+			 "updated_at = clock_timestamp()",
+			 clustered_pg_qualified_extension_name("segment_map_tids"));
+
+	clustered_pg_pkidx_segment_tid_touch_plan = SPI_prepare(query, 4, argtypes);
+	if (clustered_pg_pkidx_segment_tid_touch_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_tids touch"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_segment_tid_touch_plan);
+
+	return clustered_pg_pkidx_segment_tid_touch_plan;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_segment_tid_lookup_plan_init(void)
+{
+	Oid			argtypes[2];
+	char		query[256];
+
+	if (clustered_pg_pkidx_segment_tid_lookup_plan != NULL)
+		return clustered_pg_pkidx_segment_tid_lookup_plan;
+
+	argtypes[0] = OIDOID;
+	argtypes[1] = INT8OID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT tuple_tid, major_key FROM %s "
+			 "WHERE relation_oid = $1::oid AND minor_key = $2::bigint "
+			 "ORDER BY major_key, tuple_tid",
+			 clustered_pg_qualified_extension_name("segment_map_tids"));
+
+	clustered_pg_pkidx_segment_tid_lookup_plan = SPI_prepare(query, 2, argtypes);
+	if (clustered_pg_pkidx_segment_tid_lookup_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_tids lookup"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_segment_tid_lookup_plan);
+
+	return clustered_pg_pkidx_segment_tid_lookup_plan;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_segment_tid_gc_plan_init(void)
+{
+	Oid			argtypes[1];
+	char		query[256];
+
+	if (clustered_pg_pkidx_segment_tid_gc_plan != NULL)
+		return clustered_pg_pkidx_segment_tid_gc_plan;
+
+	argtypes[0] = OIDOID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::regclass)",
+			 clustered_pg_qualified_extension_name("segment_map_tids_gc"));
+
+	clustered_pg_pkidx_segment_tid_gc_plan = SPI_prepare(query, 1, argtypes);
+	if (clustered_pg_pkidx_segment_tid_gc_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_tids gc"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_segment_tid_gc_plan);
+
+	return clustered_pg_pkidx_segment_tid_gc_plan;
+}
+
 static void
 clustered_pg_pkidx_execute_segment_map_maintenance(Relation indexRelation,
 												  const char *sql)
@@ -473,12 +597,17 @@ static void
 clustered_pg_pkidx_purge_segment_map(Relation indexRelation)
 {
 	char		sql[256];
+	char		sql_tids[256];
 
 	snprintf(sql, sizeof(sql),
 			 "DELETE FROM %s WHERE relation_oid = $1::oid",
 			 clustered_pg_qualified_extension_name("segment_map"));
+	snprintf(sql_tids, sizeof(sql_tids),
+			 "DELETE FROM %s WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map_tids"));
 
 	clustered_pg_pkidx_execute_segment_map_maintenance(indexRelation, sql);
+	clustered_pg_pkidx_execute_segment_map_maintenance(indexRelation, sql_tids);
 }
 
 static void
@@ -495,6 +624,74 @@ clustered_pg_pkidx_touch_repack(Relation indexRelation)
 			 clustered_pg_qualified_extension_name("segment_map"));
 
 	clustered_pg_pkidx_execute_segment_map_maintenance(indexRelation, sql);
+}
+
+static void
+clustered_pg_pkidx_gc_segment_tids(Relation indexRelation)
+{
+	Datum		args[1];
+	Oid			relationOid = InvalidOid;
+	Oid			argtypes[1];
+	SPIPlanPtr	plan;
+	bool		isnull = false;
+	int			rc;
+	int64		deleted_tids = 0;
+
+	if (indexRelation == NULL || indexRelation->rd_index == NULL)
+		return;
+
+	relationOid = indexRelation->rd_index->indrelid;
+	if (!OidIsValid(relationOid))
+		return;
+
+	args[0] = ObjectIdGetDatum(relationOid);
+	argtypes[0] = OIDOID;
+
+	plan = clustered_pg_pkidx_segment_tid_gc_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_tids gc")));
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed while running segment_map_tids gc")));
+
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment_map_tids gc failed"),
+					 errdetail("SPI_execute_plan returned %d", rc)));
+
+		if (SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment_map_tids gc returned unexpected row count"),
+					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
+
+		deleted_tids = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+												 SPI_tuptable->tupdesc,
+												 1,
+												 &isnull));
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment_map_tids gc returned NULL")));
+		(void) deleted_tids;
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
 }
 
 static int64
@@ -686,6 +883,270 @@ clustered_pg_pkidx_extract_minor_key(Relation indexRelation, Datum *values,
 											  minor_key);
 }
 
+static bool
+clustered_pg_pkidx_extract_minor_key_from_scan_key(Relation indexRelation, ScanKey key,
+												  int64 *minor_key)
+{
+	TupleDesc	tupdesc;
+	AttrNumber	index_attno;
+	Oid			atttype;
+	Datum		value;
+
+	if (indexRelation == NULL || key == NULL || minor_key == NULL)
+		return false;
+	if (key->sk_flags & SK_ISNULL)
+		return false;
+	if (key->sk_flags & (SK_SEARCHARRAY | SK_SEARCHNULL | SK_SEARCHNOTNULL |
+						SK_ROW_HEADER | SK_ROW_MEMBER | SK_ROW_END))
+		return false;
+
+	if (key->sk_strategy != BTEqualStrategyNumber)
+		return false;
+
+	tupdesc = RelationGetDescr(indexRelation);
+	if (tupdesc == NULL)
+		return false;
+
+	index_attno = key->sk_attno;
+	if (index_attno < 1 || index_attno > tupdesc->natts)
+		return false;
+
+	atttype = TupleDescAttr(tupdesc, index_attno - 1)->atttypid;
+
+	switch (atttype)
+	{
+		case INT2OID:
+			value = key->sk_argument;
+			*minor_key = (int64) DatumGetInt16(value);
+			return true;
+		case INT4OID:
+			value = key->sk_argument;
+			*minor_key = (int64) DatumGetInt32(value);
+			return true;
+		case INT8OID:
+			value = key->sk_argument;
+			*minor_key = DatumGetInt64(value);
+			return true;
+		default:
+			return false;
+	}
+}
+
+static void
+clustered_pg_pkidx_lookup_locator_values(bytea *locator, int64 *major_key, int64 *minor_key)
+{
+	const uint8 *payload;
+
+	if (locator == NULL)
+		return;
+	if (major_key == NULL || minor_key == NULL)
+		return;
+
+	payload = (const uint8 *) VARDATA(locator);
+	*major_key = (int64) clustered_pg_unpack_u64_be(payload);
+	*minor_key = (int64) clustered_pg_unpack_u64_be(payload + 8);
+}
+
+static void
+clustered_pg_pkidx_free_segment_tids(ClusteredPgPkidxScanState *state)
+{
+	if (state == NULL)
+		return;
+
+	if (state->segment_tids != NULL)
+	{
+		pfree(state->segment_tids);
+		state->segment_tids = NULL;
+	}
+
+	state->segment_tid_count = 0;
+	state->segment_tid_pos = 0;
+	state->use_segment_tids = false;
+}
+
+static void
+clustered_pg_pkidx_collect_segment_tids(Relation indexRelation, int64 minor_key,
+									   ClusteredPgPkidxScanState *state,
+									   ScanDirection direction)
+{
+	Oid			relationOid = InvalidOid;
+	Datum		args[2];
+	SPIPlanPtr	plan;
+	int			rc;
+	bool		isnull;
+	int			i;
+
+	if (state == NULL)
+		return;
+
+	clustered_pg_pkidx_free_segment_tids(state);
+
+	if (indexRelation == NULL || indexRelation->rd_index == NULL)
+		return;
+
+	relationOid = indexRelation->rd_index->indrelid;
+	if (!OidIsValid(relationOid))
+		return;
+
+	args[0] = ObjectIdGetDatum(relationOid);
+	args[1] = Int64GetDatum(minor_key);
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed in clustered_pk_index scan helper")));
+
+	plan = clustered_pg_pkidx_segment_tid_lookup_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_tids lookup")));
+
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment_map_tids lookup failed"),
+					 errdetail("SPI_execute_plan returned %d", rc)));
+
+		if (SPI_processed > 0)
+		{
+			int			tid_count = (int) SPI_processed;
+
+			state->segment_tids = (ItemPointerData *) palloc0_array(ItemPointerData,
+																  tid_count);
+			for (i = 0; i < tid_count; i++)
+			{
+				Datum		tidDatum;
+				ItemPointerData *sourceTid;
+
+				tidDatum = SPI_getbinval(SPI_tuptable->vals[i],
+										 SPI_tuptable->tupdesc,
+										 1,
+										 &isnull);
+				if (isnull)
+					continue;
+
+				sourceTid = (ItemPointerData *) DatumGetPointer(tidDatum);
+				if (sourceTid == NULL)
+					continue;
+
+				ItemPointerCopy(sourceTid,
+							   &state->segment_tids[state->segment_tid_count]);
+				state->segment_tid_count++;
+			}
+
+			if (state->segment_tid_count == 0)
+			{
+				pfree(state->segment_tids);
+				state->segment_tids = NULL;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+
+	state->segment_tid_direction = direction;
+	state->segment_tid_pos = (direction == ForwardScanDirection) ? 0 : state->segment_tid_count - 1;
+	state->use_segment_tids = (state->segment_tid_count > 0);
+}
+
+static bool
+clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state,
+								   ScanDirection direction, ItemPointer tid)
+{
+	if (state == NULL || tid == NULL)
+		return false;
+
+	if (!state->use_segment_tids)
+		return false;
+	if (state->segment_tid_count <= 0)
+		return false;
+
+	if (state->segment_tid_direction != direction)
+	{
+		state->segment_tid_direction = direction;
+		state->segment_tid_pos = (direction == ForwardScanDirection) ?
+			0 : state->segment_tid_count - 1;
+	}
+
+	if (direction == ForwardScanDirection)
+	{
+		if (state->segment_tid_pos >= state->segment_tid_count)
+			return false;
+		ItemPointerCopy(&state->segment_tids[state->segment_tid_pos], tid);
+		state->segment_tid_pos++;
+		return true;
+	}
+
+	if (state->segment_tid_pos < 0)
+		return false;
+	ItemPointerCopy(&state->segment_tids[state->segment_tid_pos], tid);
+	state->segment_tid_pos--;
+	return true;
+}
+
+static void
+clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
+									  int64 minor_key, ItemPointer heap_tid)
+{
+	Datum		args[4];
+	SPIPlanPtr	plan;
+	Oid			relationOid = InvalidOid;
+	int			rc;
+
+	if (heapRelation == NULL || !OidIsValid(RelationGetRelid(heapRelation)) || heap_tid == NULL)
+		return;
+	if (ItemPointerIsValid(heap_tid) == false)
+		return;
+
+	relationOid = RelationGetRelid(heapRelation);
+
+	args[0] = ObjectIdGetDatum(relationOid);
+	args[1] = Int64GetDatum(major_key);
+	args[2] = Int64GetDatum(minor_key);
+	args[3] = PointerGetDatum(heap_tid);
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("SPI_connect() failed while updating segment_map_tids")));
+
+	plan = clustered_pg_pkidx_segment_tid_touch_plan_init();
+	if (plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Unable to access SPI plan for segment_map_tids touch")));
+
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_INSERT && rc != SPI_OK_UPDATE)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("segment_map_tids touch failed"),
+					 errdetail("SPI_execute_plan returned %d", rc)));
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+}
+
 static IndexBulkDeleteResult *
 clustered_pg_pkidx_init_bulkdelete_stats(IndexVacuumInfo *info,
 										IndexBulkDeleteResult *stats)
@@ -705,7 +1166,7 @@ clustered_pg_pkidx_init_bulkdelete_stats(IndexVacuumInfo *info,
 	return result;
 }
 
-static void
+static bytea *
 clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 								   int split_threshold, int target_fillfactor,
 								   double auto_repack_interval)
@@ -713,6 +1174,9 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 	int			rc;
 	Datum		args[6];
 	SPIPlanPtr	plan;
+	bool		isnull = false;
+	Datum		locatorDatum;
+	bytea	   *locator = NULL;
 
 	if (heapRelation == NULL)
 		ereport(ERROR,
@@ -751,6 +1215,20 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("segment_map_allocate_locator returned unexpected row count"),
 					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
+
+		locatorDatum = SPI_getbinval(SPI_tuptable->vals[0],
+									SPI_tuptable->tupdesc,
+									1,
+									&isnull);
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("segment_map_allocate_locator returned NULL")));
+		locator = DatumGetByteaP(locatorDatum);
+		if (locator == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("clustered_pg locator allocation failed")));
 	}
 	PG_CATCH();
 	{
@@ -760,6 +1238,7 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 	PG_END_TRY();
 
 	SPI_finish();
+	return locator;
 }
 
 static void
@@ -977,8 +1456,48 @@ clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
 										ClusteredPgPkidxScanState *state,
 										ScanDirection direction)
 {
+	int			i;
+
 	if (scan == NULL || scan->opaque == NULL || state == NULL)
 		return false;
+
+	if (state->use_segment_tids)
+	{
+		if (!state->mark_valid || state->segment_tid_count <= 0)
+			return false;
+
+		if (state->mark_at_start)
+		{
+			state->segment_tid_pos = (direction == ForwardScanDirection) ? 0 : state->segment_tid_count - 1;
+			state->segment_tid_direction = direction;
+			if (clustered_pg_pkidx_next_segment_tid(state, direction, &scan->xs_heaptid))
+			{
+				scan->xs_recheck = false;
+				return true;
+			}
+			return false;
+		}
+
+		if (!ItemPointerIsValid(&state->mark_tid))
+			return false;
+
+		for (i = 0; i < state->segment_tid_count; i++)
+		{
+			if (ItemPointerEquals(&state->segment_tids[i], &state->mark_tid))
+			{
+				ItemPointerCopy(&state->segment_tids[i], &scan->xs_heaptid);
+				state->segment_tid_direction = direction;
+				if (direction == ForwardScanDirection)
+					state->segment_tid_pos = i + 1;
+				else
+					state->segment_tid_pos = i - 1;
+				scan->xs_recheck = false;
+				return true;
+			}
+		}
+
+		return false;
+	}
 
 	if (state->table_scan == NULL)
 		return false;
@@ -1035,7 +1554,6 @@ static bool
 clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 {
 	ClusteredPgPkidxScanState *state;
-	Relation	heapRelation;
 
 	if (scan == NULL || scan->indexRelation == NULL)
 		return false;
@@ -1046,14 +1564,8 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("clustered_pk_index scan state is not initialized")));
 
-	if (state->table_scan == NULL)
+	if (!state->scan_ready)
 	{
-		heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
-		if (heapRelation == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("clustered_pk_index cannot resolve heap relation for index scan")));
-
 		clustered_pg_pkidx_rescan_internal(scan, scan->keyData, scan->numberOfKeys,
 										  scan->orderByData, scan->numberOfOrderBys,
 										  true);
@@ -1070,6 +1582,9 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 		return false;
 	}
 
+	if (state->use_segment_tids)
+		return clustered_pg_pkidx_next_segment_tid(state, direction, &scan->xs_heaptid);
+
 	if (table_scan_getnextslot(state->table_scan, direction, state->table_scan_slot))
 	{
 		ItemPointerCopy(&state->table_scan_slot->tts_tid, &scan->xs_heaptid);
@@ -1085,7 +1600,6 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 {
 	ClusteredPgPkidxScanState *state;
 	int64		rows = 0;
-	Relation	heapRelation;
 
 	if (scan == NULL || scan->indexRelation == NULL || tbm == NULL)
 		return 0;
@@ -1096,17 +1610,23 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("clustered_pk_index scan state is not initialized")));
 
-	if (state->table_scan == NULL)
+	if (!state->scan_ready)
 	{
-		heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
-		if (heapRelation == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("clustered_pk_index cannot resolve heap relation for bitmap index scan")));
-
 		clustered_pg_pkidx_rescan_internal(scan, scan->keyData, scan->numberOfKeys,
 										  scan->orderByData, scan->numberOfOrderBys,
 										  true);
+	}
+
+	if (state->use_segment_tids)
+	{
+		int			i;
+
+		for (i = 0; i < state->segment_tid_count; i++)
+		{
+			tbm_add_tuples(tbm, &state->segment_tids[i], 1, false);
+			rows++;
+		}
+		return rows;
 	}
 
 	while (table_scan_getnextslot(state->table_scan, ForwardScanDirection,
@@ -1155,6 +1675,13 @@ clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 	if (!state->mark_valid)
 		return;
 
+	if (state->use_segment_tids)
+	{
+		scan->xs_recheck = false;
+		state->restore_pending = true;
+		return;
+	}
+
 	if (state->table_scan != NULL)
 	{
 		table_rescan(state->table_scan,
@@ -1187,6 +1714,8 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 	int			i;
 	int16		key_attr_count;
 	Relation	heapRelation;
+	int64		target_minor_key = 0;
+	bool		use_segment_lookup = false;
 
 	(void) orderbys;
 	(void) norderbys;
@@ -1202,12 +1731,6 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 
 	if (!preserve_mark)
 		clustered_pg_pkidx_reset_mark(state);
-
-	heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
-	if (heapRelation == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("clustered_pk_index requires a valid heap relation")));
 
 	scan->numberOfKeys = nkeys;
 	scan->numberOfOrderBys = norderbys;
@@ -1268,10 +1791,38 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 		state->table_scan_keys[i].sk_attno = heap_attno;
 	}
 
-	if (state->table_scan != NULL)
-		table_rescan(state->table_scan,
-					 state->key_count > 0 ? state->table_scan_keys : NULL);
-	else
+	state->scan_ready = false;
+	state->segment_tid_direction = ForwardScanDirection;
+	state->segment_tid_pos = 0;
+	state->segment_tid_count = 0;
+	clustered_pg_pkidx_free_segment_tids(state);
+
+	use_segment_lookup = (scan->numberOfKeys == 1 &&
+						 state->table_scan_keys != NULL &&
+						 clustered_pg_pkidx_extract_minor_key_from_scan_key(scan->indexRelation,
+																		  &state->table_scan_keys[0],
+																		  &target_minor_key));
+	if (use_segment_lookup)
+	{
+		clustered_pg_pkidx_collect_segment_tids(scan->indexRelation,
+											   target_minor_key,
+											   state,
+											   ForwardScanDirection);
+		if (state->use_segment_tids)
+		{
+			state->scan_ready = true;
+			state->restore_pending = false;
+			return;
+		}
+	}
+
+	heapRelation = clustered_pg_pkidx_get_heap_relation(scan, state);
+	if (heapRelation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_pk_index requires a valid heap relation")));
+
+	if (state->table_scan == NULL)
 	{
 		if (state->table_scan_slot == NULL)
 			state->table_scan_slot = table_slot_create(heapRelation, NULL);
@@ -1279,6 +1830,9 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 										   state->key_count,
 										   state->key_count > 0 ? state->table_scan_keys : NULL);
 	}
+	else
+		table_rescan(state->table_scan,
+					 state->key_count > 0 ? state->table_scan_keys : NULL);
 
 	if (state->table_scan_slot == NULL)
 		state->table_scan_slot = table_slot_create(heapRelation, NULL);
@@ -1289,6 +1843,7 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 				 errmsg("clustered_pk_index failed to initialize table scan")));
 	scan->xs_recheck = false;
 	state->restore_pending = false;
+	state->scan_ready = true;
 }
 
 static IndexScanDesc
@@ -1600,6 +2155,9 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 					IndexInfo *indexInfo)
 {
 	int64		minor_key;
+	int64		major_key;
+	int64		locator_minor_key;
+	bytea	   *locator = NULL;
 	int			split_threshold = 128;
 	int			target_fillfactor = 85;
 	double		auto_repack_interval = 60.0;
@@ -1624,11 +2182,34 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 										&target_fillfactor,
 										&auto_repack_interval);
 
-	clustered_pg_pkidx_allocate_locator(heapRelation,
-									   minor_key,
-									   split_threshold,
-									   target_fillfactor,
-									   auto_repack_interval);
+	PG_TRY();
+	{
+		locator = clustered_pg_pkidx_allocate_locator(heapRelation,
+													 minor_key,
+													 split_threshold,
+													 target_fillfactor,
+													 auto_repack_interval);
+		if (locator == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("clustered_pg locator allocation returned NULL")));
+
+		clustered_pg_pkidx_lookup_locator_values(locator, &major_key, &locator_minor_key);
+		clustered_pg_pkidx_touch_segment_tids(heapRelation,
+											 major_key,
+											 locator_minor_key,
+											 heap_tid);
+
+		pfree(locator);
+		locator = NULL;
+	}
+	PG_CATCH();
+	{
+		if (locator != NULL)
+			pfree(locator);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	return true;
 }
@@ -1695,6 +2276,31 @@ clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 					 errdetail("%s",
 							  edata->message != NULL ? edata->message : "unknown error"),
 					 errhint("Vacuum maintenance metadata update was skipped for relation %u.",
+							 RelationGetRelid(info->index))));
+			FreeErrorData(edata);
+		}
+		PG_END_TRY();
+
+		PG_TRY();
+		{
+			/*
+			 * Keep segment_map_tids from drifting after VACUUM-removed rows.  This
+			 * keeps index scan path cardinality bounded for repeated update/delete
+			 * workloads.
+			 */
+			clustered_pg_pkidx_gc_segment_tids(info->index);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata = CopyErrorData();
+
+			FlushErrorState();
+			ereport(WARNING,
+					(errcode(ERRCODE_WARNING),
+					 errmsg("clustered_pk_index tid-gc callback failed"),
+					 errdetail("%s",
+							  edata->message != NULL ? edata->message : "unknown error"),
+					 errhint("Vacuum orphan segment_map_tids cleanup was skipped for relation %u.",
 							 RelationGetRelid(info->index))));
 			FreeErrorData(edata);
 		}

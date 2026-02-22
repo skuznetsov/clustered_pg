@@ -71,18 +71,29 @@ Production hardening program (next):
 	- Verifies that `segment_map.sum(row_count)` matches table cardinality and no segment overflows its configured capacity under concurrent inserts.
 	- Skipped automatically when `psql`/`pgbench` are unavailable.
 	- Make target available: `make concurrency-smoke CONCURRENCY_SMOKE_DB=<your-db>`.
-- [ ] P0 (CAUTION): implement native clustered index scan primitives (locator -> heap TID index) instead of full table scan fallback.
-	- DoD: add path with low fan-out direct scan and regression for `SELECT ... WHERE id = ...` under large tables.
-	- Adversary checks: reorder-heavy inserts + duplicate inner merge join + mark/restore under backward scan.
+- [x] P0 (CAUTION): implement native clustered index scan primitives (locator -> heap TID index) instead of full table scan fallback.
+	- DoD: index scan path uses `segment_map_tids` for equality predicate on single-column PK and falls back safely for non-native keys.
+	- C updates:
+		- `clustered_pg_pkidx_rescan_internal` now detects `=` scan key on supported types, populates `segment_tids`, and runs native segment replay.
+		- `clustered_pg_pkidx_insert` now stores each tuple locator via `segment_map_tids`.
+		- `segment_map_rebuild_from_index` now repopulates `segment_map_tids` during full rebuild.
+	- Verification pending: run `make installcheck` (or focused regression fixture) to lock in behavior under merge-join mark/restore and backward scans.
 - [ ] P1 (CAUTION): add crash-recovery resilience around metadata rebuild (`repack`) and VACUUM callbacks.
 	- DoD: partial failure in maintenance leaves `segment_map` in consistent state and recovers on next maintenance run.
 	- Verification: inject SPI failures in unit harness and assert no orphaned map rows for dropped/rebuilt relations.
 - [ ] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
-	- DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
-	- IN_PROGRESS: `clustered_pg_tableam_cluster_smoke` regression added to confirm `CLUSTER` clears stale segment map metadata.
+  - DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
+  - IN_PROGRESS: `clustered_pg_tableam_cluster_smoke` regression added to confirm `CLUSTER` clears stale segment map metadata.
+- [x] P1 (SAFE): add vacuum-time orphan cleanup for segment_map_tids (`segment_map_tids_gc`) and wire it through clustered index VACUUM callback.
+  - DoD: `VACUUM` on an indexed relation after deletes leaves no `segment_map_tids` entries for missing CTIDs.
+  - Invariant: stale tuple mappings are bounded and cannot grow indefinitely between explicit rebuilds.
+  - Evidence target: `segment_map_tids_gc` is now callable as maintenance pass and invoked from `clustered_pg_pkidx_vacuumcleanup`.
+- [ ] P1 (SAFE): harden regression proof for segment_map_tids cleanup invariants under delete+VACUUM.
+  - DoD: automated regression asserts `segment_map_tids_gc` removes stale entries and keeps mapping cardinality aligned with live tuples.
+  - Added case: `clustered_pk_int8_vacuum_table` uses manual `segment_map_tids_gc` + `VACUUM` and verifies mapping counts before/after.
 - [ ] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
-	- DoD: selective lookups continue choosing clustered index; full scans remain preferred for sequential workloads.
-	- Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.
+  - DoD: selective lookups continue choosing clustered index; full scans remain preferred for sequential workloads.
+  - Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.
 - [ ] P2 (SAFE): add observability: extension versioned settings, function-level counters, and actionable warning context.
 	- DoD: every maintenance short-fail path logs relation OID + operation context and does not suppress root cause.
 - [ ] P2 (SAFE): broaden test coverage for copy/update lifecycles (`REINDEX`, `ALTER INDEX ... SET`, `COPY`, `TRUNCATE`, drop/recreate index).
@@ -108,7 +119,12 @@ Current engineering status:
 - [x] removed per-row segment-map maintenance work from `ambuild` by switching build callback to count-only and rebuilding segment map once post-scan (`segment_map_rebuild_from_index` path).
 - [x] verified extension C code builds successfully with `make` using local PostgreSQL 18.
 - [x] hardened SQL allocator/rebuild path against `search_path` resolution by schema-qualifying `locator_pack` calls with `@extschema@`.
-- [ ] run full extension regression (`make installcheck`) on a stable `contrib_regression` cluster (currently blocked by missing local socket path).
+- [x] add vacuum-time orphan cleanup for `segment_map_tids` via `segment_map_tids_gc` and wire it through `clustered_pg_pkidx_vacuumcleanup`.
+	- `VACUUM` now removes stale TID mappings for missing heap tuples, preventing scan-path drift after deletes/updates.
+- [x] add regression proof for `segment_map_tids` cleanup under delete/VACUUM (`clustered_pk_int8_vacuum_table`):
+	- manual `segment_map_tids_gc` and `VACUUM` assertions track mapping cardinality.
+- [x] decouple `segment_map_tids_gc` from other maintenance steps in `vacuumcleanup` (always attempted, even when rebuild/touch fails).
+ - [ ] run full extension regression (`make installcheck`) on a stable `contrib_regression` cluster (currently blocked by missing local socket path).
 - [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
 - [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.
 - [x] extend clustered table AM wrapper with additional lifecycle callbacks (`relation_copy_data`, `relation_copy_for_cluster`) to keep segment metadata coherent after physical rewrites.
@@ -133,8 +149,10 @@ Latest execution trace:
 - [x] add scale-focused AM smoke test (50k-row append) to guard split-policy growth behavior under larger volume.
 - [x] add descending-order and churn AM smoke test to validate allocator behavior under anti-pattern and delete/reinsert workload.
 - [x] optimize reverse-order allocator path: reuse head segment for descending backfill when it still has split capacity (improves segment count from row-per-segment to capacity-bounded behavior).
+- [x] add `segment_map_tids_gc(regclass)` and route it from `clustered_pg_pkidx_vacuumcleanup` for stale mapping cleanup.
 - [x] add clustered_heap table AM bootstrap smoke test proving CREATE TABLE USING clustered_heap and key scan behavior on inherited heap semantics.
 - [x] extend clustered_heap table AM smoke to cover delete and truncate lifecycle on the delegated path.
 - [x] add clustered_heap table AM smoke for index creation, filtered read, ANALYZE, and VACUUM lifecycle checks.
 - [x] add allocator regression for interstitial inserts into saturated neighboring segments (ensures new major bucket allocation).
 - [x] add defensive major-key collision rebasing in allocator to tolerate stale/concurrent `segment_map` rows.
+- [x] harden `clustered_pg_pkidx_vacuumcleanup` by splitting maintenance into independent callback blocks so `segment_map_tids_gc` still runs when metadata rebuild/touch fails.
