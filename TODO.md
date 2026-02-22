@@ -78,3 +78,4 @@ Latest execution trace:
 - [x] add index-AM smoke test for clustered index insert callback and segment-map growth under 10k-row append workload.
 - [x] add scale-focused AM smoke test (50k-row append) to guard split-policy growth behavior under larger volume.
 - [x] add descending-order and churn AM smoke test to validate allocator behavior under anti-pattern and delete/reinsert workload.
+- [x] optimize reverse-order allocator path: reuse head segment for descending backfill when it still has split capacity (improves segment count from row-per-segment to capacity-bounded behavior).

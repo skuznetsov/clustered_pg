@@ -321,7 +321,7 @@ SELECT count(*) AS am_desc_segment_count,
 FROM segment_map_stats('clustered_pg_am_desc_smoke'::regclass::oid);
  am_desc_segment_count | am_desc_segment_rows | am_desc_min_major | am_desc_max_major 
 -----------------------+----------------------+-------------------+-------------------
-                 10000 |                10000 |             -9999 |                 0
+                   264 |                10000 |              -263 |                 0
 (1 row)
 
 DROP TABLE clustered_pg_am_desc_smoke;

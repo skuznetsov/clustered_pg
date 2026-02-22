@@ -244,6 +244,10 @@ DECLARE
 	v_last_target_fillfactor int;
 	v_head_major_key bigint;
 	v_head_minor_from bigint;
+	v_head_minor_to bigint;
+	v_head_row_count bigint;
+	v_head_split_threshold int;
+	v_head_target_fillfactor int;
 	v_container_major_key bigint;
 	v_container_minor_from bigint;
 	v_container_minor_to bigint;
@@ -309,14 +313,30 @@ BEGIN
 	IF NOT FOUND THEN
 		v_major := 0;
 	ELSE
-		SELECT major_key, minor_from
-		INTO v_head_major_key, v_head_minor_from
+		SELECT major_key, minor_from, minor_to, row_count, split_threshold, target_fillfactor
+		INTO v_head_major_key, v_head_minor_from, v_head_minor_to, v_head_row_count, v_head_split_threshold, v_head_target_fillfactor
 		FROM @extschema@.segment_map
 		WHERE relation_oid = rel_oid
 		ORDER BY major_key ASC
 		LIMIT 1;
 
 		IF p_minor < v_head_minor_from THEN
+			v_effective_split_threshold := COALESCE(v_head_split_threshold, v_split_threshold);
+			v_effective_row_capacity := GREATEST(
+				1,
+				(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_head_target_fillfactor, v_target_fillfactor))) / 100
+			);
+			IF v_head_row_count + p_row_count_delta <= v_effective_row_capacity THEN
+				UPDATE @extschema@.segment_map
+				SET minor_from = LEAST(minor_from, p_minor),
+					row_count = row_count + p_row_count_delta,
+					split_threshold = COALESCE(p_split_threshold, split_threshold),
+					target_fillfactor = COALESCE(p_target_fillfactor, target_fillfactor),
+					auto_repack_interval = COALESCE(p_auto_repack_interval, auto_repack_interval),
+					updated_at = clock_timestamp()
+				WHERE relation_oid = rel_oid AND major_key = v_head_major_key;
+				RETURN @extschema@.locator_pack(v_head_major_key, p_minor);
+			END IF;
 			v_major := v_head_major_key - 1;
 		ELSIF p_minor > v_last_minor_to THEN
 			v_effective_split_threshold := COALESCE(v_last_split_threshold, v_split_threshold);
