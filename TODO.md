@@ -29,7 +29,7 @@
 Current local plan:
 
 - Step 1: keep TABLE AM delegating to heap for bootstrap stability, but return a dedicated wrapper routine (now implemented) to allow non-block/offset policy extensions.
-- Step 2: keep INDEX AM installable and non-usable by planner via large cost, while unsupported index operations fail fast.
+- Step 2: keep INDEX AM installable and planner-accessible with an adaptive `amcostestimate` that reflects clustered locator behavior.
 - Step 3: introduce a PK-oriented locator encoding contract and expose helper SQL functions for deterministic key-location materialization.
 - Step 4: segment-map persistence + ordered split policy now has SQL allocator helper; next cycle is callback wiring.
 - Step 5: keep index scan callbacks returning FEATURE_NOT_SUPPORTED while build/inserts/maintenance metadata hooks are active.
@@ -46,6 +46,8 @@ Execution loop status:
 - [x] synchronize regression test fixture output (expected/clustered_pg.out) with current SQL runtime behavior.
 - [x] add SQL helper `segment_map_count_repack_due()` for maintenance window heuristics.
 - [x] implement index AM scan lifecycle scaffolding and functional `amgettuple`/`amgetbitmap` path using table scan fallback.
+- [x] replace hardcoded clustered index cost estimates with a planner-aware `genericcostestimate`-based path model and correlation heuristic.
+- [x] add regression coverage that asserts `EXPLAIN (COSTS OFF)` uses clustered index for selective lookups.
 
 Locator contract draft (v0.1):
 - Format: fixed 16-byte `bytea`, payload-only (no varlena metadata in locator value).

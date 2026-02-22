@@ -231,6 +231,8 @@ CREATE INDEX clustered_pg_am_filter_query_idx
 		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_filter_query(id)
 SELECT generate_series(1,40);
+EXPLAIN (COSTS OFF)
+SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
 SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
 SELECT array_agg(id ORDER BY id) AS am_filter_ids
 FROM (SELECT id FROM clustered_pg_am_filter_query WHERE id BETWEEN 10 AND 20) q;

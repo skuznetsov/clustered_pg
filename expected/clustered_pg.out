@@ -505,6 +505,14 @@ CREATE INDEX clustered_pg_am_filter_query_idx
 		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_filter_query(id)
 SELECT generate_series(1,40);
+EXPLAIN (COSTS OFF)
+SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
+             QUERY PLAN              
+------------------------------------
+ Index Scan using clustered_pg_am_filter_query_idx on clustered_pg_am_filter_query
+   Index Cond: (id = 17)
+(2 rows)
+
 SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
  id 
 ----

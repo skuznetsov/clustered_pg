@@ -22,6 +22,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "storage/itemptr.h"
+#include "utils/selfuncs.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -1680,14 +1681,64 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 							Cost *total_cost, Selectivity *selectivity,
 							double *correlation, double *pages)
 {
-	(void)root;
-	(void)path;
-	(void)loop_count;
-	*startup_cost = 100.0;
-	*total_cost = 200.0;
-	*selectivity = 1.0;
-	*correlation = 0.0;
-	*pages = 1.0;
+	GenericCosts costs = {0};
+	double		est_pages;
+	double		est_selectivity;
+	IndexOptInfo *index = NULL;
+
+	if (root == NULL || path == NULL || path->indexinfo == NULL)
+	{
+		*startup_cost = 0.0;
+		*total_cost = 0.0;
+		*selectivity = 1.0;
+		*correlation = 0.0;
+		*pages = 1.0;
+		return;
+	}
+
+	index = path->indexinfo;
+	if (index->rel == NULL)
+	{
+		*startup_cost = 0.0;
+		*total_cost = 0.0;
+		*selectivity = 1.0;
+		*correlation = 0.0;
+		*pages = 1.0;
+		return;
+	}
+
+	genericcostestimate(root, path, loop_count, &costs);
+
+	est_pages = costs.numIndexPages;
+	if (est_pages < 1.0)
+		est_pages = 1.0;
+
+	est_selectivity = costs.indexSelectivity;
+	if (est_selectivity < 0.0)
+		est_selectivity = 0.0;
+	else if (est_selectivity > 1.0)
+		est_selectivity = 1.0;
+
+	if (path->indexclauses != NULL)
+	{
+		/*
+		 * Favor correlated execution when query predicates anchor to the
+		 * leading index key: this mirrors the intended clustered access
+		 * pattern used by the extension.
+		 */
+		*correlation = 0.2 + (1.0 - est_selectivity) * 0.7;
+		if (*correlation > 0.95)
+			*correlation = 0.95;
+	}
+	else
+	{
+		*correlation = 0.0;
+	}
+
+	*startup_cost = costs.indexStartupCost;
+	*total_cost = costs.indexTotalCost;
+	*selectivity = est_selectivity;
+	*pages = est_pages;
 }
 
 static bool
