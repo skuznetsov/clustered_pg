@@ -77,3 +77,4 @@ Latest execution trace:
 - [x] add perf-smoke and `target_fillfactor` boundary regression cases in SQL fixture (`clustered_pg_perf_smoke`, `clustered_pg_fillfactor_bounds/floor`).
 - [x] add index-AM smoke test for clustered index insert callback and segment-map growth under 10k-row append workload.
 - [x] add scale-focused AM smoke test (50k-row append) to guard split-policy growth behavior under larger volume.
+- [x] add descending-order and churn AM smoke test to validate allocator behavior under anti-pattern and delete/reinsert workload.

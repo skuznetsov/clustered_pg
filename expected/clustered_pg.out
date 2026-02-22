@@ -302,6 +302,68 @@ FROM segment_map_stats('clustered_pg_am_scale_smoke'::regclass::oid);
 (1 row)
 
 DROP TABLE clustered_pg_am_scale_smoke;
+CREATE TABLE clustered_pg_am_desc_smoke(id bigint);
+CREATE INDEX clustered_pg_am_desc_smoke_idx
+	ON clustered_pg_am_desc_smoke USING clustered_pk_index (id)
+		WITH (split_threshold=64, target_fillfactor=60, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_desc_smoke(id)
+SELECT generate_series(10000,1,-1);
+SELECT count(*) AS am_desc_rows FROM clustered_pg_am_desc_smoke;
+ am_desc_rows 
+--------------
+        10000
+(1 row)
+
+SELECT count(*) AS am_desc_segment_count,
+       sum(row_count) AS am_desc_segment_rows,
+       min(major_key) AS am_desc_min_major,
+       max(major_key) AS am_desc_max_major
+FROM segment_map_stats('clustered_pg_am_desc_smoke'::regclass::oid);
+ am_desc_segment_count | am_desc_segment_rows | am_desc_min_major | am_desc_max_major 
+-----------------------+----------------------+-------------------+-------------------
+                 10000 |                10000 |             -9999 |                 0
+(1 row)
+
+DROP TABLE clustered_pg_am_desc_smoke;
+CREATE TABLE clustered_pg_am_churn_smoke(id bigint);
+CREATE INDEX clustered_pg_am_churn_smoke_idx
+	ON clustered_pg_am_churn_smoke USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=80, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_churn_smoke(id)
+SELECT generate_series(1,2000);
+SELECT count(*) AS am_churn_initial_rows FROM clustered_pg_am_churn_smoke;
+ am_churn_initial_rows 
+-----------------------
+                  2000
+(1 row)
+
+SELECT count(*) AS am_churn_initial_segment_count,
+       max(major_key) AS am_churn_initial_max_major
+FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
+ am_churn_initial_segment_count | am_churn_initial_max_major 
+--------------------------------+----------------------------
+                             80 |                         79
+(1 row)
+
+DELETE FROM clustered_pg_am_churn_smoke WHERE id % 2 = 0;
+INSERT INTO clustered_pg_am_churn_smoke(id)
+SELECT generate_series(1,2000);
+SELECT count(*) AS am_churn_after_rows FROM clustered_pg_am_churn_smoke;
+ am_churn_after_rows 
+---------------------
+                3000
+(1 row)
+
+SELECT count(*) AS am_churn_segment_count,
+       sum(row_count) AS am_churn_segment_rows,
+       max(major_key) AS am_churn_max_major
+FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
+ am_churn_segment_count | am_churn_segment_rows | am_churn_max_major 
+------------------------+-----------------------+--------------------
+                     80 |                  4000 |                 79
+(1 row)
+
+DROP TABLE clustered_pg_am_churn_smoke;
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
