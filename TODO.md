@@ -24,6 +24,7 @@
 	- [x] preserve mark/restore state through amrestrpos-initiated table scan bootstrap path
 	- [x] add merge-join duplicate inner-path regression for mark/restore stress
 	- [x] remove per-row insert-time logging and cache parsed reloptions in relcache
+- [x] fix allocator gap-case collision between saturated neighboring major buckets in `segment_map_allocate_locator`
 
 Current local plan:
 
@@ -94,3 +95,4 @@ Latest execution trace:
 - [x] add clustered_heap table AM bootstrap smoke test proving CREATE TABLE USING clustered_heap and key scan behavior on inherited heap semantics.
 - [x] extend clustered_heap table AM smoke to cover delete and truncate lifecycle on the delegated path.
 - [x] add clustered_heap table AM smoke for index creation, filtered read, ANALYZE, and VACUUM lifecycle checks.
+- [x] add allocator regression for interstitial inserts into saturated neighboring segments (ensures new major bucket allocation).

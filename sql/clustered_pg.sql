@@ -60,6 +60,15 @@ SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_fixture'::regcl
 SELECT locator_to_hex(segment_map_allocate_locator_regclass('clustered_pg_fixture', 11, 1, 2)) AS alloc_hex_7;
 SELECT locator_to_hex(segment_map_next_locator('clustered_pg_fixture', 12, 1, 2)) AS alloc_hex_8;
 
+CREATE TABLE clustered_pg_gap_allocator(id int);
+SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 10, 1, 1, 100)) AS gap_alloc_10;
+SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 30, 1, 1, 100)) AS gap_alloc_30;
+SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 20, 1, 1, 100)) AS gap_alloc_20;
+SELECT COUNT(*) AS gap_allocator_segment_count
+FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
+SELECT array_agg(major_key ORDER BY major_key) AS gap_allocator_majors
+FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
+
 SELECT locator_major(locator_pack(0,10)) AS major_check,
        locator_minor(locator_pack(0,10)) AS minor_check;
 

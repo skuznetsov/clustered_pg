@@ -255,6 +255,8 @@ DECLARE
 	v_container_split_threshold int;
 	v_container_target_fillfactor int;
 	v_prev_container_major_key bigint;
+	v_next_major_key bigint;
+	v_prev_container_found bool := false;
 BEGIN
 	IF p_minor IS NULL THEN
 		RAISE EXCEPTION 'p_minor cannot be NULL';
@@ -358,11 +360,27 @@ BEGIN
 				AND minor_to < p_minor
 			ORDER BY major_key DESC
 			LIMIT 1;
+			v_prev_container_found := FOUND;
+			SELECT major_key
+			INTO v_next_major_key
+			FROM @extschema@.segment_map
+			WHERE relation_oid = rel_oid
+				AND minor_from > p_minor
+			ORDER BY minor_from, major_key
+			LIMIT 1;
 
-			IF FOUND THEN
+			IF v_prev_container_found THEN
 				v_major := v_prev_container_major_key + 1;
 			ELSE
 				v_major := v_last_major_key - 1;
+			END IF;
+
+			-- Avoid collapsing back into an existing neighboring segment.
+			IF v_container_major_key IS NOT NULL AND v_major = v_container_major_key THEN
+				v_major := v_container_major_key + 1;
+			END IF;
+			IF v_next_major_key IS NOT NULL AND v_major = v_next_major_key THEN
+				v_major := v_next_major_key + 1;
 			END IF;
 		END IF;
 	END IF;
