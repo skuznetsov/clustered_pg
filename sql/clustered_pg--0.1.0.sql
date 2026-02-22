@@ -529,7 +529,8 @@ CREATE FUNCTION @extschema@.segment_map_rebuild_from_index(
 	p_row_count_delta bigint DEFAULT 1,
 	p_split_threshold int DEFAULT NULL,
 	p_target_fillfactor int DEFAULT NULL,
-	p_auto_repack_interval double precision DEFAULT NULL
+	p_auto_repack_interval double precision DEFAULT NULL,
+	p_fail_after_n_rows bigint DEFAULT NULL
 ) RETURNS bigint
 LANGUAGE plpgsql
 AS $$
@@ -554,6 +555,8 @@ DECLARE
 	v_locator_major bigint;
 	v_locator_minor bigint;
 	v_sql text;
+	v_processed_rows bigint := 0;
+	v_fail_after_n_rows bigint := p_fail_after_n_rows;
 BEGIN
 	IF p_row_count_delta IS NULL OR p_row_count_delta < 1 THEN
 		RAISE EXCEPTION 'p_row_count_delta must be greater than 0';
@@ -651,6 +654,23 @@ BEGIN
 	PERFORM pg_advisory_xact_lock(v_relation_oid::bigint);
 	EXECUTE format('LOCK TABLE %I.%I IN SHARE UPDATE EXCLUSIVE MODE', v_schema_name, v_relation_name);
 
+	DROP TABLE IF EXISTS clustered_pg_rebuild_backup_segment_map;
+	DROP TABLE IF EXISTS clustered_pg_rebuild_backup_segment_map_tids;
+
+	CREATE TEMP TABLE clustered_pg_rebuild_backup_segment_map
+	ON COMMIT DROP
+	AS
+	SELECT *
+	FROM @extschema@.segment_map
+	WHERE relation_oid = v_relation_oid;
+
+	CREATE TEMP TABLE clustered_pg_rebuild_backup_segment_map_tids
+	ON COMMIT DROP
+	AS
+	SELECT *
+	FROM @extschema@.segment_map_tids
+	WHERE relation_oid = v_relation_oid;
+
 	DELETE FROM @extschema@.segment_map
 	WHERE relation_oid = v_relation_oid;
 	DELETE FROM @extschema@.segment_map_tids
@@ -665,6 +685,11 @@ BEGIN
 	);
 	FOR v_row IN EXECUTE v_sql
 	LOOP
+		v_processed_rows := v_processed_rows + 1;
+		IF v_fail_after_n_rows IS NOT NULL AND v_processed_rows > v_fail_after_n_rows THEN
+			RAISE EXCEPTION 'segment_map_rebuild_from_index test-fault injection: processed % rows', v_processed_rows;
+		END IF;
+
 		v_key_oid := v_row.major_value;
 		v_locator := @extschema@.segment_map_allocate_locator(
 			v_relation_oid,
@@ -700,6 +725,27 @@ BEGIN
 	WHERE relation_oid = v_relation_oid;
 
 	RETURN v_repacked_count;
+
+EXCEPTION
+	WHEN OTHERS THEN
+		IF v_relation_oid IS NOT NULL THEN
+			DELETE FROM @extschema@.segment_map
+			WHERE relation_oid = v_relation_oid;
+			DELETE FROM @extschema@.segment_map_tids
+			WHERE relation_oid = v_relation_oid;
+
+			INSERT INTO @extschema@.segment_map
+			SELECT *
+			FROM clustered_pg_rebuild_backup_segment_map
+			WHERE relation_oid = v_relation_oid;
+
+			INSERT INTO @extschema@.segment_map_tids
+			SELECT *
+			FROM clustered_pg_rebuild_backup_segment_map_tids
+			WHERE relation_oid = v_relation_oid;
+		END IF;
+
+		RAISE;
 END;
 $$;
 

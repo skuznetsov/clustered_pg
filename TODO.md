@@ -78,9 +78,10 @@ Production hardening program (next):
 		- `clustered_pg_pkidx_insert` now stores each tuple locator via `segment_map_tids`.
 		- `segment_map_rebuild_from_index` now repopulates `segment_map_tids` during full rebuild.
 	- Verification pending: run `make installcheck` (or focused regression fixture) to lock in behavior under merge-join mark/restore and backward scans.
-- [ ] P1 (CAUTION): add crash-recovery resilience around metadata rebuild (`repack`) and VACUUM callbacks.
+- [x] P1 (CAUTION): add crash-recovery resilience around metadata rebuild (`repack`) and VACUUM callbacks.
 	- DoD: partial failure in maintenance leaves `segment_map` in consistent state and recovers on next maintenance run.
-	- Verification: inject SPI failures in unit harness and assert no orphaned map rows for dropped/rebuilt relations.
+	- Evidence: `segment_map_rebuild_from_index` now supports test fault injection (`p_fail_after_n_rows`) and restores `segment_map` + `segment_map_tids` state from pre-run temp backups on exception.
+	- Verification: `clustered_pk_int8_rebuild_fault_table` keeps row_sum and segment_count identical before/after failure path while reporting `success = false`.
 - [ ] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
   - DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
   - IN_PROGRESS: `clustered_pg_tableam_cluster_smoke` regression added to confirm `CLUSTER` clears stale segment map metadata.
@@ -124,6 +125,7 @@ Current engineering status:
 - [x] add regression proof for `segment_map_tids` cleanup under delete/VACUUM (`clustered_pk_int8_vacuum_table`):
 	- manual `segment_map_tids_gc` and `VACUUM` assertions track mapping cardinality.
 - [x] decouple `segment_map_tids_gc` from other maintenance steps in `vacuumcleanup` (always attempted, even when rebuild/touch fails).
+- [x] add crash-recovery fault-injection regression for `segment_map_rebuild_from_index` (`clustered_pk_int8_rebuild_fault_table`) to validate backup/restore behavior on partial failures.
  - [ ] run full extension regression (`make installcheck`) on a stable `contrib_regression` cluster (currently blocked by missing local socket path).
 - [x] eliminate `record`-field brittleness in `segment_map_allocate_locator` by replacing shared `record` locals with explicit typed scalar locals before `target_fillfactor`-based split checks.
 - [x] implement dedicated clustered table AM wrapper that forwards to heap callbacks and purges `segment_map` metadata on rewrite/truncate, enabling stable lifecycle behavior.

@@ -151,12 +151,44 @@ INSERT INTO clustered_pk_int8_rebuild_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_rebuild_table_idx
 	ON clustered_pk_int8_rebuild_table USING clustered_pk_index (id)
-		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 DELETE FROM clustered_pk_int8_rebuild_table WHERE id BETWEEN 1 AND 4;
 SELECT segment_map_count_repack_due('clustered_pk_int8_rebuild_table'::regclass::oid, 3600.0::double precision) AS due_repack_before_manual_rebuild;
 SELECT segment_map_rebuild_from_index('clustered_pk_int8_rebuild_table_idx'::regclass, 1, 16, 75, 30.0::double precision) AS rebuilt_rows;
 SELECT * FROM segment_map_stats('clustered_pk_int8_rebuild_table'::regclass::oid) ORDER BY major_key;
 DROP TABLE clustered_pk_int8_rebuild_table;
+
+CREATE TABLE clustered_pk_int8_rebuild_fault_table(id bigint);
+INSERT INTO clustered_pk_int8_rebuild_fault_table(id)
+SELECT generate_series(1,18);
+CREATE INDEX clustered_pk_int8_rebuild_fault_table_idx
+	ON clustered_pk_int8_rebuild_fault_table USING clustered_pk_index (id)
+	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+SELECT sum(row_count) AS segment_map_rowsum_before_fault,
+       count(*) AS segment_map_segment_count_before_fault
+FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
+CREATE TEMP TABLE clustered_pg_rebuild_fault_probe(success boolean);
+DO $$
+DECLARE
+	v_rebuild_succeeded boolean := false;
+BEGIN
+	BEGIN
+		PERFORM segment_map_rebuild_from_index('clustered_pk_int8_rebuild_fault_table_idx'::regclass,
+											 1, 16, 75, 30.0::double precision, 2);
+		v_rebuild_succeeded := true;
+	EXCEPTION WHEN OTHERS THEN
+		v_rebuild_succeeded := false;
+	END;
+
+	INSERT INTO clustered_pg_rebuild_fault_probe VALUES (v_rebuild_succeeded);
+END;
+$$;
+SELECT success AS segment_map_rebuild_fault_injected
+FROM clustered_pg_rebuild_fault_probe;
+SELECT sum(row_count) AS segment_map_rowsum_after_fault,
+       count(*) AS segment_map_segment_count_after_fault
+FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
+DROP TABLE clustered_pk_int8_rebuild_fault_table;
 
 CREATE TABLE clustered_pg_perf_smoke(locator bytea);
 INSERT INTO clustered_pg_perf_smoke(locator)

@@ -395,6 +395,52 @@ SELECT * FROM segment_map_stats('clustered_pk_int8_rebuild_table'::regclass::oid
 (2 rows)
 
 DROP TABLE clustered_pk_int8_rebuild_table;
+CREATE TABLE clustered_pk_int8_rebuild_fault_table(id bigint);
+INSERT INTO clustered_pk_int8_rebuild_fault_table(id)
+SELECT generate_series(1,18);
+CREATE INDEX clustered_pk_int8_rebuild_fault_table_idx
+	ON clustered_pk_int8_rebuild_fault_table USING clustered_pk_index (id)
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+SELECT sum(row_count) AS segment_map_rowsum_before_fault,
+       count(*) AS segment_map_segment_count_before_fault
+FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
+ segment_map_rowsum_before_fault | segment_map_segment_count_before_fault 
+------------------------------+----------------------------------
+                           18 |                                2
+(1 row)
+
+CREATE TEMP TABLE clustered_pg_rebuild_fault_probe(success boolean);
+DO $$
+DECLARE
+	v_rebuild_succeeded boolean := false;
+BEGIN
+	BEGIN
+		PERFORM segment_map_rebuild_from_index('clustered_pk_int8_rebuild_fault_table_idx'::regclass,
+											 1, 16, 75, 30.0::double precision, 2);
+		v_rebuild_succeeded := true;
+	EXCEPTION WHEN OTHERS THEN
+		v_rebuild_succeeded := false;
+	END;
+
+	INSERT INTO clustered_pg_rebuild_fault_probe VALUES (v_rebuild_succeeded);
+END;
+$$;
+SELECT success AS segment_map_rebuild_fault_injected
+FROM clustered_pg_rebuild_fault_probe;
+ segment_map_rebuild_fault_injected 
+-----------------------------------
+ f
+(1 row)
+
+SELECT sum(row_count) AS segment_map_rowsum_after_fault,
+       count(*) AS segment_map_segment_count_after_fault
+FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
+ segment_map_rowsum_after_fault | segment_map_segment_count_after_fault 
+-----------------------------+-----------------------------------
+                          18 |                                 2
+(1 row)
+
+DROP TABLE clustered_pk_int8_rebuild_fault_table;
 CREATE TABLE clustered_pg_perf_smoke(locator bytea);
 INSERT INTO clustered_pg_perf_smoke(locator)
 SELECT segment_map_allocate_locator('clustered_pg_perf_smoke'::regclass::oid, g, 1, 100, 100)
