@@ -75,3 +75,4 @@ Latest execution trace:
 - [x] this removes runtime failures like `record "... " has no field "target_fillfactor"` caused by mixed record projections.
 - [x] validate with a fresh `make installcheck` run against a clean `contrib_regression` cluster.
 - [x] add perf-smoke and `target_fillfactor` boundary regression cases in SQL fixture (`clustered_pg_perf_smoke`, `clustered_pg_fillfactor_bounds/floor`).
+- [x] add index-AM smoke test for clustered index insert callback and segment-map growth under 10k-row append workload.
