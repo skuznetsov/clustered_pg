@@ -380,20 +380,19 @@ SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
 
 SELECT array_agg(id ORDER BY id) AS am_filter_ids
 FROM (SELECT id FROM clustered_pg_am_filter_query WHERE id BETWEEN 10 AND 20) q;
-        am_filter_ids        
-----------------------------
+           am_filter_ids            
+------------------------------------
  {10,11,12,13,14,15,16,17,18,19,20}
 (1 row)
 
 SELECT count(*) AS am_filter_count
 FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
  am_filter_count 
-----------------
-             6
+-----------------
+               6
 (1 row)
 
 DROP TABLE clustered_pg_am_filter_query;
-
 SET enable_mergejoin = on;
 SET enable_hashjoin = off;
 SET enable_nestloop = off;
@@ -415,19 +414,20 @@ SELECT count(*) AS am_merge_join_count
 FROM clustered_pg_am_merge_fixture l
 JOIN clustered_pg_am_merge_fixture_b r USING (id);
  am_merge_join_count 
---------------------
-                 11
+---------------------
+                  11
 (1 row)
 
 SELECT count(*) AS am_merge_join_filter_count
 FROM clustered_pg_am_merge_fixture l
 JOIN clustered_pg_am_merge_fixture_b r ON l.id = r.id
 WHERE l.id BETWEEN 12 AND 16;
-am_merge_join_filter_count 
---------------------------
-                       5
+ am_merge_join_filter_count 
+----------------------------
+                          5
 (1 row)
 
+-- Exercise merge join mark/restore on repeated matches (duplication-heavy inner side)
 CREATE TABLE clustered_pg_am_merge_markrestore(a bigint);
 CREATE TABLE clustered_pg_am_merge_markrestore_b(a bigint);
 CREATE INDEX clustered_pg_am_merge_markrestore_a_idx
@@ -447,10 +447,10 @@ GROUP BY a
 ORDER BY a;
  a | matched_cnt 
 ---+-------------
- 1 | 2
- 2 | 3
- 4 | 1
- 6 | 2
+ 1 |           2
+ 2 |           3
+ 4 |           1
+ 6 |           2
 (4 rows)
 
 SELECT count(*) AS am_merge_markrestore_row_count
@@ -458,13 +458,12 @@ FROM clustered_pg_am_merge_markrestore l
 JOIN clustered_pg_am_merge_markrestore_b r USING (a)
 WHERE l.a BETWEEN 2 AND 6;
  am_merge_markrestore_row_count 
-------------------------------
-                            6
+--------------------------------
+                              6
 (1 row)
 
 DROP TABLE clustered_pg_am_merge_markrestore;
 DROP TABLE clustered_pg_am_merge_markrestore_b;
-
 DROP TABLE clustered_pg_am_merge_fixture;
 DROP TABLE clustered_pg_am_merge_fixture_b;
 RESET enable_hashjoin;
@@ -473,7 +472,7 @@ RESET enable_mergejoin;
 RESET enable_seqscan;
 RESET enable_bitmapscan;
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
-major_key | minor_from | minor_to | row_count | split_generation 
+ major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
          3 |          3 |        3 |         1 |                0
          4 |          1 |      100 |         7 |                0
