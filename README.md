@@ -12,7 +12,8 @@ Experimental PostgreSQL extension scaffold for custom clustered storage experime
   - `clustered_heap` (TABLE)
   - `clustered_pk_index` (INDEX)
 - TABLE AM handler is a dedicated wrapper around heap AM (`GetHeapamTableAmRoutine()`)
-  and keeps heap semantics while adding clustered-specific maintenance hooks.
+  and keeps heap semantics while adding clustered-specific maintenance hooks
+  for table rewrite/truncate lifecycle callbacks.
 - INDEX AM insert callback is active for single-column integer keys:
   - `aminsert` assigns ordered segment locators via `segment_map_allocate_locator(...)`.
 - INDEX AM insert and build callbacks are wired to the split-policy allocator.

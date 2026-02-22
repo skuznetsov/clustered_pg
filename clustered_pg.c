@@ -112,6 +112,18 @@ static void clustered_pg_clustered_heap_relation_set_new_filelocator(Relation re
 																	TransactionId *freezeXid,
 																	MultiXactId *minmulti);
 static void clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel);
+static void clustered_pg_clustered_heap_relation_copy_data(Relation rel,
+														 const RelFileLocator *newrlocator);
+static void clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
+															 Relation NewTable,
+															 Relation OldIndex,
+															 bool use_sort,
+															 TransactionId OldestXmin,
+															 TransactionId *xid_cutoff,
+															 MultiXactId *multi_cutoff,
+															 double *num_tuples,
+															 double *tups_vacuumed,
+															 double *tups_recently_dead);
 static void clustered_pg_clustered_heap_clear_segment_map(Oid relationOid);
 static void clustered_pg_clustered_heap_init_tableam_routine(void);
 
@@ -214,6 +226,53 @@ clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel)
 }
 
 static void
+clustered_pg_clustered_heap_relation_copy_data(Relation rel,
+											   const RelFileLocator *newrlocator)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	if (heap == NULL || heap->relation_copy_data == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method is unavailable")));
+
+	heap->relation_copy_data(rel, newrlocator);
+	clustered_pg_clustered_heap_clear_segment_map(RelationGetRelid(rel));
+}
+
+static void
+clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
+													Relation NewTable,
+													Relation OldIndex,
+													bool use_sort,
+													TransactionId OldestXmin,
+													TransactionId *xid_cutoff,
+													MultiXactId *multi_cutoff,
+													double *num_tuples,
+													double *tups_vacuumed,
+													double *tups_recently_dead)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	if (heap == NULL || heap->relation_copy_for_cluster == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method is unavailable")));
+
+	heap->relation_copy_for_cluster(OldTable,
+									NewTable,
+									OldIndex,
+									use_sort,
+									OldestXmin,
+									xid_cutoff,
+									multi_cutoff,
+									num_tuples,
+									tups_vacuumed,
+									tups_recently_dead);
+	clustered_pg_clustered_heap_clear_segment_map(RelationGetRelid(OldTable));
+}
+
+static void
 clustered_pg_clustered_heap_init_tableam_routine(void)
 {
 	const TableAmRoutine *heap;
@@ -233,6 +292,10 @@ clustered_pg_clustered_heap_init_tableam_routine(void)
 		clustered_pg_clustered_heap_relation_set_new_filelocator;
 	clustered_pg_clustered_heapam_routine.relation_nontransactional_truncate =
 		clustered_pg_clustered_heap_relation_nontransactional_truncate;
+	clustered_pg_clustered_heapam_routine.relation_copy_data =
+		clustered_pg_clustered_heap_relation_copy_data;
+	clustered_pg_clustered_heapam_routine.relation_copy_for_cluster =
+		clustered_pg_clustered_heap_relation_copy_for_cluster;
 	clustered_pg_clustered_heapam_initialized = true;
 }
 
