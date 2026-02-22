@@ -58,8 +58,9 @@ Current engineering status:
 - [x] fixed compile-time regression in `clustered_pg_pkidx_vacuumcleanup` logging block (`ereport` parentheses).
 - [x] removed per-row segment-map maintenance work from `ambuild` by switching build callback to count-only and rebuilding segment map once post-scan (`segment_map_rebuild_from_index` path).
 - [x] verified extension C code builds successfully with `make` using local PostgreSQL 18.
-- [ ] run full extension regression (`make installcheck`) after fixing SQL reloption literals.
+- [x] hardened SQL allocator/rebuild path against `search_path` resolution by schema-qualifying `locator_pack` calls with `@extschema@`.
+- [x] run full extension regression (`make installcheck`) after all pending SQL/runtime fixes (pass on PG 18 local temp cluster).
 
 Known environment blockers:
 
-- `make installcheck` currently fails because no local Postgres postmaster is running on socket `/tmp/.s.PGSQL.5432`.
+- no active blockers.

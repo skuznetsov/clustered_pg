@@ -6,6 +6,7 @@
 #include "access/tableam.h"
 #include "access/reloptions.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "commands/vacuum.h"
 #include "catalog/index.h"
 #include "nodes/execnodes.h"
@@ -15,6 +16,7 @@
 #include "utils/snapmgr.h"
 #include "utils/builtins.h"
 #include "utils/errcodes.h"
+#include "utils/lsyscache.h"
 #include <inttypes.h>
 
 PG_MODULE_MAGIC;
@@ -57,6 +59,28 @@ static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 Relation heapRelation,
 									 IndexUniqueCheck checkUnique,
 									 bool indexUnchanged, IndexInfo *indexInfo);
+
+static const char *
+clustered_pg_qualified_extension_name(const char *name)
+{
+	Oid			extOid;
+	Oid			nsOid;
+	const char *nsName;
+	static char result[512];
+
+	extOid = get_extension_oid("clustered_pg", true);
+	if (!OidIsValid(extOid))
+		return quote_identifier(name);
+
+	nsOid = get_extension_schema(extOid);
+	nsName = get_namespace_name(nsOid);
+	if (nsName == NULL)
+		return quote_identifier(name);
+
+	snprintf(result, sizeof(result), "%s.%s",
+			 quote_identifier(nsName), quote_identifier(name));
+	return result;
+}
 
 static void
 clustered_pg_pkidx_execute_segment_map_maintenance(Relation indexRelation,
@@ -182,7 +206,11 @@ clustered_pg_pkidx_execute_segment_map_scalar(Relation indexRelation,
 static void
 clustered_pg_pkidx_purge_segment_map(Relation indexRelation)
 {
-	const char *sql = "DELETE FROM segment_map WHERE relation_oid = $1::oid";
+	char		sql[256];
+
+	snprintf(sql, sizeof(sql),
+			 "DELETE FROM %s WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map"));
 
 	clustered_pg_pkidx_execute_segment_map_maintenance(indexRelation, sql);
 }
@@ -190,11 +218,15 @@ clustered_pg_pkidx_purge_segment_map(Relation indexRelation)
 static void
 clustered_pg_pkidx_touch_repack(Relation indexRelation)
 {
-	const char *sql = "UPDATE segment_map "
+	char		sql[512];
+
+	snprintf(sql, sizeof(sql),
+			 "UPDATE %s "
 		"SET split_generation = split_generation + 1, "
 		"last_split_at = clock_timestamp(), "
 		"updated_at = clock_timestamp() "
-		"WHERE relation_oid = $1::oid";
+		"WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map"));
 
 	clustered_pg_pkidx_execute_segment_map_maintenance(indexRelation, sql);
 }
@@ -205,6 +237,7 @@ clustered_pg_pkidx_count_repack_due(Relation indexRelation,
 {
 	Datum		args[2];
 	Oid			argtypes[2];
+	char		sql[256];
 	Oid			relationOid = InvalidOid;
 
 	if (indexRelation == NULL || indexRelation->rd_index == NULL)
@@ -219,8 +252,12 @@ clustered_pg_pkidx_count_repack_due(Relation indexRelation,
 	argtypes[0] = OIDOID;
 	argtypes[1] = FLOAT8OID;
 
+	snprintf(sql, sizeof(sql),
+			 "SELECT %s($1::oid, $2::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_count_repack_due"));
+
 	return clustered_pg_pkidx_execute_segment_map_scalar(indexRelation,
-													   "SELECT segment_map_count_repack_due($1::oid, $2::double precision)",
+													   sql,
 													   args,
 													   argtypes,
 													   2);
@@ -234,6 +271,7 @@ clustered_pg_pkidx_rebuild_segment_map(Relation indexRelation,
 {
 	Datum		args[5];
 	Oid			argtypes[5];
+	char		sql[256];
 	int64		repacked_rows;
 
 	if (indexRelation == NULL || indexRelation->rd_index == NULL)
@@ -250,9 +288,13 @@ clustered_pg_pkidx_rebuild_segment_map(Relation indexRelation,
 	argtypes[3] = INT4OID;
 	argtypes[4] = FLOAT8OID;
 
+	snprintf(sql, sizeof(sql),
+			 "SELECT %s($1::regclass, $2::bigint, $3::integer, $4::integer, $5::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_rebuild_from_index"));
+
 	repacked_rows = clustered_pg_pkidx_execute_segment_map_scalar(
 					indexRelation,
-					"SELECT segment_map_rebuild_from_index($1::regclass, $2::bigint, $3::integer, $4::integer, $5::double precision)",
+					sql,
 					args,
 					argtypes,
 					5);
@@ -350,7 +392,11 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 	int			rc;
 	Datum		args[6];
 	Oid			argtypes[6];
-	const char *query = "SELECT segment_map_allocate_locator($1::oid, $2::bigint, $3::bigint, $4::integer, $5::integer, $6::double precision)";
+	char		query[256];
+
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::oid, $2::bigint, $3::bigint, $4::integer, $5::integer, $6::double precision)",
+			 clustered_pg_qualified_extension_name("segment_map_allocate_locator"));
 
 	if (heapRelation == NULL)
 		ereport(ERROR,
@@ -415,12 +461,13 @@ clustered_pg_pkidx_build_callback(Relation indexRelation, ItemPointer heap_tid,
                                  void *state)
 {
 	ClusteredPgPkidxBuildState *buildstate = (ClusteredPgPkidxBuildState *) state;
+	int64		minor_key = 0;
 
 	if (buildstate == NULL || indexRelation == NULL || buildstate->indexInfo == NULL)
 		return;
 	if (!tupleIsAlive)
 		return;
-	if (!clustered_pg_pkidx_extract_minor_key(indexRelation, values, isnull, NULL))
+	if (!clustered_pg_pkidx_extract_minor_key(indexRelation, values, isnull, &minor_key))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("clustered_pg build path does not support this index key"),

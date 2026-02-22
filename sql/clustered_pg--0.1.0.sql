@@ -274,7 +274,7 @@ BEGIN
 				auto_repack_interval = COALESCE(p_auto_repack_interval, auto_repack_interval),
 				updated_at = clock_timestamp()
 			WHERE relation_oid = rel_oid AND major_key = v_container.major_key;
-			RETURN locator_pack(v_container.major_key, p_minor);
+			RETURN @extschema@.locator_pack(v_container.major_key, p_minor);
 		END IF;
 	END IF;
 
@@ -342,7 +342,7 @@ BEGIN
 		auto_repack_interval = EXCLUDED.auto_repack_interval,
 		updated_at = clock_timestamp();
 
-	RETURN locator_pack(v_major, p_minor);
+	RETURN @extschema@.locator_pack(v_major, p_minor);
 END;
 $$;
 
@@ -469,7 +469,7 @@ BEGIN
 		RAISE EXCEPTION 'invalid index attribute reference for index %', p_index_relation;
 	END IF;
 
-	IF v_key_type NOT IN (int2oid, int4oid, int8oid) THEN
+	IF v_key_type NOT IN ('int2'::regtype::oid, 'int4'::regtype::oid, 'int8'::regtype::oid) THEN
 		RAISE EXCEPTION 'segment_map_rebuild_from_index currently supports only int2/int4/int8 key types';
 	END IF;
 
