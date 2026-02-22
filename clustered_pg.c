@@ -2201,7 +2201,10 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 	{
 		pfree(state->table_scan_keys);
 		state->table_scan_keys = NULL;
+		state->key_count = 0;
 	}
+	else if (scan->numberOfKeys == 0)
+		state->key_count = 0;
 	else if (scan->numberOfKeys > 0)
 	{
 		if (state->key_count != scan->numberOfKeys)

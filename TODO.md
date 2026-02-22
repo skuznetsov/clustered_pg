@@ -215,6 +215,13 @@ Latest execution trace:
 	- avoid recursive SPI teardown crashes that manifested as `server closed the connection unexpectedly` after `COPY + INSERT + REINDEX`.
 - [x] extend lifecycle regression fixture to lock in DO aggregate stability:
 	- `clustered_pg_lifecycle_copyupdate_smoke` now includes aggregate checks (`count(*)`, `max(i)`, `array_agg`) inside `DO` after reindex and copy lifecycle transitions.
+- [x] harden index scan key-state transitions for keyless re-scan paths:
+  - DoD:
+	- `clustered_pg_pkidx_rescan_internal()` now resets `state->key_count` to `0` whenever `scan->numberOfKeys == 0`, including when cached `table_scan_keys` is freed.
+	- this prevents stale key-count/`table_scan_keys` skew when switching from qualified scans to unqualified scans.
+  - Verification:
+	- `cd /Users/sergey/Projects/C/clustered_pg && make` (compile check passed).
+	- regression validation of `REINDEX + DO (count/max/array_agg)` remains blocked until a stable contrib cluster socket exists at `/tmp/.s.PGSQL.5432`.
 
 - [x] P0 (CAUTION): eliminate rescan key-count skew corruption in clustered index scans.
   - DoD:
