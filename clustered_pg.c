@@ -30,6 +30,7 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(clustered_pg_version);
+PG_FUNCTION_INFO_V1(clustered_pg_observability);
 PG_FUNCTION_INFO_V1(clustered_pg_tableam_handler);
 PG_FUNCTION_INFO_V1(clustered_pg_pkidx_handler);
 PG_FUNCTION_INFO_V1(clustered_pg_locator_pack);
@@ -58,6 +59,31 @@ typedef struct ClusteredPgPkidxIndexOptionsCache
 } ClusteredPgPkidxIndexOptionsCache;
 
 #define CLUSTERED_PG_PKIDX_OPTIONS_MAGIC 0x634F5047
+#define CLUSTERED_PG_EXTENSION_VERSION "0.1.0"
+#define CLUSTERED_PG_OBS_API_VERSION 1
+#define CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD 128
+#define CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR 85
+#define CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL 60.0
+
+typedef struct ClusteredPgStats
+{
+	uint64		observability_calls;
+	uint64		costestimate_calls;
+	uint64		segment_rowcount_estimate_calls;
+	uint64		segment_rowcount_estimate_errors;
+	uint64		segment_map_lookup_calls;
+	uint64		segment_map_lookup_failures;
+	uint64		insert_calls;
+	uint64		insert_errors;
+	uint64		scan_rescan_calls;
+	uint64		scan_getcalls;
+	uint64		vacuumcleanup_calls;
+	uint64		maintenance_rebuild_calls;
+	uint64		maintenance_touch_calls;
+	uint64		maintenance_vacuumcleanup_errors;
+} ClusteredPgStats;
+
+static ClusteredPgStats clustered_pg_stats = {0};
 
 typedef struct ClusteredLocator
 {
@@ -100,6 +126,11 @@ static SPIPlanPtr clustered_pg_pkidx_rebuild_segment_map_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_tid_touch_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_tid_lookup_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_tid_gc_plan = NULL;
+static SPIPlanPtr clustered_pg_pkidx_segment_rowcount_plan = NULL;
+
+static const char *clustered_pg_format_relation_label(Oid relationOid,
+													 char *buffer,
+													 int bufferSize);
 
 static bytea *clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 												int split_threshold, int target_fillfactor,
@@ -115,6 +146,8 @@ static bool clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state
 static void clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
 												int64 minor_key, ItemPointer heap_tid);
 static void clustered_pg_pkidx_gc_segment_tids(Relation indexRelation);
+static SPIPlanPtr clustered_pg_pkidx_segment_rowcount_plan_init(void);
+static int64 clustered_pg_pkidx_estimate_segment_rows(Oid relationOid);
 static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
 									 bool *isnull, ItemPointer heap_tid,
 									 Relation heapRelation,
@@ -132,13 +165,31 @@ static void clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys,
 									ScanKey orderbys, int norderbys,
 									bool preserve_mark);
 static void clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
-																	const RelFileLocator *rlocator,
-																	char persistence,
-																	TransactionId *freezeXid,
-																	MultiXactId *minmulti);
+														const RelFileLocator *rlocator,
+														char persistence,
+														TransactionId *freezeXid,
+														MultiXactId *minmulti);
 static void clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel);
+static double clustered_pg_clustered_heap_index_build_range_scan(
+	Relation tableRelation,
+	Relation indexRelation,
+	IndexInfo *indexInfo,
+	bool allow_sync,
+	bool anyvisible,
+	bool progress,
+	BlockNumber start_blockno,
+	BlockNumber numblocks,
+	IndexBuildCallback callback,
+	void *callback_state,
+	TableScanDesc scan);
+static void clustered_pg_clustered_heap_index_validate_scan(
+	Relation tableRelation,
+	Relation indexRelation,
+	IndexInfo *indexInfo,
+	Snapshot snapshot,
+	ValidateIndexState *state);
 static void clustered_pg_clustered_heap_relation_copy_data(Relation rel,
-														 const RelFileLocator *newrlocator);
+														const RelFileLocator *newrlocator);
 static void clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
 															 Relation NewTable,
 															 Relation OldIndex,
@@ -151,6 +202,29 @@ static void clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTa
 															 double *tups_recently_dead);
 static void clustered_pg_clustered_heap_clear_segment_map(Oid relationOid);
 static void clustered_pg_clustered_heap_init_tableam_routine(void);
+
+static const char *
+clustered_pg_format_relation_label(Oid relationOid, char *buffer, int bufferSize)
+{
+	const char *relName;
+
+	if (buffer == NULL || bufferSize <= 0)
+		return NULL;
+
+	if (!OidIsValid(relationOid))
+	{
+		snprintf(buffer, bufferSize, "oid=0");
+		return buffer;
+	}
+
+	relName = get_rel_name(relationOid);
+	if (relName != NULL)
+		snprintf(buffer, bufferSize, "%u (%s)", relationOid, relName);
+	else
+		snprintf(buffer, bufferSize, "oid=%u", relationOid);
+
+	return buffer;
+}
 
 static const char *
 clustered_pg_qualified_extension_name(const char *name)
@@ -316,9 +390,113 @@ clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel)
 	clustered_pg_clustered_heap_clear_segment_map(RelationGetRelid(rel));
 }
 
+static double
+clustered_pg_clustered_heap_index_build_range_scan(Relation tableRelation,
+									 Relation indexRelation,
+									 IndexInfo *indexInfo,
+									 bool allow_sync,
+									 bool anyvisible,
+									 bool progress,
+									 BlockNumber start_blockno,
+									 BlockNumber numblocks,
+									 IndexBuildCallback callback,
+									 void *callback_state,
+									 TableScanDesc scan)
+{
+	const TableAmRoutine *heap;
+	const TableAmRoutine *old_tableam = tableRelation ? tableRelation->rd_tableam : NULL;
+	double result;
+
+	if (tableRelation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_heap index_build_range_scan requires a valid relation")));
+
+	if (indexRelation == NULL || indexInfo == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_heap index_build_range_scan requires valid index relation and index info")));
+
+	heap = GetHeapamTableAmRoutine();
+	if (heap == NULL || heap->index_build_range_scan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method build callback is unavailable")));
+
+	tableRelation->rd_tableam = heap;
+	PG_TRY();
+	{
+		result = heap->index_build_range_scan(tableRelation,
+									 indexRelation,
+									 indexInfo,
+									 allow_sync,
+									 anyvisible,
+									 progress,
+									 start_blockno,
+									 numblocks,
+									 callback,
+									 callback_state,
+									 scan);
+	}
+	PG_CATCH();
+	{
+		tableRelation->rd_tableam = old_tableam;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	tableRelation->rd_tableam = old_tableam;
+	return result;
+}
+
+static void
+clustered_pg_clustered_heap_index_validate_scan(Relation tableRelation,
+								Relation indexRelation,
+								IndexInfo *indexInfo,
+								Snapshot snapshot,
+								ValidateIndexState *state)
+{
+	const TableAmRoutine *heap;
+	const TableAmRoutine *old_tableam = tableRelation ? tableRelation->rd_tableam : NULL;
+
+	if (tableRelation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_heap index_validate_scan requires a valid relation")));
+
+	if (indexRelation == NULL || indexInfo == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("clustered_heap index_validate_scan requires valid index relation and index info")));
+
+	heap = GetHeapamTableAmRoutine();
+	if (heap == NULL || heap->index_validate_scan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("heap table access method validate callback is unavailable")));
+
+	tableRelation->rd_tableam = heap;
+	PG_TRY();
+	{
+		heap->index_validate_scan(tableRelation,
+							 indexRelation,
+							 indexInfo,
+							 snapshot,
+							 state);
+	}
+	PG_CATCH();
+	{
+		tableRelation->rd_tableam = old_tableam;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	tableRelation->rd_tableam = old_tableam;
+}
+
 static void
 clustered_pg_clustered_heap_relation_copy_data(Relation rel,
-											   const RelFileLocator *newrlocator)
+								   const RelFileLocator *newrlocator)
 {
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
 
@@ -383,6 +561,10 @@ clustered_pg_clustered_heap_init_tableam_routine(void)
 		clustered_pg_clustered_heap_relation_set_new_filelocator;
 	clustered_pg_clustered_heapam_routine.relation_nontransactional_truncate =
 		clustered_pg_clustered_heap_relation_nontransactional_truncate;
+	clustered_pg_clustered_heapam_routine.index_build_range_scan =
+		clustered_pg_clustered_heap_index_build_range_scan;
+	clustered_pg_clustered_heapam_routine.index_validate_scan =
+		clustered_pg_clustered_heap_index_validate_scan;
 	clustered_pg_clustered_heapam_routine.relation_copy_data =
 		clustered_pg_clustered_heap_relation_copy_data;
 	clustered_pg_clustered_heapam_routine.relation_copy_for_cluster =
@@ -394,7 +576,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_allocate_locator_plan_init(void)
 {
 	Oid			argtypes[6];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_allocate_locator_plan != NULL)
 		return clustered_pg_pkidx_allocate_locator_plan;
@@ -425,7 +607,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_count_repack_due_plan_init(void)
 {
 	Oid			argtypes[2];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_count_repack_due_plan != NULL)
 		return clustered_pg_pkidx_count_repack_due_plan;
@@ -452,7 +634,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_rebuild_segment_map_plan_init(void)
 {
 	Oid			argtypes[5];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_rebuild_segment_map_plan != NULL)
 		return clustered_pg_pkidx_rebuild_segment_map_plan;
@@ -482,7 +664,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_segment_tid_touch_plan_init(void)
 {
 	Oid			argtypes[4];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_segment_tid_touch_plan != NULL)
 		return clustered_pg_pkidx_segment_tid_touch_plan;
@@ -516,7 +698,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_segment_tid_lookup_plan_init(void)
 {
 	Oid			argtypes[2];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_segment_tid_lookup_plan != NULL)
 		return clustered_pg_pkidx_segment_tid_lookup_plan;
@@ -545,7 +727,7 @@ static SPIPlanPtr
 clustered_pg_pkidx_segment_tid_gc_plan_init(void)
 {
 	Oid			argtypes[1];
-	char		query[256];
+	char        query[1024];
 
 	if (clustered_pg_pkidx_segment_tid_gc_plan != NULL)
 		return clustered_pg_pkidx_segment_tid_gc_plan;
@@ -565,6 +747,87 @@ clustered_pg_pkidx_segment_tid_gc_plan_init(void)
 	SPI_keepplan(clustered_pg_pkidx_segment_tid_gc_plan);
 
 	return clustered_pg_pkidx_segment_tid_gc_plan;
+}
+
+static SPIPlanPtr
+clustered_pg_pkidx_segment_rowcount_plan_init(void)
+{
+	Oid			argtypes[1];
+	char        query[1024];
+
+	if (clustered_pg_pkidx_segment_rowcount_plan != NULL)
+		return clustered_pg_pkidx_segment_rowcount_plan;
+
+	argtypes[0] = OIDOID;
+
+	snprintf(query, sizeof(query),
+			 "SELECT COALESCE(SUM(row_count), 0)::bigint "
+			 "FROM %s WHERE relation_oid = $1::oid",
+			 clustered_pg_qualified_extension_name("segment_map"));
+
+	clustered_pg_pkidx_segment_rowcount_plan = SPI_prepare(query, 1, argtypes);
+	if (clustered_pg_pkidx_segment_rowcount_plan == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map row-count"),
+				 errhint("Inspect clustered_pg extension schema and function visibility.")));
+	SPI_keepplan(clustered_pg_pkidx_segment_rowcount_plan);
+
+	return clustered_pg_pkidx_segment_rowcount_plan;
+}
+
+static int64
+clustered_pg_pkidx_estimate_segment_rows(Oid relationOid)
+{
+	Datum		args[1];
+	int			rc;
+	bool		isnull = false;
+	int64		result = -1;
+	SPIPlanPtr	plan;
+
+	if (!OidIsValid(relationOid))
+		return -1;
+	clustered_pg_stats.segment_rowcount_estimate_calls++;
+
+	args[0] = ObjectIdGetDatum(relationOid);
+
+	plan = clustered_pg_pkidx_segment_rowcount_plan_init();
+	if (plan == NULL)
+		return -1;
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		return -1;
+
+	PG_TRY();
+	{
+		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		if (rc != SPI_OK_SELECT || SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map row-count estimate failed"),
+					 errdetail("SPI status code %d, processed rows %" PRIu64,
+							   rc, (uint64) SPI_processed)));
+
+		result = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											SPI_tuptable->tupdesc,
+											1,
+											&isnull));
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map row-count estimate returned NULL")));
+	}
+	PG_CATCH();
+	{
+		clustered_pg_stats.segment_rowcount_estimate_errors++;
+		SPI_finish();
+		result = -1;
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+	return result;
 }
 
 static void
@@ -1019,6 +1282,7 @@ clustered_pg_pkidx_collect_segment_tids(Relation indexRelation, int64 minor_key,
 
 	if (state == NULL)
 		return;
+	clustered_pg_stats.segment_map_lookup_calls++;
 
 	clustered_pg_pkidx_free_segment_tids(state);
 
@@ -1089,6 +1353,7 @@ clustered_pg_pkidx_collect_segment_tids(Relation indexRelation, int64 minor_key,
 	}
 	PG_CATCH();
 	{
+		clustered_pg_stats.segment_map_lookup_failures++;
 		SPI_finish();
 		PG_RE_THROW();
 	}
@@ -1265,11 +1530,19 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("segment_map_allocate_locator returned NULL")));
-		locator = DatumGetByteaP(locatorDatum);
-		if (locator == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("clustered_pg locator allocation failed")));
+		{
+			bytea	   *locatorRaw = DatumGetByteaP(locatorDatum);
+			Size		locatorSize;
+
+			if (locatorRaw == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("clustered_pg locator allocation returned NULL")));
+
+			locatorSize = VARSIZE_ANY(locatorRaw);
+			locator = (bytea *) palloc(locatorSize);
+			memcpy(locator, locatorRaw, locatorSize);
+		}
 	}
 	PG_CATCH();
 	{
@@ -1325,7 +1598,7 @@ clustered_pg_pkidx_init_reloptions(void)
 	add_int_reloption(clustered_pg_pkidx_relopt_kind,
 					"split_threshold",
 					"Estimated split trigger (tuples per segment) for clustered index AM",
-					128, 16, 8192,
+					CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD, 16, 8192,
 					AccessExclusiveLock);
 	clustered_pg_pkidx_relopt_tab[i].optname = "split_threshold";
 	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_INT;
@@ -1335,7 +1608,7 @@ clustered_pg_pkidx_init_reloptions(void)
 	add_int_reloption(clustered_pg_pkidx_relopt_kind,
 				"target_fillfactor",
 				"Target tuple density for initial split behavior",
-				85, 20, 100,
+				CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR, 20, 100,
 				AccessExclusiveLock);
 	clustered_pg_pkidx_relopt_tab[i].optname = "target_fillfactor";
 	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_INT;
@@ -1345,7 +1618,7 @@ clustered_pg_pkidx_init_reloptions(void)
 	add_real_reloption(clustered_pg_pkidx_relopt_kind,
 				"auto_repack_interval",
 				"Repack cadence hint for cluster maintenance loop",
-				60.0, 1.0, 3600.0,
+				CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL, 1.0, 3600.0,
 				AccessExclusiveLock);
 	clustered_pg_pkidx_relopt_tab[i].optname = "auto_repack_interval";
 	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_REAL;
@@ -1360,9 +1633,9 @@ clustered_pg_pkidx_get_index_options(Relation indexRelation,
 {
 	ClusteredPgPkidxIndexOptionsCache *cache = NULL;
 	ClusteredPgIndexOptions defaults = {
-		.split_threshold = 128,
-		.target_fillfactor = 85,
-		.auto_repack_interval = 60.0,
+		.split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD,
+		.target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR,
+		.auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL,
 	};
 	ClusteredPgIndexOptions *parsed;
 
@@ -1599,6 +1872,8 @@ clustered_pg_pkidx_gettuple(IndexScanDesc scan, ScanDirection direction)
 	if (scan == NULL || scan->indexRelation == NULL)
 		return false;
 
+	clustered_pg_stats.scan_getcalls++;
+
 	state = (ClusteredPgPkidxScanState *) scan->opaque;
 	if (state == NULL)
 		ereport(ERROR,
@@ -1644,6 +1919,8 @@ clustered_pg_pkidx_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
 	if (scan == NULL || scan->indexRelation == NULL || tbm == NULL)
 		return 0;
+
+	clustered_pg_stats.scan_getcalls++;
 
 	state = (ClusteredPgPkidxScanState *) scan->opaque;
 	if (state == NULL)
@@ -1763,6 +2040,7 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 
 	if (scan == NULL)
 		return;
+	clustered_pg_stats.scan_rescan_calls++;
 
 	state = (ClusteredPgPkidxScanState *) scan->opaque;
 	if (state == NULL)
@@ -2104,7 +2382,46 @@ clustered_pg_locator_next_minor(PG_FUNCTION_ARGS)
 Datum
 clustered_pg_version(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text("clustered_pg 0.1.0"));
+	PG_RETURN_TEXT_P(cstring_to_text("clustered_pg " CLUSTERED_PG_EXTENSION_VERSION));
+}
+
+Datum
+clustered_pg_observability(PG_FUNCTION_ARGS)
+{
+	char		text_buf[768];
+
+	clustered_pg_stats.observability_calls++;
+
+	snprintf(text_buf, sizeof(text_buf),
+			 "clustered_pg=%s api=%d defaults={split_threshold=%d,target_fillfactor=%d,auto_repack_interval=%.2f} "
+			 "counters={observability=%" PRIu64 ",costestimate=%" PRIu64
+			 ",segment_rowcount_estimates=%" PRIu64 ",segment_rowcount_errors=%" PRIu64
+			 ",segment_lookups=%" PRIu64 ",segment_lookup_errors=%" PRIu64
+			 ",index_inserts=%" PRIu64 ",insert_errors=%" PRIu64
+			 ",scan_rescans=%" PRIu64 ",scan_getcalls=%" PRIu64
+			 ",vacuumcleanup=%" PRIu64 ",rebuilds=%" PRIu64 ",touches=%" PRIu64
+			 ",maintenance_errors=%" PRIu64 "}",
+			 CLUSTERED_PG_EXTENSION_VERSION,
+			 CLUSTERED_PG_OBS_API_VERSION,
+			 CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD,
+			 CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR,
+			 CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL,
+			 clustered_pg_stats.observability_calls,
+			 clustered_pg_stats.costestimate_calls,
+			 clustered_pg_stats.segment_rowcount_estimate_calls,
+			 clustered_pg_stats.segment_rowcount_estimate_errors,
+			 clustered_pg_stats.segment_map_lookup_calls,
+			 clustered_pg_stats.segment_map_lookup_failures,
+			 clustered_pg_stats.insert_calls,
+			 clustered_pg_stats.insert_errors,
+			 clustered_pg_stats.scan_rescan_calls,
+			 clustered_pg_stats.scan_getcalls,
+			 clustered_pg_stats.vacuumcleanup_calls,
+			 clustered_pg_stats.maintenance_rebuild_calls,
+			 clustered_pg_stats.maintenance_touch_calls,
+			 clustered_pg_stats.maintenance_vacuumcleanup_errors);
+
+	PG_RETURN_TEXT_P(cstring_to_text(text_buf));
 }
 
 /*
@@ -2131,9 +2448,9 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 {
 	ClusteredPgPkidxBuildState buildstate;
 	IndexBuildResult *result;
-	int			split_threshold = 128;
-	int			target_fillfactor = 85;
-	double		auto_repack_interval = 60.0;
+	int			split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD;
+	int			target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR;
+	double		auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL;
 
 	if (heapRelation == NULL || indexRelation == NULL)
 		ereport(ERROR,
@@ -2199,13 +2516,14 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 	int64		major_key;
 	int64		locator_minor_key;
 	bytea	   *locator = NULL;
-	int			split_threshold = 128;
-	int			target_fillfactor = 85;
-	double		auto_repack_interval = 60.0;
+	int			split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD;
+	int			target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR;
+	double		auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL;
 
 	(void) heap_tid;
 	(void)checkUnique;
 	(void)indexUnchanged;
+	clustered_pg_stats.insert_calls++;
 
 	if (indexInfo == NULL || indexInfo->ii_NumIndexAttrs != 1)
 		ereport(ERROR,
@@ -2240,17 +2558,21 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 											 major_key,
 											 locator_minor_key,
 											 heap_tid);
-
-		pfree(locator);
-		locator = NULL;
 	}
 	PG_CATCH();
 	{
+		clustered_pg_stats.insert_errors++;
 		if (locator != NULL)
 			pfree(locator);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	if (locator != NULL)
+	{
+		pfree(locator);
+		locator = NULL;
+	}
 
 	return true;
 }
@@ -2281,14 +2603,22 @@ static IndexBulkDeleteResult *
 clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 							IndexBulkDeleteResult *stats)
 {
-	int			split_threshold = 128;
-	int			target_fillfactor = 85;
-	double		auto_repack_interval = 60.0;
+	char		relation_label[128];
+	bool		skip_maintenance = false;
+	int			split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD;
+	int			target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR;
+	double		auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL;
 	int64		due_segments = 0;
 
 	if (info != NULL && !info->analyze_only && info->index != NULL &&
 		info->index->rd_index != NULL)
 	{
+		clustered_pg_stats.vacuumcleanup_calls++;
+		skip_maintenance = ReindexIsProcessingIndex(RelationGetRelid(info->index));
+		clustered_pg_format_relation_label(RelationGetRelid(info->index),
+										  relation_label,
+										  sizeof(relation_label));
+
 		clustered_pg_pkidx_get_index_options(info->index,
 											&split_threshold,
 											&target_fillfactor,
@@ -2296,28 +2626,37 @@ clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 
 		PG_TRY();
 		{
-			due_segments = clustered_pg_pkidx_count_repack_due(info->index,
-															  auto_repack_interval);
-			if (due_segments > 0)
-				clustered_pg_pkidx_rebuild_segment_map(info->index,
-													   split_threshold,
-													   target_fillfactor,
-													   auto_repack_interval);
-			else
-				clustered_pg_pkidx_touch_repack(info->index);
+			if (!skip_maintenance)
+			{
+				due_segments = clustered_pg_pkidx_count_repack_due(info->index,
+																  auto_repack_interval);
+				if (due_segments > 0)
+				{
+					clustered_pg_stats.maintenance_rebuild_calls++;
+					clustered_pg_pkidx_rebuild_segment_map(info->index,
+														   split_threshold,
+														   target_fillfactor,
+														   auto_repack_interval);
+				}
+				else
+				{
+					clustered_pg_stats.maintenance_touch_calls++;
+					clustered_pg_pkidx_touch_repack(info->index);
+				}
+			}
 		}
 		PG_CATCH();
 		{
 			ErrorData  *edata = CopyErrorData();
 
 			FlushErrorState();
+			clustered_pg_stats.maintenance_vacuumcleanup_errors++;
 			ereport(WARNING,
 					(errcode(ERRCODE_WARNING),
 					 errmsg("clustered_pk_index maintenance callback failed"),
-					 errdetail("%s",
-							  edata->message != NULL ? edata->message : "unknown error"),
-					 errhint("Vacuum maintenance metadata update was skipped for relation %u.",
-							 RelationGetRelid(info->index))));
+					 errdetail("operation=vacuum_maintenance relation=%s error=%s",
+							   relation_label,
+							   edata->message != NULL ? edata->message : "unknown error")));
 			FreeErrorData(edata);
 		}
 		PG_END_TRY();
@@ -2336,13 +2675,13 @@ clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 			ErrorData  *edata = CopyErrorData();
 
 			FlushErrorState();
+			clustered_pg_stats.maintenance_vacuumcleanup_errors++;
 			ereport(WARNING,
 					(errcode(ERRCODE_WARNING),
 					 errmsg("clustered_pk_index tid-gc callback failed"),
-					 errdetail("%s",
-							  edata->message != NULL ? edata->message : "unknown error"),
-					 errhint("Vacuum orphan segment_map_tids cleanup was skipped for relation %u.",
-							 RelationGetRelid(info->index))));
+					 errdetail("operation=segment_map_tids_gc relation=%s error=%s",
+							   relation_label,
+							   edata->message != NULL ? edata->message : "unknown error")));
 			FreeErrorData(edata);
 		}
 		PG_END_TRY();
@@ -2358,9 +2697,14 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 							double *correlation, double *pages)
 {
 	GenericCosts costs = {0};
+	int64		segment_rows = -1;
 	double		est_pages;
 	double		est_selectivity;
 	IndexOptInfo *index = NULL;
+	double		relation_rows = 0.0;
+	double		hard_selectivity_floor = 0.0;
+
+	clustered_pg_stats.costestimate_calls++;
 
 	if (root == NULL || path == NULL || path->indexinfo == NULL)
 	{
@@ -2383,6 +2727,14 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 		return;
 	}
 
+	if (index->rel != NULL)
+	{
+		relation_rows = Max(index->rel->tuples, 0.0);
+		segment_rows = clustered_pg_pkidx_estimate_segment_rows(index->rel->relid);
+		if (segment_rows > 0 && segment_rows > relation_rows)
+			relation_rows = (double) segment_rows;
+	}
+
 	genericcostestimate(root, path, loop_count, &costs);
 
 	est_pages = costs.numIndexPages;
@@ -2394,6 +2746,19 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 		est_selectivity = 0.0;
 	else if (est_selectivity > 1.0)
 		est_selectivity = 1.0;
+
+	if (segment_rows > 0 && relation_rows > 0.0 && path->indexclauses != NIL &&
+		est_selectivity < 0.20)
+	{
+		/*
+		 * Segment map can become a stronger row-count signal for highly
+		 * selective index predicates by expressing an optimistic floor based
+		 * on live segment metadata.
+		 */
+		hard_selectivity_floor = 1.0 / relation_rows;
+		if (hard_selectivity_floor > est_selectivity)
+			est_selectivity = hard_selectivity_floor;
+	}
 
 	if (path->indexclauses != NULL)
 	{
@@ -2443,7 +2808,7 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.amsearcharray = false,
 		.amsearchnulls = false,
 		.amstorage = false,
-		.amclusterable = false,
+		.amclusterable = true,
 		.ampredlocks = false,
 		.amcanparallel = false,
 		.amcanbuildparallel = false,

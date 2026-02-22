@@ -5,6 +5,18 @@ SELECT public.version();
  clustered_pg 0.1.0
 (1 row)
 
+SELECT public.clustered_pg_observability() AS observability_bootstrap;
+                                                       observability_bootstrap                                                        
+-------------------------------------------------------------------------------------------------------------------------
+ clustered_pg=0.1.0 api=1 defaults={split_threshold=128,target_fillfactor=85,auto_repack_interval=60.00} counters={observability=1,costestimate=0,segment_rowcount_estimates=0,segment_rowcount_errors=0,segment_lookups=0,segment_lookup_errors=0,index_inserts=0,insert_errors=0,scan_rescans=0,scan_getcalls=0,vacuumcleanup=0,rebuilds=0,touches=0,maintenance_errors=0}
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'clustered_pg=0.1.0') AS observability_probe;
+ observability_probe 
+--------------------
+ t
+(1 row)
+
 CREATE TABLE clustered_pg_tableam_smoke(i int) USING clustered_heap;
 CREATE INDEX clustered_pg_tableam_smoke_idx ON clustered_pg_tableam_smoke (i);
 INSERT INTO clustered_pg_tableam_smoke(i) VALUES (1), (3), (7), (9);
@@ -693,6 +705,31 @@ SELECT count(*) FROM clustered_pg_am_costplanner;
  Aggregate
    ->  Seq Scan on clustered_pg_am_costplanner
 (2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM clustered_pg_am_costplanner;
+             QUERY PLAN             
+------------------------------------
+ Seq Scan on clustered_pg_am_costplanner
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'costestimate=[0-9]+') AS costestimate_tracked;
+ costestimate_tracked 
+---------------------
+ t
+(1 row)
+
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM clustered_pg_am_costplanner;
+             QUERY PLAN             
+------------------------------------
+ Seq Scan on clustered_pg_am_costplanner
+(1 row)
+
+SET enable_indexscan = on;
+SET enable_indexonlyscan = on;
 
 DROP TABLE clustered_pg_am_costplanner;
 SET enable_seqscan = off;

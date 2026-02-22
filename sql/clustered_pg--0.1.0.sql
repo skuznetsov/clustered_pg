@@ -10,6 +10,16 @@ RETURNS text
 AS '$libdir/clustered_pg', 'clustered_pg_version'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION @extschema@.observability()
+RETURNS text
+AS '$libdir/clustered_pg', 'clustered_pg_observability'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION @extschema@.clustered_pg_observability()
+RETURNS text
+AS '$libdir/clustered_pg', 'clustered_pg_observability'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION @extschema@.tableam_handler(internal)
 RETURNS table_am_handler
 AS '$libdir/clustered_pg', 'clustered_pg_tableam_handler'
@@ -304,6 +314,7 @@ DECLARE
 	v_head_row_count bigint;
 	v_head_split_threshold int;
 	v_head_target_fillfactor int;
+	v_use_existing_segment bool := false;
 	v_container_major_key bigint;
 	v_container_minor_from bigint;
 	v_container_minor_to bigint;
@@ -348,6 +359,7 @@ BEGIN
 			(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_container_target_fillfactor, v_target_fillfactor))) / 100
 		);
 		IF v_container_row_count + p_row_count_delta <= v_effective_row_capacity THEN
+			v_use_existing_segment := true;
 			UPDATE @extschema@.segment_map
 			SET minor_from = LEAST(minor_from, p_minor),
 				minor_to = GREATEST(minor_to, p_minor),
@@ -382,10 +394,11 @@ BEGIN
 		IF p_minor < v_head_minor_from THEN
 			v_effective_split_threshold := COALESCE(v_head_split_threshold, v_split_threshold);
 			v_effective_row_capacity := GREATEST(
-				1,
-				(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_head_target_fillfactor, v_target_fillfactor))) / 100
-			);
+			1,
+			(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_head_target_fillfactor, v_target_fillfactor))) / 100
+		);
 			IF v_head_row_count + p_row_count_delta <= v_effective_row_capacity THEN
+				v_use_existing_segment := true;
 				UPDATE @extschema@.segment_map
 				SET minor_from = LEAST(minor_from, p_minor),
 					row_count = row_count + p_row_count_delta,
@@ -400,12 +413,14 @@ BEGIN
 		ELSIF p_minor > v_last_minor_to THEN
 			v_effective_split_threshold := COALESCE(v_last_split_threshold, v_split_threshold);
 			v_effective_row_capacity := GREATEST(
-				1,
-				(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_last_target_fillfactor, v_target_fillfactor))) / 100
-			);
+			1,
+			(v_effective_split_threshold * LEAST(100, COALESCE(p_target_fillfactor, v_last_target_fillfactor, v_target_fillfactor))) / 100
+		);
 			IF v_last_row_count + p_row_count_delta > v_effective_row_capacity THEN
+				v_use_existing_segment := false;
 				v_major := v_last_major_key + 1;
 			ELSE
+				v_use_existing_segment := true;
 				v_major := v_last_major_key;
 			END IF;
 	ELSE
@@ -443,7 +458,8 @@ BEGIN
 	END IF;
 
 	-- Defensive normalization: avoid accidental collisions with stale or concurrent allocator state.
-	LOOP
+	IF NOT v_use_existing_segment THEN
+		LOOP
 		IF NOT EXISTS (
 			SELECT 1
 			FROM @extschema@.segment_map
@@ -458,7 +474,8 @@ BEGIN
 		END IF;
 
 		v_major := v_major + 1;
-	END LOOP;
+		END LOOP;
+	END IF;
 
 	INSERT INTO @extschema@.segment_map (
 		relation_oid, major_key, minor_from, minor_to,
@@ -654,30 +671,13 @@ BEGIN
 	PERFORM pg_advisory_xact_lock(v_relation_oid::bigint);
 	EXECUTE format('LOCK TABLE %I.%I IN SHARE UPDATE EXCLUSIVE MODE', v_schema_name, v_relation_name);
 
-	DROP TABLE IF EXISTS clustered_pg_rebuild_backup_segment_map;
-	DROP TABLE IF EXISTS clustered_pg_rebuild_backup_segment_map_tids;
-
-	CREATE TEMP TABLE clustered_pg_rebuild_backup_segment_map
-	ON COMMIT DROP
-	AS
-	SELECT *
-	FROM @extschema@.segment_map
-	WHERE relation_oid = v_relation_oid;
-
-	CREATE TEMP TABLE clustered_pg_rebuild_backup_segment_map_tids
-	ON COMMIT DROP
-	AS
-	SELECT *
-	FROM @extschema@.segment_map_tids
-	WHERE relation_oid = v_relation_oid;
-
 	DELETE FROM @extschema@.segment_map
 	WHERE relation_oid = v_relation_oid;
 	DELETE FROM @extschema@.segment_map_tids
 	WHERE relation_oid = v_relation_oid;
 
 	v_sql := format(
-		'SELECT ctid, %I::bigint AS major_value FROM %I.%I ORDER BY %I::bigint',
+		'SELECT ctid, %I::bigint AS major_value FROM %I.%I',
 		v_key_attr,
 		v_schema_name,
 		v_relation_name,
@@ -725,27 +725,6 @@ BEGIN
 	WHERE relation_oid = v_relation_oid;
 
 	RETURN v_repacked_count;
-
-EXCEPTION
-	WHEN OTHERS THEN
-		IF v_relation_oid IS NOT NULL THEN
-			DELETE FROM @extschema@.segment_map
-			WHERE relation_oid = v_relation_oid;
-			DELETE FROM @extschema@.segment_map_tids
-			WHERE relation_oid = v_relation_oid;
-
-			INSERT INTO @extschema@.segment_map
-			SELECT *
-			FROM clustered_pg_rebuild_backup_segment_map
-			WHERE relation_oid = v_relation_oid;
-
-			INSERT INTO @extschema@.segment_map_tids
-			SELECT *
-			FROM clustered_pg_rebuild_backup_segment_map_tids
-			WHERE relation_oid = v_relation_oid;
-		END IF;
-
-		RAISE;
 END;
 $$;
 

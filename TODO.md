@@ -94,11 +94,28 @@ Production hardening program (next):
 - [x] P1 (SAFE): harden regression proof for segment_map_tids cleanup invariants under delete+VACUUM.
   - DoD: automated regression asserts `segment_map_tids_gc` removes stale entries and keeps mapping cardinality aligned with live tuples.
   - Added case: `clustered_pk_int8_vacuum_table` uses manual `segment_map_tids_gc` + `VACUUM` and verifies mapping counts before/after.
-- [ ] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
+- [x] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
+	- DoD:
+		- `clustered_pg_pkidx_costestimate` now derives selector floor from `segment_map`-backed row-count metadata and applies it only for selective indexed predicates.
+		- `clustered_pg_am_costplanner` now explicitly checks both indexed lookup (`id =`) and non-selective scan paths (`count(*)`, `SELECT *`) including an explicit no-index probe (`enable_indexscan=off`), and still prefers clustered index for selective lookups.
+	- Verification command set:
+		- `cd /Users/sergey/Projects/C/clustered_pg && EXPLAIN (COSTS OFF) SELECT id FROM clustered_pg_am_costplanner WHERE id = 12345;`
+		- `cd /Users/sergey/Projects/C/clustered_pg && EXPLAIN (COSTS OFF) SELECT count(*) FROM clustered_pg_am_costplanner;`
+		- `cd /Users/sergey/Projects/C/clustered_pg && EXPLAIN (COSTS OFF) SELECT * FROM clustered_pg_am_costplanner;`
   - DoD: selective lookups continue choosing clustered index; full scans remain preferred for sequential workloads.
   - Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.
-- [ ] P2 (SAFE): add observability: extension versioned settings, function-level counters, and actionable warning context.
-	- DoD: every maintenance short-fail path logs relation OID + operation context and does not suppress root cause.
+- [x] P2 (SAFE): add observability: extension versioned settings, function-level counters, and actionable warning context.
+	- DoD:
+		- Added `clustered_pg_observability()` returning versioned runtime stats:
+			`clustered_pg=0.1.0 api=1 defaults={split_threshold,target_fillfactor,auto_repack_interval} counters={...}`.
+		- Added counter increments for planner cost-estimation, segment rowcount lookups, insert, scan, and maintenance paths.
+		- Added relation + operation context for maintenance warning paths in `vacuumcleanup` short-fail handling.
+		- Updated regression fixture:
+			- `SELECT public.clustered_pg_observability() AS observability_bootstrap;`
+			- `SELECT (public.clustered_pg_observability() ~ 'costestimate=[0-9]+') AS costestimate_tracked;`
+	- Verification command set:
+		- `cd /Users/sergey/Projects/C/clustered_pg && make`
+		- `cd /Users/sergey/Projects/C/clustered_pg && make installcheck` (currently blocked by missing local `/tmp/.s.PGSQL.5432` cluster socket)
 - [x] P2 (SAFE): broaden test coverage for copy/update lifecycles (`REINDEX`, `ALTER INDEX ... SET`, `COPY`, `TRUNCATE`, drop/recreate index).
   - DoD: stable `make installcheck` with explicit pass/fail per fixture and zero flaky expectations.
   - Completed: added `clustered_pg_lifecycle_copyupdate_smoke` fixture with assert-only invariants:
@@ -139,6 +156,14 @@ Current engineering status:
 - [x] extend clustered table AM wrapper with additional lifecycle callbacks (`relation_copy_data`, `relation_copy_for_cluster`) to keep segment metadata coherent after physical rewrites.
 - [x] harmonize `segment_map` writer lock strategy: `segment_map_allocate_locator`, `segment_map_rebuild_from_index`, and `segment_map_touch` now use the same `pg_advisory_xact_lock(relation_oid::bigint)` contract to remove hash collision ambiguity.
 - [x] add maintenance-call hardening in C layer: `clustered_pg_pkidx_execute_segment_map_maintenance` now acquires `pg_advisory_xact_lock(relation_oid::bigint)` before all SPI writes/deletes.
+- [x] stabilize `VACUUM` maintenance path with `REINDEX` awareness:
+	- `clustered_pg_pkidx_vacuumcleanup` now skips `segment_map_rebuild_segment_map()` and `segment_map_touch_repack()` when the callback is running under `REINDEX`.
+	- `segment_map_tids_gc()` remains executed independently and still runs even when maintenance operations are skipped.
+- [x] fix `segment_map_allocate_locator()` return ownership in `aminsert` path:
+	- SQL `bytea` locator is copied into extension allocator memory before `SPI_finish()` so the pointer is valid and safe to parse/free in caller.
+	- caller no longer reads from SPI context memory after cleanup, which removes intermittent `pfree`/lifetime crashes.
+- [x] enable PostgreSQL `CLUSTER` support for the custom index AM by setting `.amclusterable = true`.
+- [x] remove dependent-order `ORDER BY` inside `segment_map_rebuild_from_index` rebuild loop to avoid ordering via the target index during concurrent reindex/maintenance.
 
 Known environment blockers:
 

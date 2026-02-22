@@ -1,5 +1,7 @@
 CREATE EXTENSION clustered_pg;
 SELECT public.version();
+SELECT public.clustered_pg_observability() AS observability_bootstrap;
+SELECT (public.clustered_pg_observability() ~ 'clustered_pg=0.1.0') AS observability_probe;
 
 CREATE TABLE clustered_pg_tableam_smoke(i int) USING clustered_heap;
 CREATE INDEX clustered_pg_tableam_smoke_idx ON clustered_pg_tableam_smoke (i);
@@ -323,6 +325,15 @@ EXPLAIN (COSTS OFF)
 SELECT id FROM clustered_pg_am_costplanner WHERE id = 12345;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM clustered_pg_am_costplanner;
+EXPLAIN (COSTS OFF)
+SELECT * FROM clustered_pg_am_costplanner;
+SELECT (public.clustered_pg_observability() ~ 'costestimate=[0-9]+') AS costestimate_tracked;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM clustered_pg_am_costplanner;
+SET enable_indexscan = on;
+SET enable_indexonlyscan = on;
 
 DROP TABLE clustered_pg_am_costplanner;
 SET enable_seqscan = off;
