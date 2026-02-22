@@ -48,6 +48,8 @@ Execution loop status:
 - [x] implement index AM scan lifecycle scaffolding and functional `amgettuple`/`amgetbitmap` path using table scan fallback.
 - [x] replace hardcoded clustered index cost estimates with a planner-aware `genericcostestimate`-based path model and correlation heuristic.
 - [x] add regression coverage that asserts `EXPLAIN (COSTS OFF)` uses clustered index for selective lookups.
+- [x] add planner-comparison regression (`enable_seqscan/on`) to validate clustered index is chosen only when it is cost-effective for selective lookups.
+- [x] run local compile verification for the above regression path (`make` PASS); full `make installcheck` currently blocked because contrib regression cluster is unavailable (`/tmp/.s.PGSQL.5432` missing).
 
 Locator contract draft (v0.1):
 - Format: fixed 16-byte `bytea`, payload-only (no varlena metadata in locator value).

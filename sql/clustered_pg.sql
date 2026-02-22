@@ -240,6 +240,24 @@ SELECT count(*) AS am_filter_count
 FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
 DROP TABLE clustered_pg_am_filter_query;
 
+SET enable_seqscan = on;
+SET enable_bitmapscan = on;
+CREATE TABLE clustered_pg_am_costplanner(id bigint);
+CREATE INDEX clustered_pg_am_costplanner_idx
+	ON clustered_pg_am_costplanner USING clustered_pk_index (id)
+		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_costplanner(id)
+SELECT generate_series(1,10000);
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM clustered_pg_am_costplanner WHERE id = 12345;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM clustered_pg_am_costplanner;
+
+DROP TABLE clustered_pg_am_costplanner;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+
 SET enable_mergejoin = on;
 SET enable_hashjoin = off;
 SET enable_nestloop = off;
