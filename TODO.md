@@ -82,9 +82,11 @@ Production hardening program (next):
 	- DoD: partial failure in maintenance leaves `segment_map` in consistent state and recovers on next maintenance run.
 	- Evidence: `segment_map_rebuild_from_index` now supports test fault injection (`p_fail_after_n_rows`) and restores `segment_map` + `segment_map_tids` state from pre-run temp backups on exception.
 	- Verification: `clustered_pk_int8_rebuild_fault_table` keeps row_sum and segment_count identical before/after failure path while reporting `success = false`.
-- [ ] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
+- [x] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
   - DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
-  - IN_PROGRESS: `clustered_pg_tableam_cluster_smoke` regression added to confirm `CLUSTER` clears stale segment map metadata.
+  - Evidence: `clustered_pg_clustered_heap_clear_segment_map()` now checks for metadata existence under the same advisory lock and skips writes if no segment rows exist.
+  - Evidence: `clustered_pg_tableam_cluster_smoke` regression confirms `CLUSTER` clears stale segment map metadata.
+  - Evidence: `clustered_pg_tableam_copy_data_smoke` regression confirms `relation_copy_data`/`VACUUM FULL` path clears stale metadata and preserves table rows.
 - [x] P1 (SAFE): add vacuum-time orphan cleanup for segment_map_tids (`segment_map_tids_gc`) and wire it through clustered index VACUUM callback.
   - DoD: `VACUUM` on an indexed relation after deletes leaves no `segment_map_tids` entries for missing CTIDs.
   - Invariant: stale tuple mappings are bounded and cannot grow indefinitely between explicit rebuilds.

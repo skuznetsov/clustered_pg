@@ -179,9 +179,13 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 {
 	char		sql[256];
 	char		sql_tids[256];
+	char		sql_has_metadata[320];
 	Datum		args[1];
 	Oid			argtypes[1];
+	const char *lock_sql = "SELECT pg_advisory_xact_lock($1::bigint)";
 	int			rc;
+	bool		has_metadata = false;
+	bool		isnull = false;
 
 	if (!OidIsValid(relationOid))
 		return;
@@ -195,6 +199,11 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 	snprintf(sql_tids, sizeof(sql_tids),
 			 "DELETE FROM %s WHERE relation_oid = $1::oid",
 			 clustered_pg_qualified_extension_name("segment_map_tids"));
+	snprintf(sql_has_metadata, sizeof(sql_has_metadata),
+			 "SELECT EXISTS (SELECT 1 FROM %s WHERE relation_oid = $1::oid) "
+			 "OR EXISTS (SELECT 1 FROM %s WHERE relation_oid = $1::oid)",
+			 clustered_pg_qualified_extension_name("segment_map"),
+			 clustered_pg_qualified_extension_name("segment_map_tids"));
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
@@ -204,19 +213,48 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 
 	PG_TRY();
 	{
-		rc = SPI_execute_with_args(
-			"SELECT pg_advisory_xact_lock($1::bigint)",
-			1,
-			argtypes,
-			args,
-			NULL,
-			false,
-			0);
+		rc = SPI_execute_with_args(lock_sql,
+								   1,
+								   argtypes,
+								   args,
+								   NULL,
+								   false,
+								   0);
 		if (rc != SPI_OK_SELECT)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("clustered_pg segment_map cleanup lock acquisition failed"),
 					 errdetail("SPI status code %d", rc)));
+
+		rc = SPI_execute_with_args(sql_has_metadata,
+								   1,
+								   argtypes,
+								   args,
+								   NULL,
+								   false,
+								   0);
+		if (rc != SPI_OK_SELECT)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map metadata lookup failed"),
+					 errdetail("SPI status code %d", rc)));
+		if (SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map metadata lookup returned unexpected row count"),
+					 errdetail("Expected 1 row, got %" PRIu64, (uint64) SPI_processed)));
+
+		has_metadata = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+												 SPI_tuptable->tupdesc,
+												 1,
+												 &isnull));
+		if (isnull)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("clustered_pg segment_map metadata lookup returned NULL")));
+
+		if (!has_metadata)
+			goto skip_cleanup;
 
 		rc = SPI_execute_with_args(sql, 1, argtypes, args, NULL, false, 0);
 		if (rc != SPI_OK_DELETE)
@@ -231,6 +269,9 @@ clustered_pg_clustered_heap_clear_segment_map(Oid relationOid)
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("clustered_pg segment_map_tids cleanup failed"),
 					 errdetail("SPI status code %d", rc)));
+
+skip_cleanup:
+		;
 	}
 	PG_CATCH();
 	{

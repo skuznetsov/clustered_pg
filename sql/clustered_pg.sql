@@ -50,6 +50,21 @@ SELECT count(*) AS tableam_segment_rows_after_truncate
 FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
 DROP TABLE clustered_pg_tableam_segmented;
 
+CREATE TABLE clustered_pg_tableam_copy_data_smoke(i int) USING clustered_heap;
+INSERT INTO clustered_pg_tableam_copy_data_smoke(i)
+VALUES (1), (2), (3);
+SELECT segment_map_touch(
+    'clustered_pg_tableam_copy_data_smoke'::regclass::oid,
+    0, 1, 10, 100, 100, 60.0) AS tableam_copy_data_touch_count;
+SELECT count(*) AS tableam_copy_data_segment_rows_before_copy
+FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
+VACUUM FULL clustered_pg_tableam_copy_data_smoke;
+SELECT count(*) AS tableam_copy_data_segment_rows_after_copy
+FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
+SELECT count(*) AS tableam_copy_data_rows_after_vacuum_full
+FROM clustered_pg_tableam_copy_data_smoke;
+DROP TABLE clustered_pg_tableam_copy_data_smoke;
+
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
 SELECT locator_pack_int8(12345) = locator_pack(0,12345) as pack_int8_matches_pair;
 SELECT locator_major(locator_pack_int8(12345)) as major_part,

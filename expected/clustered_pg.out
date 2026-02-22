@@ -102,6 +102,41 @@ FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
 (1 row)
 
 DROP TABLE clustered_pg_tableam_segmented;
+CREATE TABLE clustered_pg_tableam_copy_data_smoke(i int) USING clustered_heap;
+INSERT INTO clustered_pg_tableam_copy_data_smoke(i)
+VALUES (1), (2), (3);
+SELECT segment_map_touch(
+    'clustered_pg_tableam_copy_data_smoke'::regclass::oid,
+    0, 1, 10, 100, 100, 60.0) AS tableam_copy_data_touch_count;
+ tableam_copy_data_touch_count 
+-----------------------------
+                           1
+(1 row)
+
+SELECT count(*) AS tableam_copy_data_segment_rows_before_copy
+FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
+ tableam_copy_data_segment_rows_before_copy 
+-----------------------------------------
+                                      1
+(1 row)
+
+VACUUM FULL clustered_pg_tableam_copy_data_smoke;
+SELECT count(*) AS tableam_copy_data_segment_rows_after_copy
+FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
+ tableam_copy_data_segment_rows_after_copy 
+-----------------------------------------
+                                       0
+(1 row)
+
+SELECT count(*) AS tableam_copy_data_rows_after_vacuum_full
+FROM clustered_pg_tableam_copy_data_smoke;
+ tableam_copy_data_rows_after_vacuum_full 
+-----------------------------------------
+                                       3
+(1 row)
+
+DROP TABLE clustered_pg_tableam_copy_data_smoke;
+
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
             packed_hex             
 -----------------------------------
