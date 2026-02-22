@@ -21,6 +21,7 @@
 	- [x] add regression coverage for constrained index predicates through clustered index AM
 	- [x] implement scan mark/restore behavior with restart + saved TID replay on the heap fallback path
 	- [x] preserve mark/restore state through amrestrpos-initiated table scan bootstrap path
+	- [x] add merge-join duplicate inner-path regression for mark/restore stress
 
 Current local plan:
 

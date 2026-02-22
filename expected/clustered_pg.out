@@ -423,10 +423,47 @@ SELECT count(*) AS am_merge_join_filter_count
 FROM clustered_pg_am_merge_fixture l
 JOIN clustered_pg_am_merge_fixture_b r ON l.id = r.id
 WHERE l.id BETWEEN 12 AND 16;
- am_merge_join_filter_count 
+am_merge_join_filter_count 
 --------------------------
                        5
 (1 row)
+
+CREATE TABLE clustered_pg_am_merge_markrestore(a bigint);
+CREATE TABLE clustered_pg_am_merge_markrestore_b(a bigint);
+CREATE INDEX clustered_pg_am_merge_markrestore_a_idx
+	ON clustered_pg_am_merge_markrestore USING clustered_pk_index (a)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+CREATE INDEX clustered_pg_am_merge_markrestore_b_idx
+	ON clustered_pg_am_merge_markrestore_b USING clustered_pk_index (a)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_merge_markrestore(a)
+SELECT generate_series(1,10);
+INSERT INTO clustered_pg_am_merge_markrestore_b(a) VALUES
+	(1), (1), (2), (2), (2), (4), (6), (6);
+SELECT a, count(*) AS matched_cnt
+FROM clustered_pg_am_merge_markrestore l
+JOIN clustered_pg_am_merge_markrestore_b r USING (a)
+GROUP BY a
+ORDER BY a;
+ a | matched_cnt 
+---+-------------
+ 1 | 2
+ 2 | 3
+ 4 | 1
+ 6 | 2
+(4 rows)
+
+SELECT count(*) AS am_merge_markrestore_row_count
+FROM clustered_pg_am_merge_markrestore l
+JOIN clustered_pg_am_merge_markrestore_b r USING (a)
+WHERE l.a BETWEEN 2 AND 6;
+ am_merge_markrestore_row_count 
+------------------------------
+                            6
+(1 row)
+
+DROP TABLE clustered_pg_am_merge_markrestore;
+DROP TABLE clustered_pg_am_merge_markrestore_b;
 
 DROP TABLE clustered_pg_am_merge_fixture;
 DROP TABLE clustered_pg_am_merge_fixture_b;
