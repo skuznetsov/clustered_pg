@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.so
+*.dylib
+clustered_pg-*.so
+
+# PG regression artifacts
+regression.out
+regression.diffs
+results/
+log/
+tmp_check/
+tmp_check_iso/
+
+# OS/editor temporary files
+*.swp
+*~

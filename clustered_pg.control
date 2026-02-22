@@ -1,0 +1,5 @@
+comment = 'Clustered storage and clustered index experiment scaffold for PostgreSQL'
+default_version = '0.1.0'
+relocatable = false
+superuser = false
+module_pathname = '$libdir/clustered_pg'
