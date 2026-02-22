@@ -115,6 +115,19 @@ SELECT count(*) AS am_smoke_segment_count,
 FROM segment_map_stats('clustered_pg_am_smoke'::regclass::oid);
 DROP TABLE clustered_pg_am_smoke;
 
+CREATE TABLE clustered_pg_am_scale_smoke(id bigint);
+CREATE INDEX clustered_pg_am_scale_smoke_idx
+	ON clustered_pg_am_scale_smoke USING clustered_pk_index (id)
+		WITH (split_threshold=256, target_fillfactor=70, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_am_scale_smoke(id)
+SELECT generate_series(1,50000);
+SELECT count(*) AS am_scale_rows FROM clustered_pg_am_scale_smoke;
+SELECT count(*) AS am_scale_segment_count,
+       sum(row_count) AS am_scale_segment_rows,
+       max(major_key) AS am_scale_max_major
+FROM segment_map_stats('clustered_pg_am_scale_smoke'::regclass::oid);
+DROP TABLE clustered_pg_am_scale_smoke;
+
 SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY major_key;
 
 SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,
