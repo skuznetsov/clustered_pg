@@ -31,6 +31,20 @@ SELECT count(*) AS tableam_rows_after_update FROM clustered_pg_tableam_smoke;
                          4
 (1 row)
 
+DELETE FROM clustered_pg_tableam_smoke WHERE i > 4;
+SELECT count(*) AS tableam_rows_after_delete FROM clustered_pg_tableam_smoke;
+ tableam_rows_after_delete 
+--------------------------
+                         2
+(1 row)
+
+TRUNCATE clustered_pg_tableam_smoke;
+SELECT count(*) AS tableam_rows_after_truncate FROM clustered_pg_tableam_smoke;
+ tableam_rows_after_truncate 
+----------------------------
+                           0
+(1 row)
+
 DROP TABLE clustered_pg_tableam_smoke;
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
             packed_hex             

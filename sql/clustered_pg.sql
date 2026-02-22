@@ -12,6 +12,10 @@ UPDATE clustered_pg_tableam_smoke
 SET i = i + 1
 WHERE i = 3;
 SELECT count(*) AS tableam_rows_after_update FROM clustered_pg_tableam_smoke;
+DELETE FROM clustered_pg_tableam_smoke WHERE i > 4;
+SELECT count(*) AS tableam_rows_after_delete FROM clustered_pg_tableam_smoke;
+TRUNCATE clustered_pg_tableam_smoke;
+SELECT count(*) AS tableam_rows_after_truncate FROM clustered_pg_tableam_smoke;
 DROP TABLE clustered_pg_tableam_smoke;
 
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
