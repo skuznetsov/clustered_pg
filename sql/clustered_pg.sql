@@ -8,10 +8,16 @@ FROM pg_class c
 JOIN pg_am am ON c.relam = am.oid
 WHERE c.relname = 'clustered_pg_tableam_smoke';
 SELECT array_agg(i ORDER BY i) AS tableam_values FROM clustered_pg_tableam_smoke;
+CREATE INDEX clustered_pg_tableam_smoke_idx ON clustered_pg_tableam_smoke (i);
+SELECT count(*) AS tableam_filter_count
+FROM clustered_pg_tableam_smoke
+WHERE i IN (3,9);
 UPDATE clustered_pg_tableam_smoke
 SET i = i + 1
 WHERE i = 3;
 SELECT count(*) AS tableam_rows_after_update FROM clustered_pg_tableam_smoke;
+ANALYZE clustered_pg_tableam_smoke;
+VACUUM clustered_pg_tableam_smoke;
 DELETE FROM clustered_pg_tableam_smoke WHERE i > 4;
 SELECT count(*) AS tableam_rows_after_delete FROM clustered_pg_tableam_smoke;
 TRUNCATE clustered_pg_tableam_smoke;
