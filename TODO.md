@@ -96,3 +96,4 @@ Latest execution trace:
 - [x] extend clustered_heap table AM smoke to cover delete and truncate lifecycle on the delegated path.
 - [x] add clustered_heap table AM smoke for index creation, filtered read, ANALYZE, and VACUUM lifecycle checks.
 - [x] add allocator regression for interstitial inserts into saturated neighboring segments (ensures new major bucket allocation).
+- [x] add defensive major-key collision rebasing in allocator to tolerate stale/concurrent `segment_map` rows.

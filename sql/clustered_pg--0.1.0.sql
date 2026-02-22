@@ -257,6 +257,7 @@ DECLARE
 	v_prev_container_major_key bigint;
 	v_next_major_key bigint;
 	v_prev_container_found bool := false;
+	v_collision_retry int := 0;
 BEGIN
 	IF p_minor IS NULL THEN
 		RAISE EXCEPTION 'p_minor cannot be NULL';
@@ -351,11 +352,11 @@ BEGIN
 			ELSE
 				v_major := v_last_major_key;
 			END IF;
-		ELSE
-			-- backfill or gap: allocate segment after the last preceding segment.
-			SELECT major_key
-			INTO v_prev_container_major_key
-			FROM @extschema@.segment_map
+	ELSE
+		-- backfill or gap: allocate segment after the last preceding segment.
+		SELECT major_key
+		INTO v_prev_container_major_key
+		FROM @extschema@.segment_map
 			WHERE relation_oid = rel_oid
 				AND minor_to < p_minor
 			ORDER BY major_key DESC
@@ -379,11 +380,29 @@ BEGIN
 			IF v_container_major_key IS NOT NULL AND v_major = v_container_major_key THEN
 				v_major := v_container_major_key + 1;
 			END IF;
-			IF v_next_major_key IS NOT NULL AND v_major = v_next_major_key THEN
-				v_major := v_next_major_key + 1;
-			END IF;
+		IF v_next_major_key IS NOT NULL AND v_major = v_next_major_key THEN
+			v_major := v_next_major_key + 1;
+		END IF;
 		END IF;
 	END IF;
+
+	-- Defensive normalization: avoid accidental collisions with stale or concurrent allocator state.
+	LOOP
+		IF NOT EXISTS (
+			SELECT 1
+			FROM @extschema@.segment_map
+			WHERE relation_oid = rel_oid AND major_key = v_major
+		) THEN
+			EXIT;
+		END IF;
+
+		v_collision_retry := v_collision_retry + 1;
+		IF v_collision_retry > 32767 THEN
+			RAISE EXCEPTION 'segment_map_allocate_locator exhausted major_key search for relation %', rel_oid;
+		END IF;
+
+		v_major := v_major + 1;
+	END LOOP;
 
 	INSERT INTO @extschema@.segment_map (
 		relation_oid, major_key, minor_from, minor_to,

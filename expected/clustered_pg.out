@@ -216,6 +216,32 @@ FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
  {0,1,2}
 (1 row)
 
+CREATE TEMP TABLE clustered_pg_gap_collision(id int);
+SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 0, 1, 10, 1, 100, 60.0) AS gap_collision_touch_0;
+ gap_collision_touch_0 
+-----------------------
+                     1
+(1 row)
+
+SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 2, 30, 40, 1, 100, 60.0) AS gap_collision_touch_2;
+ gap_collision_touch_2 
+-----------------------
+                     1
+(1 row)
+
+SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_collision'::regclass::oid, 20, 1, 1, 100)) AS gap_collision_alloc_20;
+         gap_collision_alloc_20          
+---------------------------------------
+ 0000000000000003:0000000000000014
+(1 row)
+
+SELECT array_agg(major_key ORDER BY major_key) AS gap_collision_majors
+FROM segment_map_stats('clustered_pg_gap_collision'::regclass::oid);
+      gap_collision_majors      
+---------------------------------
+ {0,1,2,3}
+(1 row)
+
 SELECT locator_major(locator_pack(0,10)) AS major_check,
        locator_minor(locator_pack(0,10)) AS minor_check;
  major_check | minor_check 

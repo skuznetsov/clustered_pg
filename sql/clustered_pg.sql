@@ -69,6 +69,21 @@ FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
 SELECT array_agg(major_key ORDER BY major_key) AS gap_allocator_majors
 FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
 
+-- Simulate allocator collision with an already occupied major key (as if external allocator lag exists).
+CREATE TEMP TABLE clustered_pg_gap_collision(id int);
+SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 0, 1, 10, 1, 100, 60.0) AS gap_collision_touch_0;
+SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 2, 30, 40, 1, 100, 60.0) AS gap_collision_touch_2;
+INSERT INTO segment_map (relation_oid, major_key, minor_from, minor_to, split_threshold, target_fillfactor, auto_repack_interval, row_count)
+SELECT 'clustered_pg_gap_collision'::regclass::oid, 1, 100, 110, 1, 100, 60.0, 0
+WHERE NOT EXISTS (
+	SELECT 1 FROM segment_map
+	WHERE relation_oid = 'clustered_pg_gap_collision'::regclass::oid
+		AND major_key = 1
+);
+SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_collision'::regclass::oid, 20, 1, 1, 100)) AS gap_collision_alloc_20;
+SELECT array_agg(major_key ORDER BY major_key) AS gap_collision_majors
+FROM segment_map_stats('clustered_pg_gap_collision'::regclass::oid);
+
 SELECT locator_major(locator_pack(0,10)) AS major_check,
        locator_minor(locator_pack(0,10)) AS minor_check;
 
