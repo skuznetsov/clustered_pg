@@ -89,7 +89,7 @@ Production hardening program (next):
   - DoD: `VACUUM` on an indexed relation after deletes leaves no `segment_map_tids` entries for missing CTIDs.
   - Invariant: stale tuple mappings are bounded and cannot grow indefinitely between explicit rebuilds.
   - Evidence target: `segment_map_tids_gc` is now callable as maintenance pass and invoked from `clustered_pg_pkidx_vacuumcleanup`.
-- [ ] P1 (SAFE): harden regression proof for segment_map_tids cleanup invariants under delete+VACUUM.
+- [x] P1 (SAFE): harden regression proof for segment_map_tids cleanup invariants under delete+VACUUM.
   - DoD: automated regression asserts `segment_map_tids_gc` removes stale entries and keeps mapping cardinality aligned with live tuples.
   - Added case: `clustered_pk_int8_vacuum_table` uses manual `segment_map_tids_gc` + `VACUUM` and verifies mapping counts before/after.
 - [ ] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
