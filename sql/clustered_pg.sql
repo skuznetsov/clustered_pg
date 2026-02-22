@@ -392,4 +392,82 @@ SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,
        locator_gt(locator_pack(1,0), locator_pack(0,1)) as op_gt,
        locator_eq(locator_pack(1,2), locator_pack(1,2)) as op_eq;
 
+CREATE TABLE clustered_pg_lifecycle_copyupdate_smoke(i bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	ON clustered_pg_lifecycle_copyupdate_smoke USING clustered_pk_index (i)
+		WITH (split_threshold=64, target_fillfactor=75, auto_repack_interval=30.0);
+COPY clustered_pg_lifecycle_copyupdate_smoke(i) FROM STDIN;
+1
+2
+3
+4
+\.
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'COPY lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+
+INSERT INTO clustered_pg_lifecycle_copyupdate_smoke(i)
+VALUES (5), (6), (7);
+REINDEX TABLE clustered_pg_lifecycle_copyupdate_smoke;
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'REINDEX lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+
+ALTER INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	SET (split_threshold=32, target_fillfactor=80, auto_repack_interval=45.0);
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'ALTER INDEX SET lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+
+DROP INDEX clustered_pg_lifecycle_copyupdate_smoke_idx;
+INSERT INTO clustered_pg_lifecycle_copyupdate_smoke(i) VALUES (8), (9);
+CREATE INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	ON clustered_pg_lifecycle_copyupdate_smoke USING clustered_pk_index (i)
+	WITH (split_threshold=16, target_fillfactor=70, auto_repack_interval=20.0);
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'DROP/RECREATE index lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+
+DROP TABLE clustered_pg_lifecycle_copyupdate_smoke;
+
 DROP EXTENSION clustered_pg;

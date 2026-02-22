@@ -99,8 +99,13 @@ Production hardening program (next):
   - Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.
 - [ ] P2 (SAFE): add observability: extension versioned settings, function-level counters, and actionable warning context.
 	- DoD: every maintenance short-fail path logs relation OID + operation context and does not suppress root cause.
-- [ ] P2 (SAFE): broaden test coverage for copy/update lifecycles (`REINDEX`, `ALTER INDEX ... SET`, `COPY`, `TRUNCATE`, drop/recreate index).
-	- DoD: stable `make installcheck` with explicit pass/fail per fixture and zero flaky expectations.
+- [x] P2 (SAFE): broaden test coverage for copy/update lifecycles (`REINDEX`, `ALTER INDEX ... SET`, `COPY`, `TRUNCATE`, drop/recreate index).
+  - DoD: stable `make installcheck` with explicit pass/fail per fixture and zero flaky expectations.
+  - Completed: added `clustered_pg_lifecycle_copyupdate_smoke` fixture with assert-only invariants:
+    - `COPY` inserts keep `segment_map` row_count aligned with live table rows.
+    - `REINDEX` preserves `segment_map` alignment.
+    - `ALTER INDEX ... SET` keeps `segment_map` alignment.
+    - `DROP INDEX` + insert + recreate index preserves `segment_map` alignment.
 
 Decision protocol (Quadrumvirate):
 - For each milestone, run one `Cassandra` precheck, then implement one focused patch, then `Adversary` checks (edge/concurrency/regression) before marking it `COMPLETED`.
