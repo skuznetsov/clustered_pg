@@ -71,6 +71,7 @@ Production hardening program (next):
 	- Verification: inject SPI failures in unit harness and assert no orphaned map rows for dropped/rebuilt relations.
 - [ ] P1 (SAFE): harden Table AM lifecycle edge paths (`relation_copy_data`, truncate, cluster) with strict DoC checks and no duplicate side effects.
 	- DoD: each lifecycle callback executes at most one physical segment cleanup per call and returns unchanged heap behavior.
+	- IN_PROGRESS: `clustered_pg_tableam_cluster_smoke` regression added to confirm `CLUSTER` clears stale segment map metadata.
 - [ ] P2 (SAFE): stabilize cost model with explicit metadata-backed cardinality hints.
 	- DoD: selective lookups continue choosing clustered index; full scans remain preferred for sequential workloads.
 	- Verification: existing planner regression (`clustered_pg_am_costplanner`) plus an explicit `SELECT *` no-index scenario.

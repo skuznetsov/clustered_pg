@@ -57,10 +57,33 @@ SELECT count(*) AS tableam_rows_after_truncate FROM clustered_pg_tableam_smoke;
 (1 row)
 
 DROP TABLE clustered_pg_tableam_smoke;
+CREATE TABLE clustered_pg_tableam_cluster_smoke(i bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_tableam_cluster_smoke_idx
+	ON clustered_pg_tableam_cluster_smoke USING clustered_pk_index (i)
+		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_tableam_cluster_smoke(i)
+SELECT generate_series(1,24);
+SELECT count(*) AS tableam_cluster_segment_rows_before_cluster
+FROM segment_map_stats('clustered_pg_tableam_cluster_smoke'::regclass::oid);
+ tableam_cluster_segment_rows_before_cluster 
+-------------------------------------------
+                                        1
+(1 row)
+
+CLUSTER clustered_pg_tableam_cluster_smoke USING clustered_pg_tableam_cluster_smoke_idx;
+SELECT count(*) AS tableam_cluster_segment_rows_after_cluster
+FROM segment_map_stats('clustered_pg_tableam_cluster_smoke'::regclass::oid);
+ tableam_cluster_segment_rows_after_cluster 
+------------------------------------------
+                                      0
+(1 row)
+
+DROP TABLE clustered_pg_tableam_cluster_smoke;
+
 CREATE TABLE clustered_pg_tableam_segmented(i bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_tableam_segmented_idx
 	ON clustered_pg_tableam_segmented USING clustered_pk_index (i)
-	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_tableam_segmented(i)
 SELECT generate_series(1,12);
 SELECT count(*) AS tableam_segment_rows_before_truncate
