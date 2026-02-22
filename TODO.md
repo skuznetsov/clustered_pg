@@ -82,6 +82,7 @@ Latest execution trace:
 	- `v_prev_container_major_key` is used for backfill-gap major selection.
 - [x] this removes runtime failures like `record "... " has no field "target_fillfactor"` caused by mixed record projections.
 - [x] validate with a fresh `make installcheck` run against a clean `contrib_regression` cluster.
+- [x] optimize clustered PK index rescan path by skipping redundant `ScanKeyData` copy when source and destination key buffers alias.
 - [x] add perf-smoke and `target_fillfactor` boundary regression cases in SQL fixture (`clustered_pg_perf_smoke`, `clustered_pg_fillfactor_bounds/floor`).
 - [x] add index-AM smoke test for clustered index insert callback and segment-map growth under 10k-row append workload.
 - [x] add scale-focused AM smoke test (50k-row append) to guard split-policy growth behavior under larger volume.

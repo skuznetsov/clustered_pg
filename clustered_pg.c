@@ -1016,7 +1016,7 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 	if (scan->xs_snapshot == InvalidSnapshot)
 		scan->xs_snapshot = GetTransactionSnapshot();
 
-	if (scan->numberOfKeys > 0 && keys != NULL)
+	if (scan->numberOfKeys > 0 && keys != NULL && keys != scan->keyData)
 		memcpy(scan->keyData, keys, sizeof(ScanKeyData) * scan->numberOfKeys);
 
 	if (scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
