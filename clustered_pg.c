@@ -141,6 +141,7 @@ static void clustered_pg_pkidx_collect_segment_tids(Relation indexRelation, int6
 												  ClusteredPgPkidxScanState *state,
 												  ScanDirection direction);
 static void clustered_pg_pkidx_free_segment_tids(ClusteredPgPkidxScanState *state);
+static void clustered_pg_validate_locator_len(bytea *locator);
 static bool clustered_pg_pkidx_next_segment_tid(ClusteredPgPkidxScanState *state,
 											  ScanDirection direction, ItemPointer tid);
 static void clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
@@ -758,6 +759,7 @@ clustered_pg_pkidx_estimate_segment_rows(Oid relationOid)
 	bool		isnull = false;
 	int64		result = -1;
 	SPIPlanPtr	plan;
+	bool		spi_connected = false;
 
 	if (!OidIsValid(relationOid))
 		return -1;
@@ -765,13 +767,17 @@ clustered_pg_pkidx_estimate_segment_rows(Oid relationOid)
 
 	args[0] = ObjectIdGetDatum(relationOid);
 
-	plan = clustered_pg_pkidx_segment_rowcount_plan_init();
-	if (plan == NULL)
-		return -1;
-
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
 		return -1;
+	spi_connected = true;
+
+	plan = clustered_pg_pkidx_segment_rowcount_plan_init();
+	if (plan == NULL)
+	{
+		SPI_finish();
+		return -1;
+	}
 
 	PG_TRY();
 	{
@@ -795,12 +801,12 @@ clustered_pg_pkidx_estimate_segment_rows(Oid relationOid)
 	PG_CATCH();
 	{
 		clustered_pg_stats.segment_rowcount_estimate_errors++;
-		SPI_finish();
 		result = -1;
 	}
 	PG_END_TRY();
 
-	SPI_finish();
+	if (spi_connected)
+		SPI_finish();
 	return result;
 }
 
@@ -1221,9 +1227,15 @@ clustered_pg_pkidx_lookup_locator_values(bytea *locator, int64 *major_key, int64
 	const uint8 *payload;
 
 	if (locator == NULL)
-		return;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("clustered_pg locator is NULL")));
 	if (major_key == NULL || minor_key == NULL)
-		return;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("clustered_pg locator output pointer is NULL")));
+
+	clustered_pg_validate_locator_len(locator);
 
 	payload = (const uint8 *) VARDATA(locator);
 	*major_key = (int64) clustered_pg_unpack_u64_be(payload);
@@ -1403,19 +1415,20 @@ clustered_pg_pkidx_touch_segment_tids(Relation heapRelation, int64 major_key,
 	Datum		args[4];
 	SPIPlanPtr	plan;
 	Oid			relationOid = InvalidOid;
+	ItemPointerData safeHeapTid;
 	int			rc;
 
 	if (heapRelation == NULL || !OidIsValid(RelationGetRelid(heapRelation)) || heap_tid == NULL)
 		return;
 	if (ItemPointerIsValid(heap_tid) == false)
 		return;
-
+	memcpy(&safeHeapTid, heap_tid, sizeof(ItemPointerData));
 	relationOid = RelationGetRelid(heapRelation);
 
 	args[0] = ObjectIdGetDatum(relationOid);
 	args[1] = Int64GetDatum(major_key);
 	args[2] = Int64GetDatum(minor_key);
-	args[3] = PointerGetDatum(heap_tid);
+	args[3] = PointerGetDatum(&safeHeapTid);
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
@@ -1520,8 +1533,6 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 	bool		isnull = false;
 	Datum		locatorDatum;
 	bytea	   *locator = NULL;
-	bytea	   *locatorRaw = NULL;
-	Size		locatorSize;
 
 	if (heapRelation == NULL)
 		ereport(ERROR,
@@ -1570,15 +1581,19 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("segment_map_allocate_locator returned NULL")));
 
-		locatorRaw = DatumGetByteaP(locatorDatum);
-		if (locatorRaw == NULL)
+		locator = DatumGetByteaPCopy(locatorDatum);
+		if (locator == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("clustered_pg locator allocation returned NULL")));
 
-		locatorSize = VARSIZE_ANY(locatorRaw);
-		locator = (bytea *) palloc(locatorSize);
-		memcpy(locator, locatorRaw, locatorSize);
+		if (VARSIZE_ANY_EXHDR(locator) != (Size) sizeof(ClusteredLocator))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("segment_map_allocate_locator returned invalid locator payload"),
+					 errdetail("Expected %zu bytes, got %zu bytes.",
+							   (size_t) sizeof(ClusteredLocator),
+							   (size_t) VARSIZE_ANY_EXHDR(locator))));
 	}
 	PG_CATCH();
 	{
@@ -2181,6 +2196,11 @@ clustered_pg_pkidx_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys,
 		state->table_scan_keys = NULL;
 		state->key_count = 0;
 		scan->numberOfKeys = 0;
+	}
+	else if (scan->numberOfKeys == 0 && state->table_scan_keys != NULL)
+	{
+		pfree(state->table_scan_keys);
+		state->table_scan_keys = NULL;
 	}
 	else if (scan->numberOfKeys > 0)
 	{
@@ -2849,7 +2869,13 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 	if (index->rel != NULL)
 	{
 		relation_rows = Max(index->rel->tuples, 0.0);
-		segment_rows = clustered_pg_pkidx_estimate_segment_rows(index->rel->relid);
+		/*
+		 * SPI usage inside planner callbacks is currently disabled to avoid
+		 * recursive SPI re-entry crashes observed in PL/pgSQL/DO execution paths.
+		 * TODO: restore optional async-safe lookup when a robust out-of-band cache
+		 * becomes available.
+		 */
+		segment_rows = -1;
 		if (segment_rows < 0)
 			segment_rows = -1;
 		if (segment_rows > 0 && segment_rows > relation_rows)

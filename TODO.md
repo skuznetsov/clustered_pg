@@ -166,6 +166,15 @@ Current engineering status:
 - [x] fix `segment_map_allocate_locator()` return ownership in `aminsert` path:
 	- SQL `bytea` locator is copied into extension allocator memory before `SPI_finish()` so the pointer is valid and safe to parse/free in caller.
 	- caller no longer reads from SPI context memory after cleanup, which removes intermittent `pfree`/lifetime crashes.
+- [x] harden locator decode path before lookup:
+	- `clustered_pg_pkidx_allocate_locator()` now uses `DatumGetByteaPCopy()` and validates `clustered_locator` payload length (`16` bytes) before returning.
+	- `clustered_pg_pkidx_lookup_locator_values()` now validates locator pointer/output pointers and calls shared locator-length guard before reading payload.
+	- local reproducible scenario (`COPY` + `INSERT (5),(6),(7)` on `clustered_heap` + `clustered_pk_index`) now completes without backend termination.
+- [x] restore production insert write-path for segment-map TID index with safe SPI memory handling:
+	- `clustered_pg_pkidx_touch_segment_tids()` uses a stack `ItemPointer` copy, so parameter lifetime is not coupled to caller tuple memory.
+	- plan uses `ON CONFLICT` upsert to make writes idempotent across repeated insert retries.
+	- `clustered_pg_pkidx_insert()` now calls touch again and keeps locator decode in caller-owned memory for immediate lookup/validation.
+	- regression anchor added for `INSERT` + `DO` path that previously triggered `server closed the connection unexpectedly`.
 - [x] enable PostgreSQL `CLUSTER` support for the custom index AM by setting `.amclusterable = true`.
 - [x] remove dependent-order `ORDER BY` inside `segment_map_rebuild_from_index` rebuild loop to avoid ordering via the target index during concurrent reindex/maintenance.
 - [x] guard `clustered_pg_pkidx_ambuild()` maintenance for reindex paths:
@@ -200,3 +209,14 @@ Latest execution trace:
 - [x] remove cached-plan execution path in `clustered_pg_pkidx_gc_segment_tids` to avoid vacuum callback prepare instability.
 - [x] harden PK index rescan path against stale `scan->keyData` after mark/restore cycles by driving scan predicates from stable state-backed keys and falling back safely to table scan if no valid source exists.
 - [x] fix `clustered_pg_pkidx_allocate_locator()` by assigning `locatorRaw = DatumGetByteaP(locatorDatum)` before null-check/copy, preventing uninitialized-bytea copy crashes under insert pressure.
+- [x] harden planner cost-estimation SPI path (`clustered_pg_pkidx_estimate_segment_rows`) for DO-block safety:
+	- defer SPI plan initialization until after `SPI_connect()` succeeds,
+	- guarantee single `SPI_finish()` on every path,
+	- avoid recursive SPI teardown crashes that manifested as `server closed the connection unexpectedly` after `COPY + INSERT + REINDEX`.
+- [x] extend lifecycle regression fixture to lock in DO aggregate stability:
+	- `clustered_pg_lifecycle_copyupdate_smoke` now includes aggregate checks (`count(*)`, `max(i)`, `array_agg`) inside `DO` after reindex and copy lifecycle transitions.
+
+- [x] P0 (CAUTION): eliminate rescan key-count skew corruption in clustered index scans.
+  - DoD:
+	- `clustered_pg_pkidx_rescan_internal()` preserves `table_scan_keys` allocation for every `nkeys` transition without writing past `table_scan_keys` bounds.
+	- Repro sequence involving REINDEX + DO aggregate (`count(*)`, `max`, `array_agg`) is expected to pass without backend termination after this fix; verification is pending cluster-level rerun.
