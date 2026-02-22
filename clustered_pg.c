@@ -47,6 +47,16 @@ typedef struct ClusteredPgIndexOptions
 	double		auto_repack_interval;
 } ClusteredPgIndexOptions;
 
+typedef struct ClusteredPgPkidxIndexOptionsCache
+{
+	uint32		magic;
+	int		split_threshold;
+	int		target_fillfactor;
+	double		auto_repack_interval;
+} ClusteredPgPkidxIndexOptionsCache;
+
+#define CLUSTERED_PG_PKIDX_OPTIONS_MAGIC 0x634F5047
+
 typedef struct ClusteredLocator
 {
 	uint64		major_key;
@@ -507,9 +517,6 @@ clustered_pg_pkidx_allocate_locator(Relation heapRelation, int64 minor_key,
 				 errmsg("clustered_pk_index requires a valid heap relation for insertion"),
 				 errhint("Create and populate indexes on a real heap table relation.")));
 
-	elog(LOG, "clustered_pk_index: allocator start, relid=%u minor=%" PRIi64,
-		 RelationGetRelid(heapRelation), minor_key);
-
 	args[0] = ObjectIdGetDatum(RelationGetRelid(heapRelation));
 	args[1] = Int64GetDatum(minor_key);
 	args[2] = Int64GetDatum(1);
@@ -628,6 +635,7 @@ clustered_pg_pkidx_get_index_options(Relation indexRelation,
 									int *target_fillfactor,
 									double *auto_repack_interval)
 {
+	ClusteredPgPkidxIndexOptionsCache *cache = NULL;
 	ClusteredPgIndexOptions defaults = {
 		.split_threshold = 128,
 		.target_fillfactor = 85,
@@ -644,6 +652,21 @@ clustered_pg_pkidx_get_index_options(Relation indexRelation,
 
 	if (indexRelation == NULL || indexRelation->rd_options == NULL)
 		return;
+
+	if (indexRelation->rd_amcache != NULL)
+	{
+		cache = (ClusteredPgPkidxIndexOptionsCache *) indexRelation->rd_amcache;
+		if (cache->magic == CLUSTERED_PG_PKIDX_OPTIONS_MAGIC)
+		{
+			if (split_threshold != NULL)
+				*split_threshold = cache->split_threshold;
+			if (target_fillfactor != NULL)
+				*target_fillfactor = cache->target_fillfactor;
+			if (auto_repack_interval != NULL)
+				*auto_repack_interval = cache->auto_repack_interval;
+			return;
+		}
+	}
 
 	if (VARSIZE_ANY(indexRelation->rd_options) >= sizeof(ClusteredPgIndexOptions))
 	{
@@ -670,6 +693,18 @@ clustered_pg_pkidx_get_index_options(Relation indexRelation,
 		*target_fillfactor = parsed->target_fillfactor;
 	if (parsed != NULL && auto_repack_interval != NULL)
 		*auto_repack_interval = parsed->auto_repack_interval;
+
+	if (parsed != NULL && indexRelation->rd_amcache == NULL &&
+		indexRelation->rd_indexcxt != NULL)
+	{
+		cache = MemoryContextAlloc(indexRelation->rd_indexcxt,
+								  sizeof(ClusteredPgPkidxIndexOptionsCache));
+		cache->magic = CLUSTERED_PG_PKIDX_OPTIONS_MAGIC;
+		cache->split_threshold = parsed->split_threshold;
+		cache->target_fillfactor = parsed->target_fillfactor;
+		cache->auto_repack_interval = parsed->auto_repack_interval;
+		indexRelation->rd_amcache = cache;
+	}
 
 	if (VARSIZE_ANY(indexRelation->rd_options) < sizeof(ClusteredPgIndexOptions) && parsed != NULL)
 		pfree(parsed);
@@ -742,7 +777,7 @@ clustered_pg_pkidx_restore_marked_tuple(IndexScanDesc scan,
 	if (scan == NULL || scan->opaque == NULL || state == NULL)
 		return false;
 
-	if (scan->table_scan == NULL)
+	if (state->table_scan == NULL)
 		return false;
 	if (state->table_scan_slot == NULL)
 		return false;
@@ -917,9 +952,9 @@ clustered_pg_pkidx_restrpos(IndexScanDesc scan)
 	if (!state->mark_valid)
 		return;
 
-	if (scan->table_scan != NULL)
+	if (state->table_scan != NULL)
 	{
-		table_rescan(scan->table_scan,
+		table_rescan(state->table_scan,
 					 state->key_count > 0 ? state->table_scan_keys : NULL);
 	}
 	else
@@ -1365,8 +1400,6 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 	int			split_threshold = 128;
 	int			target_fillfactor = 85;
 	double		auto_repack_interval = 60.0;
-
-	elog(LOG, "clustered_pk_index: aminsert start index=%u heap=%u", RelationGetRelid(indexRelation), RelationGetRelid(heapRelation));
 
 	(void) heap_tid;
 	(void)checkUnique;
