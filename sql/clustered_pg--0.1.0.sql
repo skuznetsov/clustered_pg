@@ -736,7 +736,7 @@ RETURNS TABLE(
 	row_count bigint,
 	split_generation bigint
 )
-LANGUAGE sql
+LANGUAGE sql STABLE
 AS $$
 	SELECT major_key, minor_from, minor_to, row_count, split_generation
 	FROM @extschema@.segment_map

@@ -125,7 +125,6 @@ static SPIPlanPtr clustered_pg_pkidx_count_repack_due_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_rebuild_segment_map_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_tid_touch_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_tid_lookup_plan = NULL;
-static SPIPlanPtr clustered_pg_pkidx_segment_tid_gc_plan = NULL;
 static SPIPlanPtr clustered_pg_pkidx_segment_rowcount_plan = NULL;
 
 static const char *clustered_pg_format_relation_label(Oid relationOid,
@@ -724,32 +723,6 @@ clustered_pg_pkidx_segment_tid_lookup_plan_init(void)
 }
 
 static SPIPlanPtr
-clustered_pg_pkidx_segment_tid_gc_plan_init(void)
-{
-	Oid			argtypes[1];
-	char        query[1024];
-
-	if (clustered_pg_pkidx_segment_tid_gc_plan != NULL)
-		return clustered_pg_pkidx_segment_tid_gc_plan;
-
-	argtypes[0] = OIDOID;
-
-	snprintf(query, sizeof(query),
-			 "SELECT %s($1::regclass)",
-			 clustered_pg_qualified_extension_name("segment_map_tids_gc"));
-
-	clustered_pg_pkidx_segment_tid_gc_plan = SPI_prepare(query, 1, argtypes);
-	if (clustered_pg_pkidx_segment_tid_gc_plan == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Failed to prepare clustered_pg_sql plan for segment_map_tids gc"),
-				 errhint("Inspect clustered_pg extension schema and function visibility.")));
-	SPI_keepplan(clustered_pg_pkidx_segment_tid_gc_plan);
-
-	return clustered_pg_pkidx_segment_tid_gc_plan;
-}
-
-static SPIPlanPtr
 clustered_pg_pkidx_segment_rowcount_plan_init(void)
 {
 	Oid			argtypes[1];
@@ -934,9 +907,10 @@ static void
 clustered_pg_pkidx_gc_segment_tids(Relation indexRelation)
 {
 	Datum		args[1];
+	const char *function_name;
 	Oid			relationOid = InvalidOid;
 	Oid			argtypes[1];
-	SPIPlanPtr	plan;
+	char		query[1024];
 	bool		isnull = false;
 	int			rc;
 	int64		deleted_tids = 0;
@@ -950,12 +924,10 @@ clustered_pg_pkidx_gc_segment_tids(Relation indexRelation)
 
 	args[0] = ObjectIdGetDatum(relationOid);
 	argtypes[0] = OIDOID;
-
-	plan = clustered_pg_pkidx_segment_tid_gc_plan_init();
-	if (plan == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Unable to access SPI plan for segment_map_tids gc")));
+	function_name = clustered_pg_qualified_extension_name("segment_map_tids_gc");
+	snprintf(query, sizeof(query),
+			 "SELECT %s($1::regclass)",
+			 function_name != NULL ? function_name : "segment_map_tids_gc");
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
@@ -965,12 +937,18 @@ clustered_pg_pkidx_gc_segment_tids(Relation indexRelation)
 
 	PG_TRY();
 	{
-		rc = SPI_execute_plan(plan, args, NULL, false, 0);
+		rc = SPI_execute_with_args(query,
+								   1,
+								   argtypes,
+								   args,
+								   NULL,
+								   false,
+								   0);
 		if (rc != SPI_OK_SELECT)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("segment_map_tids gc failed"),
-					 errdetail("SPI_execute_plan returned %d", rc)));
+					 errdetail("SPI_execute_with_args returned %d", rc)));
 
 		if (SPI_processed != 1)
 			ereport(ERROR,
@@ -2177,7 +2155,7 @@ clustered_pg_pkidx_beginscan(Relation indexRelation, int nkeys, int norderbys)
 	return scan;
 }
 
-static void
+static void __attribute__((noinline))
 clustered_pg_pkidx_endscan(IndexScanDesc scan)
 {
 	if (scan != NULL)
@@ -2198,7 +2176,6 @@ clustered_pg_pkidx_endscan(IndexScanDesc scan)
 			pfree(state);
 			scan->opaque = NULL;
 		}
-		index_endscan(scan);
 	}
 }
 

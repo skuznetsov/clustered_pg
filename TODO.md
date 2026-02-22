@@ -91,6 +91,10 @@ Production hardening program (next):
   - DoD: `VACUUM` on an indexed relation after deletes leaves no `segment_map_tids` entries for missing CTIDs.
   - Invariant: stale tuple mappings are bounded and cannot grow indefinitely between explicit rebuilds.
   - Evidence target: `segment_map_tids_gc` is now callable as maintenance pass and invoked from `clustered_pg_pkidx_vacuumcleanup`.
+- [x] P1 (SAFE): stabilize `clustered_pg_pkidx_gc_segment_tids` callback by removing cached SPI prepared plan usage.
+  - DoD: `VACUUM` no longer crashes with SIGSEGV after `segment_map_tids_gc` warning path.
+  - Change: invoke `segment_map_tids_gc` through `SPI_execute_with_args()` in a per-call query path instead of a cached `SPIPlanPtr`.
+  - Verification: local repro sequence (`CREATE TABLE`, `CREATE INDEX`, `DELETE`, `segment_map_tids_gc`, `VACUUM`) completes without server termination.
 - [x] P1 (SAFE): harden regression proof for segment_map_tids cleanup invariants under delete+VACUUM.
   - DoD: automated regression asserts `segment_map_tids_gc` removes stale entries and keeps mapping cardinality aligned with live tuples.
   - Added case: `clustered_pk_int8_vacuum_table` uses manual `segment_map_tids_gc` + `VACUUM` and verifies mapping counts before/after.
@@ -190,3 +194,4 @@ Latest execution trace:
 - [x] add allocator regression for interstitial inserts into saturated neighboring segments (ensures new major bucket allocation).
 - [x] add defensive major-key collision rebasing in allocator to tolerate stale/concurrent `segment_map` rows.
 - [x] harden `clustered_pg_pkidx_vacuumcleanup` by splitting maintenance into independent callback blocks so `segment_map_tids_gc` still runs when metadata rebuild/touch fails.
+- [x] remove cached-plan execution path in `clustered_pg_pkidx_gc_segment_tids` to avoid vacuum callback prepare instability.
