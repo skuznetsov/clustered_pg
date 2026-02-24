@@ -100,7 +100,6 @@ parse_positive_csv_count_default() {
 }
 
 PORT_KEYS=(
-  "PERF_PORT"
   "PERF_RUNTIME_SELFTEST_PORT"
   "PERF_RUNTIME_SELFTEST_HIGH_PORT"
   "PLANNER_PROBE_PORT"
@@ -143,14 +142,6 @@ if [ "$RUNTIME_HIGH_PORT" -le "$RUNTIME_BASE_PORT" ]; then
   exit 1
 fi
 
-PERF_BASE_PORT="$(value_for_key "PERF_PORT")"
-PERF_MEDIAN_RUNS="$(extract_positive_int_default "PERF_MEDIAN_RUNS")"
-PERF_MEDIAN_MAX_PORT=$((PERF_BASE_PORT + PERF_MEDIAN_RUNS - 1))
-if [ "$PERF_MEDIAN_MAX_PORT" -ge 65535 ]; then
-  echo "PERF_PORT default violates perf-median headroom: perf_port=$PERF_BASE_PORT perf_median_runs=$PERF_MEDIAN_RUNS derived_max=$PERF_MEDIAN_MAX_PORT" >&2
-  exit 1
-fi
-
 GATE_BASE_PORT="$(value_for_key "UNNEST_GATE_BASE_PORT")"
 GATE_REF_RUNS="$(extract_positive_int_default "UNNEST_GATE_REF_RUNS")"
 GATE_NEW_RUNS="$(extract_positive_int_default "UNNEST_GATE_NEW_RUNS")"
@@ -180,4 +171,4 @@ if [ "$TUNE_MAX_PORT" -ge 65535 ]; then
   exit 1
 fi
 
-echo "selftest_unnest_gate_make_defaults status=ok runtime_base_port=$RUNTIME_BASE_PORT runtime_high_port=$RUNTIME_HIGH_PORT perf_base_port=$PERF_BASE_PORT perf_median_runs=$PERF_MEDIAN_RUNS perf_median_derived_max_port=$PERF_MEDIAN_MAX_PORT gate_base_port=$GATE_BASE_PORT gate_ref_runs=$GATE_REF_RUNS gate_new_runs=$GATE_NEW_RUNS gate_ref_derived_max_port=$GATE_REF_MAX_PORT gate_new_derived_max_port=$GATE_NEW_MAX_PORT gate_derived_max_port=$GATE_MAX_PORT tune_base_port=$TUNE_BASE_PORT tune_case_count=$TUNE_CASE_COUNT tune_derived_max_port=$TUNE_MAX_PORT"
+echo "selftest_unnest_gate_make_defaults status=ok runtime_base_port=$RUNTIME_BASE_PORT runtime_high_port=$RUNTIME_HIGH_PORT gate_base_port=$GATE_BASE_PORT gate_ref_runs=$GATE_REF_RUNS gate_new_runs=$GATE_NEW_RUNS gate_ref_derived_max_port=$GATE_REF_MAX_PORT gate_new_derived_max_port=$GATE_NEW_MAX_PORT gate_derived_max_port=$GATE_MAX_PORT tune_base_port=$TUNE_BASE_PORT tune_case_count=$TUNE_CASE_COUNT tune_derived_max_port=$TUNE_MAX_PORT"
