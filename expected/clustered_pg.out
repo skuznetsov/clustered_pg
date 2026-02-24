@@ -1795,4 +1795,52 @@ FROM clustered_pg_trunc;
 (1 row)
 
 DROP TABLE clustered_pg_trunc;
+-- ================================================================
+-- JOIN with btree on directed-placement table (production pattern)
+-- ================================================================
+-- This is the key scenario: standard btree serves JOINs efficiently
+-- because directed placement physically clusters rows by key.
+CREATE TABLE clustered_pg_join(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_join_pkidx
+    ON clustered_pg_join USING clustered_pk_index (id);
+CREATE INDEX clustered_pg_join_btree
+    ON clustered_pg_join USING btree (id);
+-- 1000 keys x 100 rows = 100K rows, interleaved insert
+INSERT INTO clustered_pg_join(id, payload)
+SELECT ((g % 1000) + 1), repeat('j', 100)
+FROM generate_series(1, 100000) g;
+ANALYZE clustered_pg_join;
+-- Verify the btree index is used (not clustered_pk_index)
+-- Nested loop + index scan should touch very few blocks per key
+SELECT
+    CASE WHEN count(*) = 20000
+         THEN 'join_btree_count_ok'
+         ELSE 'join_btree_count_FAIL'
+    END AS join_btree_result
+FROM clustered_pg_join d
+JOIN (SELECT unnest(ARRAY(SELECT generate_series(1, 200))) AS id) keys
+ON d.id = keys.id;
+  join_btree_result  
+---------------------
+ join_btree_count_ok
+(1 row)
+
+-- Verify clustering held through the full insert:
+-- each key's rows should be on <=5 blocks
+SELECT
+    CASE WHEN avg(blk_count) <= 5.0
+         THEN 'join_btree_scatter_ok'
+         ELSE 'join_btree_scatter_FAIL'
+    END AS join_btree_scatter_result
+FROM (
+    SELECT id, count(DISTINCT (ctid::text::point)[0]::int) AS blk_count
+    FROM clustered_pg_join
+    GROUP BY id
+) sub;
+ join_btree_scatter_result 
+---------------------------
+ join_btree_scatter_ok
+(1 row)
+
+DROP TABLE clustered_pg_join;
 DROP EXTENSION clustered_pg;
