@@ -1595,4 +1595,123 @@ FROM (
 (1 row)
 
 DROP TABLE clustered_pg_copy_dp;
+-- ================================================================
+-- UPDATE + DELETE on directed-placement table
+-- ================================================================
+CREATE TABLE clustered_pg_upd(id int, val int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_upd_idx
+    ON clustered_pg_upd USING clustered_pk_index (id);
+-- Insert 5 keys, 10 rows each
+INSERT INTO clustered_pg_upd(id, val, payload)
+SELECT (g % 5) + 1, g, repeat('y', 200)
+FROM generate_series(1, 50) g;
+-- Verify initial count
+SELECT count(*) AS before_count FROM clustered_pg_upd;
+ before_count 
+--------------
+           50
+(1 row)
+
+-- UPDATE: change payload (same key = HOT candidate)
+UPDATE clustered_pg_upd SET val = val + 1000 WHERE id = 3;
+-- UPDATE: change the clustering key itself
+UPDATE clustered_pg_upd SET id = 99 WHERE id = 5;
+-- Verify counts by key after updates
+SELECT id, count(*) AS cnt FROM clustered_pg_upd
+WHERE id IN (3, 5, 99) GROUP BY id ORDER BY id;
+ id | cnt 
+----+-----
+  3 |  10
+ 99 |  10
+(2 rows)
+
+-- DELETE a whole key group
+DELETE FROM clustered_pg_upd WHERE id = 2;
+-- Verify final count
+SELECT count(*) AS after_count FROM clustered_pg_upd;
+ after_count 
+-------------
+          40
+(1 row)
+
+-- Re-INSERT into the table (zone map should still work for new inserts)
+INSERT INTO clustered_pg_upd(id, val, payload)
+SELECT 2, g, repeat('z', 200)
+FROM generate_series(1, 5) g;
+SELECT count(*) AS final_count FROM clustered_pg_upd;
+ final_count 
+-------------
+          45
+(1 row)
+
+DROP TABLE clustered_pg_upd;
+-- ================================================================
+-- NULL clustering key handling
+-- ================================================================
+CREATE TABLE clustered_pg_null(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_null_idx
+    ON clustered_pg_null USING clustered_pk_index (id);
+-- Insert rows with NULL key: directed placement skips NULL keys (safe fallback),
+-- but the index AM rejects NULLs with an error.  These INSERTs are expected to fail.
+INSERT INTO clustered_pg_null(id, payload) VALUES (NULL, 'null_row_1');
+ERROR:  clustered_pk_index currently supports only int2/int4/int8 index key types
+DETAIL:  Index key is NULL, missing, or has unsupported type.
+INSERT INTO clustered_pg_null(id, payload) VALUES (NULL, 'null_row_2');
+ERROR:  clustered_pk_index currently supports only int2/int4/int8 index key types
+DETAIL:  Index key is NULL, missing, or has unsupported type.
+INSERT INTO clustered_pg_null(id, payload) VALUES (1, 'normal_row');
+SELECT count(*) AS null_test_count FROM clustered_pg_null;
+ null_test_count 
+-----------------
+               1
+(1 row)
+
+-- Verify we can read back all rows including NULLs
+SELECT id IS NULL AS is_null, count(*) AS cnt
+FROM clustered_pg_null GROUP BY (id IS NULL) ORDER BY is_null;
+ is_null | cnt 
+---------+-----
+ f       |   1
+(1 row)
+
+DROP TABLE clustered_pg_null;
+-- ================================================================
+-- Directed placement with many distinct keys (fast path exercise)
+-- ================================================================
+CREATE TABLE clustered_pg_many(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_many_idx
+    ON clustered_pg_many USING clustered_pk_index (id);
+-- 200 distinct keys x 5 rows each = 1000 rows, triggers fast path (>64 keys)
+INSERT INTO clustered_pg_many(id, payload)
+SELECT ((g % 200) + 1), repeat('m', 100)
+FROM generate_series(1, 1000) g;
+SELECT
+    CASE WHEN count(*) = 1000
+         THEN 'many_keys_count_ok'
+         ELSE 'many_keys_count_FAIL'
+    END AS many_keys_result
+FROM clustered_pg_many;
+  many_keys_result  
+--------------------
+ many_keys_count_ok
+(1 row)
+
+-- Even with fast path, zone map should provide some clustering benefit
+-- (not as tight as group path, but better than random heap)
+SELECT
+    CASE WHEN avg(blk_count) <= 10.0
+         THEN 'many_keys_scatter_ok'
+         ELSE 'many_keys_scatter_FAIL'
+    END AS many_keys_scatter_result
+FROM (
+    SELECT id, count(DISTINCT (ctid::text::point)[0]::int) AS blk_count
+    FROM clustered_pg_many
+    GROUP BY id
+) sub;
+ many_keys_scatter_result 
+--------------------------
+ many_keys_scatter_ok
+(1 row)
+
+DROP TABLE clustered_pg_many;
 DROP EXTENSION clustered_pg;

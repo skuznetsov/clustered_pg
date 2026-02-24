@@ -777,6 +777,9 @@ clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
 /* Maximum distinct keys tracked per relation before resetting zone map */
 #define CLUSTERED_PG_ZONE_MAP_MAX_KEYS 1048576
 
+/* Maximum distinct relations tracked in zone map before full reset */
+#define CLUSTERED_PG_ZONE_MAP_MAX_RELS 256
+
 /* ----------------------------------------------------------------
  * Zone map: directed placement for physical clustering at INSERT time.
  *
@@ -834,9 +837,41 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 		memset(&ctl, 0, sizeof(ctl));
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(ClusteredPgZoneMapRelInfo);
+		ctl.hcxt = TopMemoryContext;
 		clustered_pg_zone_map_rels = hash_create("clustered_pg zone map rels",
 												 16, &ctl,
-												 HASH_ELEM | HASH_BLOBS);
+												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	/*
+	 * Overflow guard: if tracking too many relations (e.g. after many
+	 * CREATE/DROP cycles), destroy and recreate the top-level HTAB.
+	 * This also cleans up zombie entries for dropped tables.
+	 */
+	if (hash_get_num_entries(clustered_pg_zone_map_rels) >=
+		CLUSTERED_PG_ZONE_MAP_MAX_RELS)
+	{
+		HASH_SEQ_STATUS status;
+		ClusteredPgZoneMapRelInfo *entry;
+
+		hash_seq_init(&status, clustered_pg_zone_map_rels);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (entry->block_map != NULL)
+				hash_destroy(entry->block_map);
+		}
+		hash_destroy(clustered_pg_zone_map_rels);
+		{
+			HASHCTL		ctl;
+
+			memset(&ctl, 0, sizeof(ctl));
+			ctl.keysize = sizeof(Oid);
+			ctl.entrysize = sizeof(ClusteredPgZoneMapRelInfo);
+			ctl.hcxt = TopMemoryContext;
+			clustered_pg_zone_map_rels = hash_create("clustered_pg zone map rels",
+													 16, &ctl,
+													 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		}
 	}
 
 	info = hash_search(clustered_pg_zone_map_rels, &relid, HASH_ENTER, &found);
@@ -880,9 +915,10 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 					memset(&ctl, 0, sizeof(ctl));
 					ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
 					ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
+					ctl.hcxt = TopMemoryContext;
 					info->block_map = hash_create("clustered_pg zone block map",
 												  256, &ctl,
-												  HASH_ELEM | HASH_BLOBS);
+												  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 					info->initialized = true;
 				}
 				index_close(indexrel, AccessShareLock);
@@ -951,9 +987,10 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 				memset(&ctl, 0, sizeof(ctl));
 				ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
 				ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
+				ctl.hcxt = TopMemoryContext;
 				relinfo->block_map = hash_create("clustered_pg zone block map",
 												 256, &ctl,
-												 HASH_ELEM | HASH_BLOBS);
+												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 			}
 		}
 

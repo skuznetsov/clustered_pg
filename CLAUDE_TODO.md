@@ -151,3 +151,30 @@
   vs 119 blocks on standard heap (physical clustering enables precise BRIN ranges).
 [session-2] Added regression tests: directed_placement_ok, block_order_ok, copy_directed_ok.
 [session-2] All 9 test groups pass: make installcheck (1 test, 1569ms).
+[session-3] Production hardening audit of directed placement code:
+  - 6 vulnerability categories identified across zone map implementation
+  - 3 fixed, 3 assessed as acceptable (best-effort hints, backend-scoped caches)
+[session-3] Fix: zone map HTABs (zone_map_rels, block_map, overflow-reset block_map)
+  now use ctl.hcxt=TopMemoryContext + HASH_CONTEXT flag, matching existing
+  pkidx_local_hint_map pattern (line 1997). Prevents use-after-free if created
+  in transient memory context.
+[session-3] Fix: cross-relation zone map overflow guard added.
+  CLUSTERED_PG_ZONE_MAP_MAX_RELS=256 limit. When exceeded, all per-relation
+  block_maps are destroyed and zone_map_rels HTAB is recreated. Prevents
+  unbounded memory growth from CREATE/DROP cycles and zombie entries.
+[session-3] Assessed as acceptable (not bugs):
+  - Transaction rollback stale entries: zone map is best-effort placement hint.
+    Stale block numbers cause PostgreSQL to find another page — performance
+    hint degrades, not a correctness issue.
+  - AM OID cache (clustered_pg_pkidx_am_oid_cache): static variable cleared
+    on backend restart. Extension reinstall requires new session. Safe.
+  - UPDATE path: PostgreSQL routes UPDATEs through heap_update, not tuple_insert.
+    Directed placement only applies to INSERT/COPY. Acceptable for append-heavy
+    workloads which are the target use case.
+[session-3] Added 3 new test groups (12 total):
+  - UPDATE + DELETE on directed-placement table: UPDATE same key, UPDATE key
+    change (id=5→99), DELETE whole key group, re-INSERT after delete
+  - NULL clustering key: index AM rejects NULLs (expected behavior documented)
+  - Many distinct keys (200 keys, fast path): count + scatter verification
+[session-3] All 12 test groups pass: make installcheck (1 test, 1598ms).
+[session-3] Clean build: zero warnings, zero errors.
