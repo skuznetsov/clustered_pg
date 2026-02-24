@@ -5,7 +5,6 @@
 #include "access/heapam.h"
 #include "access/table.h"
 #include "access/tableam.h"
-#include "access/reloptions.h"
 #include "access/stratnum.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -45,28 +44,8 @@ PG_FUNCTION_INFO_V1(clustered_pg_locator_cmp);
 PG_FUNCTION_INFO_V1(clustered_pg_locator_advance_major);
 PG_FUNCTION_INFO_V1(clustered_pg_locator_next_minor);
 
-typedef struct ClusteredPgIndexOptions
-{
-	int32		vl_len_;
-	int		split_threshold;
-	int		target_fillfactor;
-	double		auto_repack_interval;
-} ClusteredPgIndexOptions;
-
-typedef struct ClusteredPgPkidxIndexOptionsCache
-{
-	uint32		magic;
-	int		split_threshold;
-	int		target_fillfactor;
-	double		auto_repack_interval;
-} ClusteredPgPkidxIndexOptionsCache;
-
-#define CLUSTERED_PG_PKIDX_OPTIONS_MAGIC 0x634F5047
 #define CLUSTERED_PG_EXTENSION_VERSION "0.1.0"
 #define CLUSTERED_PG_OBS_API_VERSION 1
-#define CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD 128
-#define CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR 85
-#define CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL 60.0
 
 typedef struct ClusteredPgStats
 {
@@ -555,6 +534,31 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 	return info;
 }
 
+/*
+ * Reset zone map block_map if it exceeds the max key limit.
+ * Prevents unbounded memory growth in TopMemoryContext for
+ * high-cardinality workloads.
+ */
+static void
+clustered_pg_zone_map_check_overflow(ClusteredPgZoneMapRelInfo *relinfo)
+{
+	if (relinfo->block_map != NULL &&
+		hash_get_num_entries(relinfo->block_map) >=
+		CLUSTERED_PG_ZONE_MAP_MAX_KEYS)
+	{
+		HASHCTL		ctl;
+
+		hash_destroy(relinfo->block_map);
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
+		ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
+		ctl.hcxt = TopMemoryContext;
+		relinfo->block_map = hash_create("clustered_pg zone block map",
+										 256, &ctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+}
+
 static void
 clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 										 CommandId cid, int options,
@@ -610,23 +614,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 		ClusteredPgZoneMapBlockEntry *entry;
 		bool			found;
 
-		/* Overflow guard: reset if too many distinct keys tracked */
-		if (hash_get_num_entries(relinfo->block_map) >=
-			CLUSTERED_PG_ZONE_MAP_MAX_KEYS)
-		{
-			hash_destroy(relinfo->block_map);
-			{
-				HASHCTL		ctl;
-
-				memset(&ctl, 0, sizeof(ctl));
-				ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
-				ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
-				ctl.hcxt = TopMemoryContext;
-				relinfo->block_map = hash_create("clustered_pg zone block map",
-												 256, &ctl,
-												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-			}
-		}
+		clustered_pg_zone_map_check_overflow(relinfo);
 
 		mapkey.minor_key = minor_key;
 		entry = hash_search(relinfo->block_map, &mapkey, HASH_ENTER, &found);
@@ -754,6 +742,8 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		 */
 		if (relinfo->block_map != NULL)
 		{
+			clustered_pg_zone_map_check_overflow(relinfo);
+
 			qsort(ks, nslots, sizeof(ClusteredPgMultiInsertKeySlot),
 				  clustered_pg_multi_insert_key_cmp);
 
@@ -846,6 +836,8 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		if (group_valid && relinfo->block_map != NULL)
 		{
 			BlockNumber last_block;
+
+			clustered_pg_zone_map_check_overflow(relinfo);
 
 			last_block = ItemPointerGetBlockNumber(
 				&sorted_slots[group_start + group_size - 1]->tts_tid);
@@ -990,136 +982,6 @@ clustered_pg_pkidx_build_callback(Relation indexRelation, ItemPointer heap_tid,
 	buildstate->index_tuples++;
 }
 
-
-static relopt_parse_elt clustered_pg_pkidx_relopt_tab[3];
-static relopt_kind clustered_pg_pkidx_relopt_kind;
-
-static relopt_kind
-clustered_pg_index_relopt_kind_init(void)
-{
-	if (clustered_pg_pkidx_relopt_kind == InvalidOid)
-		clustered_pg_pkidx_relopt_kind = add_reloption_kind();
-
-	return clustered_pg_pkidx_relopt_kind;
-}
-
-static void
-clustered_pg_pkidx_init_reloptions(void)
-{
-	int i = 0;
-
-	clustered_pg_index_relopt_kind_init();
-
-	add_int_reloption(clustered_pg_pkidx_relopt_kind,
-					"split_threshold",
-					"Estimated split trigger (tuples per segment) for clustered index AM",
-					CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD, 16, 8192,
-					AccessExclusiveLock);
-	clustered_pg_pkidx_relopt_tab[i].optname = "split_threshold";
-	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_INT;
-	clustered_pg_pkidx_relopt_tab[i].offset = offsetof(ClusteredPgIndexOptions, split_threshold);
-	i++;
-
-	add_int_reloption(clustered_pg_pkidx_relopt_kind,
-				"target_fillfactor",
-				"Target tuple density for initial split behavior",
-				CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR, 20, 100,
-				AccessExclusiveLock);
-	clustered_pg_pkidx_relopt_tab[i].optname = "target_fillfactor";
-	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_INT;
-	clustered_pg_pkidx_relopt_tab[i].offset = offsetof(ClusteredPgIndexOptions, target_fillfactor);
-	i++;
-
-	add_real_reloption(clustered_pg_pkidx_relopt_kind,
-				"auto_repack_interval",
-				"Repack cadence hint for cluster maintenance loop",
-				CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL, 1.0, 3600.0,
-				AccessExclusiveLock);
-	clustered_pg_pkidx_relopt_tab[i].optname = "auto_repack_interval";
-	clustered_pg_pkidx_relopt_tab[i].opttype = RELOPT_TYPE_REAL;
-	clustered_pg_pkidx_relopt_tab[i].offset = offsetof(ClusteredPgIndexOptions, auto_repack_interval);
-}
-
-static void
-clustered_pg_pkidx_get_index_options(Relation indexRelation,
-									int *split_threshold,
-									int *target_fillfactor,
-									double *auto_repack_interval)
-{
-	ClusteredPgPkidxIndexOptionsCache *cache = NULL;
-	ClusteredPgIndexOptions defaults = {
-		.split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD,
-		.target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR,
-		.auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL,
-	};
-	ClusteredPgIndexOptions *parsed;
-
-	if (split_threshold != NULL)
-		*split_threshold = defaults.split_threshold;
-	if (target_fillfactor != NULL)
-		*target_fillfactor = defaults.target_fillfactor;
-	if (auto_repack_interval != NULL)
-		*auto_repack_interval = defaults.auto_repack_interval;
-
-	if (indexRelation == NULL || indexRelation->rd_options == NULL)
-		return;
-
-	if (indexRelation->rd_amcache != NULL)
-	{
-		cache = (ClusteredPgPkidxIndexOptionsCache *) indexRelation->rd_amcache;
-		if (cache->magic == CLUSTERED_PG_PKIDX_OPTIONS_MAGIC)
-		{
-			if (split_threshold != NULL)
-				*split_threshold = cache->split_threshold;
-			if (target_fillfactor != NULL)
-				*target_fillfactor = cache->target_fillfactor;
-			if (auto_repack_interval != NULL)
-				*auto_repack_interval = cache->auto_repack_interval;
-			return;
-		}
-	}
-
-	if (VARSIZE_ANY(indexRelation->rd_options) >= sizeof(ClusteredPgIndexOptions))
-	{
-		parsed = (ClusteredPgIndexOptions *) indexRelation->rd_options;
-	}
-	else
-	{
-		Datum reloptions;
-
-		clustered_pg_index_relopt_kind_init();
-
-		reloptions = PointerGetDatum(indexRelation->rd_options);
-		parsed = (ClusteredPgIndexOptions *) build_reloptions(reloptions,
-															 false,
-															 clustered_pg_pkidx_relopt_kind,
-															 sizeof(ClusteredPgIndexOptions),
-															 clustered_pg_pkidx_relopt_tab,
-															 3);
-	}
-
-	if (parsed != NULL && split_threshold != NULL)
-		*split_threshold = parsed->split_threshold;
-	if (parsed != NULL && target_fillfactor != NULL)
-		*target_fillfactor = parsed->target_fillfactor;
-	if (parsed != NULL && auto_repack_interval != NULL)
-		*auto_repack_interval = parsed->auto_repack_interval;
-
-	if (parsed != NULL && indexRelation->rd_amcache == NULL &&
-		indexRelation->rd_indexcxt != NULL)
-	{
-		cache = MemoryContextAlloc(indexRelation->rd_indexcxt,
-								  sizeof(ClusteredPgPkidxIndexOptionsCache));
-		cache->magic = CLUSTERED_PG_PKIDX_OPTIONS_MAGIC;
-		cache->split_threshold = parsed->split_threshold;
-		cache->target_fillfactor = parsed->target_fillfactor;
-		cache->auto_repack_interval = parsed->auto_repack_interval;
-		indexRelation->rd_amcache = cache;
-	}
-
-	if (VARSIZE_ANY(indexRelation->rd_options) < sizeof(ClusteredPgIndexOptions) && parsed != NULL)
-		pfree(parsed);
-}
 
 static void
 clustered_pg_pack_u64_be(uint8_t *dst, uint64 src)
@@ -1271,7 +1133,18 @@ clustered_pg_locator_advance_major(PG_FUNCTION_ARGS)
 
 	major = clustered_pg_unpack_u64_be(payload);
 	minor = clustered_pg_unpack_u64_be(payload + 8);
-	major = (uint64) ((int64) major + delta);
+
+	{
+		int64	signed_major = (int64) major;
+		int64	result = signed_major + delta;
+
+		if ((delta > 0 && result < signed_major) ||
+			(delta < 0 && result > signed_major))
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("major locator overflow")));
+		major = (uint64) result;
+	}
 
 	moved = palloc(VARHDRSZ + (int) sizeof(ClusteredLocator));
 	SET_VARSIZE(moved, VARHDRSZ + (int) sizeof(ClusteredLocator));
@@ -1333,15 +1206,11 @@ clustered_pg_observability(PG_FUNCTION_ARGS)
 
 	snprintf(text_buf, sizeof(text_buf),
 			 "clustered_pg=%s api=%d "
-			 "defaults={split_threshold=%d,target_fillfactor=%d,auto_repack_interval=%.2f} "
 			 "counters={observability=%" PRIu64 ",costestimate=%" PRIu64
 			 ",index_inserts=%" PRIu64 ",insert_errors=%" PRIu64
 			 ",vacuumcleanup=%" PRIu64 "}",
 			 CLUSTERED_PG_EXTENSION_VERSION,
 			 CLUSTERED_PG_OBS_API_VERSION,
-			 CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD,
-			 CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR,
-			 CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL,
 			 clustered_pg_stats.observability_calls,
 			 clustered_pg_stats.costestimate_calls,
 			 clustered_pg_stats.insert_calls,
@@ -1379,10 +1248,6 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 {
 	ClusteredPgPkidxBuildState buildstate;
 	IndexBuildResult *result;
-	int			split_threshold = CLUSTERED_PG_DEFAULT_SPLIT_THRESHOLD;
-	int			target_fillfactor = CLUSTERED_PG_DEFAULT_TARGET_FILLFACTOR;
-	double		auto_repack_interval = CLUSTERED_PG_DEFAULT_AUTO_REPACK_INTERVAL;
-	bool		skip_rebuild_maintenance = false;
 
 	if (heapRelation == NULL || indexRelation == NULL)
 		ereport(ERROR,
@@ -1405,13 +1270,6 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("clustered_pk_index ambuild supports exactly one key attribute"),
 				 errhint("Create a single-column index for the first iteration.")));
-
-	clustered_pg_pkidx_get_index_options(indexRelation,
-										&split_threshold,
-										&target_fillfactor,
-										&auto_repack_interval);
-
-	(void) skip_rebuild_maintenance;
 
 	result = palloc0_object(IndexBuildResult);
 
@@ -1459,17 +1317,6 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 						 errdetail("Index key is NULL, missing, or has unsupported type.")));
 
 	return true;
-}
-
-static bytea *
-clustered_pg_pkidx_options(Datum reloptions, bool validate)
-{
-	clustered_pg_index_relopt_kind_init();
-	return (bytea *) build_reloptions(reloptions, validate,
-									  clustered_pg_pkidx_relopt_kind,
-									  sizeof(ClusteredPgIndexOptions),
-									  clustered_pg_pkidx_relopt_tab,
-									  3);
 }
 
 static IndexBulkDeleteResult *
@@ -1604,7 +1451,7 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.amcanreturn = NULL,
 		.amgettreeheight = NULL,
 		.amcostestimate = clustered_pg_pkidx_costestimate,
-		.amoptions = clustered_pg_pkidx_options,
+		.amoptions = NULL,
 		.amvalidate = clustered_pg_pkidx_validate,
 		.ambeginscan = NULL,
 		.amrescan = NULL,
@@ -1626,5 +1473,5 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 void
 _PG_init(void)
 {
-	clustered_pg_pkidx_init_reloptions();
+	/* Reserved for future GUC/hook registration */
 }

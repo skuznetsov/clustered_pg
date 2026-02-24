@@ -11,8 +11,7 @@ SELECT (public.clustered_pg_observability() ~ 'clustered_pg=0.1.0') AS observabi
 -- Test int2 and int4 index support (only int8 tested above)
 CREATE TABLE clustered_pg_int2_smoke(id smallint) USING clustered_heap;
 CREATE INDEX clustered_pg_int2_smoke_idx
-	ON clustered_pg_int2_smoke USING clustered_pk_index (id)
-		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+	ON clustered_pg_int2_smoke USING clustered_pk_index (id);
 INSERT INTO clustered_pg_int2_smoke(id) SELECT generate_series(1,20)::smallint;
 SELECT count(*) AS int2_row_count FROM clustered_pg_int2_smoke;
 SET enable_seqscan = off;
@@ -25,8 +24,7 @@ DROP TABLE clustered_pg_int2_smoke;
 
 CREATE TABLE clustered_pg_int4_smoke(id integer) USING clustered_heap;
 CREATE INDEX clustered_pg_int4_smoke_idx
-	ON clustered_pg_int4_smoke USING clustered_pk_index (id)
-		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+	ON clustered_pg_int4_smoke USING clustered_pk_index (id);
 INSERT INTO clustered_pg_int4_smoke(id) SELECT generate_series(1,20);
 SELECT count(*) AS int4_row_count FROM clustered_pg_int4_smoke;
 SET enable_seqscan = off;
@@ -51,8 +49,7 @@ SELECT locator_to_hex(locator_advance_major(locator_pack(0, 5), 1)) AS loc_advan
 -- Test JOIN UNNEST correctness
 CREATE TABLE clustered_pg_join_unnest_base(id bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_join_unnest_base_idx
-	ON clustered_pg_join_unnest_base USING clustered_pk_index (id)
-		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+	ON clustered_pg_join_unnest_base USING clustered_pk_index (id);
 INSERT INTO clustered_pg_join_unnest_base(id) SELECT generate_series(1,100);
 -- Probe with array of keys via JOIN (exercises rescan on inner side)
 SET enable_seqscan = off;
@@ -79,8 +76,7 @@ DROP TABLE clustered_pg_join_unnest_base;
 -- Test delete + vacuum + re-query consistency
 CREATE TABLE clustered_pg_vacuum_consistency(id bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_vacuum_consistency_idx
-	ON clustered_pg_vacuum_consistency USING clustered_pk_index (id)
-		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+	ON clustered_pg_vacuum_consistency USING clustered_pk_index (id);
 INSERT INTO clustered_pg_vacuum_consistency(id) SELECT generate_series(1,50);
 -- Delete a range and verify count
 DELETE FROM clustered_pg_vacuum_consistency WHERE id BETWEEN 10 AND 30;
@@ -99,8 +95,7 @@ DROP TABLE clustered_pg_vacuum_consistency;
 -- Test segment split boundary: insert exactly at capacity edge
 CREATE TABLE clustered_pg_split_edge(id bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_split_edge_idx
-	ON clustered_pg_split_edge USING clustered_pk_index (id)
-		WITH (split_threshold=16, target_fillfactor=100, auto_repack_interval=30.0);
+	ON clustered_pg_split_edge USING clustered_pk_index (id);
 -- Insert exactly split_threshold rows
 INSERT INTO clustered_pg_split_edge(id) SELECT generate_series(1,16);
 SELECT count(*) AS split_edge_at_capacity FROM clustered_pg_split_edge;
@@ -112,8 +107,7 @@ DROP TABLE clustered_pg_split_edge;
 -- Test empty table operations
 CREATE TABLE clustered_pg_empty(id bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_empty_idx
-	ON clustered_pg_empty USING clustered_pk_index (id)
-		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+	ON clustered_pg_empty USING clustered_pk_index (id);
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 SELECT count(*) AS empty_count FROM clustered_pg_empty;
@@ -127,8 +121,7 @@ DROP TABLE clustered_pg_empty;
 -- ================================================================
 CREATE TABLE clustered_pg_directed(id int) USING clustered_heap;
 CREATE INDEX clustered_pg_directed_idx
-    ON clustered_pg_directed USING clustered_pk_index (id)
-    WITH (split_threshold = 128, target_fillfactor = 85);
+    ON clustered_pg_directed USING clustered_pk_index (id);
 
 -- Insert 200 rows: 20 distinct keys, 10 rows each.
 -- With directed placement, all 10 rows for the same key should land
