@@ -1,0 +1,153 @@
+# clustered_pg: Action Plan & Research Log
+
+## Code Analysis Summary
+
+### Architecture
+- PostgreSQL extension implementing clustered storage via custom Table AM + Index AM
+- Locator: 16-byte (major_key, minor_key) big-endian pair for ordered placement
+- Segment map metadata stored in SQL tables, accessed via SPI from C
+- Multi-level caching: local hint cache (per-session) + rescan keycache (per-statement) + segment TID fastpath
+- 5381 lines of C, 600+ lines of SQL, 90+ shell scripts
+
+### Verified Bugs
+
+1. **SPI plan_init outside PG_TRY** (2 locations: `clustered_pg.c:1059, 1126`)
+   - `SPI_connect()` succeeds, then `plan_init()` is called before `PG_TRY` block
+   - If plan_init throws (it calls SPI_prepare which can ereport), SPI_finish() is skipped
+   - PostgreSQL transaction abort cleans up eventually, but nested SPI contexts could leak
+   - Severity: MEDIUM (transaction abort provides safety net)
+
+2. **Defensive overflow guard missing in capacity calculator** (`clustered_pg.c:1413`)
+   - `clustered_pg_next_capacity` returns values multiplied by sizeof(ItemPointerData) in callers
+   - With current GUC bounds (max 1048576) this cannot overflow in practice
+   - But no protection if GUC bounds are increased in the future
+   - Severity: LOW (theoretical, currently unreachable)
+
+### False Positives from Initial Analysis (corrected)
+
+- ~~goto fail with uninitialized pointer~~: `combined_tids` is initialized to NULL at declaration (line 3550)
+- ~~NULL dereference in keycache at line 3531~~: check at line 3518 guarantees `tid_count > 0`
+- ~~Integer overflow~~: unreachable with current GUC max of 1048576 * 6 bytes = 6MB
+- ~~SQL buffer truncation~~: ring buffer is 512 bytes per slot; qualified names are ~30-50 chars
+
+### Architecture Concerns (not bugs)
+
+3. **Borrowed buffer pattern**: `segment_tids_borrowed=true` references hash entry memory.
+   If entry is evicted while pointer is borrowed, dangling pointer results.
+   Risk is low in practice since eviction only happens at scan boundary, but fragile design.
+
+4. **SPI in hot path**: segment_map_tids lookup does full SPI cycle per scan.
+   Mitigated by keycache/local hints. Architectural debt, not a correctness issue.
+
+5. **join_unnest ratio stuck at ~10% of heap**: fundamental executor-level one-rescan-per-key
+   amplification. Repeatedly noted in research log but unresolved.
+
+### Missing Test Coverage
+
+6. **Only 1 SQL regression test** vs 97 shell meta-tests.
+   Need: multi-key probe correctness, rescan edge cases, vacuum+concurrent insert safety,
+   split boundary behavior, borrowed buffer lifetime across scan phases.
+
+---
+
+## Action Plan
+
+### Phase 1: Fix Verified Bugs [DONE]
+- [x] 1.1 Move plan_init inside PG_TRY for count_repack_due (line 1059)
+- [x] 1.2 Move plan_init inside PG_TRY for rebuild_segment_map (line 1126)
+- [x] 1.3 Add defensive overflow guard in clustered_pg_next_capacity
+
+### Phase 2: Add Functional SQL Tests [DONE]
+- [x] 2.1 Multi-key rescan correctness (JOIN UNNEST with hit/miss/mixed probes)
+- [x] 2.2 Segment split boundary behavior (16 rows = 1 segment, 20 rows = 2 segments)
+- [x] 2.3 Vacuum safety (DELETE range + VACUUM + TID GC + re-verify)
+- [ ] 2.4 Borrowed buffer lifetime (requires concurrent session, deferred)
+- [x] 2.5 Locator edge cases (zero, INT64_MAX, advance/next from zero)
+- [x] 2.6 int2/int4 index type support (equality + range filter)
+- [x] 2.7 Empty table operations (count + filter on empty clustered table)
+
+### Phase 3: Directed Placement ("Continuous Cluster") [DONE]
+- [x] 3.1 Add tuple_insert override with zone map (minor_key -> BlockNumber)
+- [x] 3.2 Verify directed placement: 10x block scatter reduction vs standard heap
+- [x] 3.3 Add multi_insert override for COPY path (with adaptive fast/group paths)
+- [x] 3.4 Production zone map: overflow eviction (1M key limit), lifecycle invalidation
+- [x] 3.5 Evaluate BRIN index performance on directed-placement tables
+- [ ] 3.6 Remove/simplify keycache + SPI hot path (requires design discussion)
+
+### Phase 4: Architecture (deferred, requires design discussion)
+- [ ] 4.1 Move segment map to shared memory (eliminate SPI hot path)
+- [ ] 4.2 Address executor-level rescan amplification for JOIN UNNEST
+- [ ] 4.3 Formalize borrowed buffer ownership (copy-on-borrow or reference counting)
+
+---
+
+## Research Log
+
+[session-1] Read full C source (5381 lines), SQL extension, Makefile, TODO.md (17477 lines)
+[session-1] Initial analysis identified 21 potential issues across 7 categories
+[session-1] Verified each claim against actual code -- 4 were false positives:
+  - combined_tids is initialized to NULL (line 3550), goto fail is safe
+  - tid_count > 0 guard exists before array access (line 3518)
+  - integer overflow unreachable with GUC max=1048576
+  - SQL buffers adequately sized for realistic schema names
+[session-1] Fixed 2 SPI plan_init leak patterns (lines 1059, 1126) -- moved inside PG_TRY
+[session-1] Added overflow guard to clustered_pg_next_capacity
+[session-1] Compile verified: make -> clean build, no warnings
+[session-1] TODO.md analysis: 17.5K lines with ~1:5 signal-to-noise ratio.
+  Upper 40% is meta-work (re-baselines, make-help contracts, CI workflow guards).
+  Quadrumvirate applied ritualistically to trivial tasks.
+  97 shell selftests vs 1 SQL regression test -- inverted test pyramid.
+[session-1] Added 7 functional test groups to sql/clustered_pg.sql:
+  - int2/int4 index AM (equality + range filter) -- both types work correctly
+  - locator edge cases (0,0), (INT64_MAX, INT64_MAX), advance/next from zero
+  - JOIN UNNEST rescan path: 10 hits, 0 misses, 3/5 mixed -- all correct
+  - delete+vacuum+gc consistency: 50 rows, delete 21, vacuum, gc, verify 29 remain
+  - segment split boundary: 16 rows=1 segment, 20 rows=2 segments (split_threshold=16)
+  - empty table: count=0, filter=0 on empty clustered_heap table
+  - expected output updated, all tests pass (make installcheck)
+[session-1] Discovery: split_threshold minimum is 16 (not arbitrary), validated by GUC range check.
+[session-2] Quadrumvirate architectural analysis: root cause of 10% JOIN UNNEST throughput
+  is NOT SPI overhead -- it's the fake-index-AM architecture (hash-cached TID lookup
+  pretending to be a btree). Three abstraction layers without foundation.
+[session-2] Paradigm shift identified: "Continuous Cluster" -- directed placement in
+  table AM's tuple_insert via RelationSetTargetBlock, making data physically ordered
+  so standard btree/BRIN work optimally. Eliminates ~3200 lines of index AM caching.
+[session-2] Implemented directed placement (Step 1):
+  - Zone map: per-relation HTAB mapping minor_key -> BlockNumber
+  - tuple_insert override: extracts clustering key from slot, looks up zone map,
+    calls RelationSetTargetBlock, delegates to heap, records actual placement
+  - Lazy index discovery: on first insert, finds clustered_pk_index via catalog,
+    caches key_attnum and key_typid
+  - ~160 lines of C added, zero warnings
+[session-2] Benchmark results (30 keys, 40 rows/key, 500-byte payload):
+  directed_sorted:      3.33 avg blocks/key (max 4)
+  directed_interleaved: 4.00 avg blocks/key (max 4)   <-- THIS IS THE WIN
+  heap_interleaved:    40.00 avg blocks/key (max 40)   <-- 10x worse
+  heap_sorted:          3.33 avg blocks/key (max 4)
+  Directed placement achieves near-sorted clustering on worst-case interleaved input.
+[session-2] Added regression test: directed_placement_ok + block_order_ok assertions.
+[session-2] All tests pass: make installcheck (1 test, 1639ms).
+[session-2] Added multi_insert override for COPY/bulk INSERT path:
+  - Adaptive strategy: ≤64 distinct keys → sort+group (full clustering);
+    >64 keys → fast path (single call, lightweight zone map recording)
+  - Sort+group defers bistate pin between key groups via ReleaseBulkInsertStatePin
+  - Fast path sorts only lightweight 12-byte ks array for zone map dedup
+  - Added #include "access/heapam.h" for BulkInsertState operations
+[session-2] Production zone map hardening:
+  - Zone map invalidation on: set_new_filelocator, truncate, copy_data, copy_for_cluster
+  - Overflow guard: CLUSTERED_PG_ZONE_MAP_MAX_KEYS (1M) limit per relation,
+    auto-reset on overflow
+  - Forward declarations for all new functions
+[session-2] INSERT optimization: reduced zone map recording from O(nslots) to O(distinct_keys)
+  hash_search calls. For 100K rows/1000 keys: 1000 hash ops instead of 100K.
+[session-2] Final comprehensive benchmark (100K rows, 1000 keys, interleaved, 100B payload):
+  Block scatter: directed=3.0 blocks/key vs heap=100.0 blocks/key (33x better)
+  With standard btree index on directed-placement table:
+    Point lookup (1 key):      0.248ms vs 0.247ms (same)
+    Range scan 10% (10K rows): 0.871ms vs 2.107ms (2.4x faster)
+    Bitmap scan 1% (1K rows):  24 buffers vs 121 buffers (5x fewer)
+    JOIN 200 keys:             2.463ms vs 4.839ms (2x faster)
+  BRIN index on directed data is highly effective: 22 heap blocks for 1% selectivity
+  vs 119 blocks on standard heap (physical clustering enables precise BRIN ranges).
+[session-2] Added regression tests: directed_placement_ok, block_order_ok, copy_directed_ok.
+[session-2] All 9 test groups pass: make installcheck (1 test, 1569ms).

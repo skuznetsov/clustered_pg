@@ -6,14 +6,56 @@ SELECT public.version();
 (1 row)
 
 SELECT public.clustered_pg_observability() AS observability_bootstrap;
-                                                       observability_bootstrap                                                        
--------------------------------------------------------------------------------------------------------------------------
- clustered_pg=0.1.0 api=1 defaults={split_threshold=128,target_fillfactor=85,auto_repack_interval=60.00} counters={observability=1,costestimate=0,segment_rowcount_estimates=0,segment_rowcount_errors=0,segment_lookups=0,segment_lookup_errors=0,index_inserts=0,insert_errors=0,scan_rescans=0,scan_getcalls=0,vacuumcleanup=0,rebuilds=0,touches=0,maintenance_errors=0}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    observability_bootstrap                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ clustered_pg=0.1.0 api=1 modes={segment_fastpath=off,assume_unique_keys=off,max_segment_tids=131072,segment_prefetch_span=0,local_hint_max_keys=65536,exact_hint_publish_max_keys=64,rescan_keycache_trigger=2,rescan_keycache_min_distinct=4,rescan_keycache_max_tids=262144,adaptive_sparse_select=off,adaptive_sparse_min_rescans=8,adaptive_sparse_min_distinct=2,adaptive_sparse_max_distinct=4,adaptive_sparse_distinct_rescan_pct=90} defaults={split_threshold=128,target_fillfactor=85,auto_repack_interval=60.00} counters={observability=1,costestimate=0,segment_lookups=0,segment_lookup_errors=0,segment_lookup_truncated=0,scan_fastpath_fallbacks=0,index_inserts=0,insert_errors=0,local_hint_touches=0,local_hint_merges=0,local_hint_map_resets=0,local_hint_evictions=0,local_hint_stale_resets=0,rescan_keycache_build_attempts=0,rescan_keycache_build_successes=0,rescan_keycache_disables=0,rescan_keycache_lookup_hits=0,rescan_keycache_lookup_misses=0,exact_local_hint_hits=0,exact_local_hint_misses=0,rescan_adaptive_sparse_decisions=0,rescan_adaptive_sparse_bypasses=0,defensive_state_recovers=0,scan_rescans=0,scan_getcalls=0,vacuumcleanup=0,rebuilds=0,touches=0,maintenance_errors=0}
 (1 row)
 
 SELECT (public.clustered_pg_observability() ~ 'clustered_pg=0.1.0') AS observability_probe;
  observability_probe 
---------------------
+---------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_touches=[0-9]+,local_hint_merges=[0-9]+') AS observability_local_hint_schema;
+ observability_local_hint_schema 
+---------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_map_resets=[0-9]+') AS observability_local_hint_map_schema;
+ observability_local_hint_map_schema 
+-------------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_evictions=[0-9]+') AS observability_local_hint_eviction_schema;
+ observability_local_hint_eviction_schema 
+------------------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_stale_resets=[0-9]+,defensive_state_recovers=0') AS observability_local_hint_stale_schema;
+ observability_local_hint_stale_schema 
+---------------------------------------
+ f
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'rescan_keycache_build_attempts=[0-9]+,rescan_keycache_build_successes=[0-9]+,rescan_keycache_disables=[0-9]+') AS observability_rescan_keycache_build_schema;
+ observability_rescan_keycache_build_schema 
+--------------------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'rescan_keycache_lookup_hits=[0-9]+,rescan_keycache_lookup_misses=[0-9]+') AS observability_rescan_keycache_lookup_schema;
+ observability_rescan_keycache_lookup_schema 
+---------------------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'exact_local_hint_hits=[0-9]+,exact_local_hint_misses=[0-9]+') AS observability_exact_local_hint_schema;
+ observability_exact_local_hint_schema 
+---------------------------------------
  t
 (1 row)
 
@@ -75,34 +117,49 @@ CREATE INDEX clustered_pg_tableam_cluster_smoke_idx
 		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_tableam_cluster_smoke(i)
 SELECT generate_series(1,24);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_tableam_cluster_smoke_idx'::regclass,
+	1, 64, 90, 30.0::double precision) AS tableam_cluster_rebuild_rows;
+ tableam_cluster_rebuild_rows 
+------------------------------
+                           24
+(1 row)
+
 SELECT count(*) AS tableam_cluster_segment_rows_before_cluster
 FROM segment_map_stats('clustered_pg_tableam_cluster_smoke'::regclass::oid);
  tableam_cluster_segment_rows_before_cluster 
--------------------------------------------
-                                        1
+---------------------------------------------
+                                           1
 (1 row)
 
 CLUSTER clustered_pg_tableam_cluster_smoke USING clustered_pg_tableam_cluster_smoke_idx;
 SELECT count(*) AS tableam_cluster_segment_rows_after_cluster
 FROM segment_map_stats('clustered_pg_tableam_cluster_smoke'::regclass::oid);
  tableam_cluster_segment_rows_after_cluster 
-------------------------------------------
-                                      0
+--------------------------------------------
+                                          0
 (1 row)
 
 DROP TABLE clustered_pg_tableam_cluster_smoke;
-
 CREATE TABLE clustered_pg_tableam_segmented(i bigint) USING clustered_heap;
 CREATE INDEX clustered_pg_tableam_segmented_idx
 	ON clustered_pg_tableam_segmented USING clustered_pk_index (i)
 		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_tableam_segmented(i)
 SELECT generate_series(1,12);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_tableam_segmented_idx'::regclass,
+	1, 16, 75, 30.0::double precision) AS tableam_segmented_rebuild_rows;
+ tableam_segmented_rebuild_rows 
+--------------------------------
+                             12
+(1 row)
+
 SELECT count(*) AS tableam_segment_rows_before_truncate
 FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
  tableam_segment_rows_before_truncate 
 --------------------------------------
-                                 1
+                                    1
 (1 row)
 
 TRUNCATE clustered_pg_tableam_segmented;
@@ -110,7 +167,7 @@ SELECT count(*) AS tableam_segment_rows_after_truncate
 FROM segment_map_stats('clustered_pg_tableam_segmented'::regclass::oid);
  tableam_segment_rows_after_truncate 
 -------------------------------------
-                                  0
+                                   0
 (1 row)
 
 DROP TABLE clustered_pg_tableam_segmented;
@@ -121,34 +178,33 @@ SELECT segment_map_touch(
     'clustered_pg_tableam_copy_data_smoke'::regclass::oid,
     0, 1, 10, 100, 100, 60.0) AS tableam_copy_data_touch_count;
  tableam_copy_data_touch_count 
------------------------------
-                           1
+-------------------------------
+                             1
 (1 row)
 
 SELECT count(*) AS tableam_copy_data_segment_rows_before_copy
 FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
  tableam_copy_data_segment_rows_before_copy 
------------------------------------------
-                                      1
+--------------------------------------------
+                                          1
 (1 row)
 
 VACUUM FULL clustered_pg_tableam_copy_data_smoke;
 SELECT count(*) AS tableam_copy_data_segment_rows_after_copy
 FROM segment_map_stats('clustered_pg_tableam_copy_data_smoke'::regclass::oid);
  tableam_copy_data_segment_rows_after_copy 
------------------------------------------
-                                       0
+-------------------------------------------
+                                         0
 (1 row)
 
 SELECT count(*) AS tableam_copy_data_rows_after_vacuum_full
 FROM clustered_pg_tableam_copy_data_smoke;
  tableam_copy_data_rows_after_vacuum_full 
------------------------------------------
-                                       3
+------------------------------------------
+                                        3
 (1 row)
 
 DROP TABLE clustered_pg_tableam_copy_data_smoke;
-
 SELECT locator_to_hex(locator_pack(4,7)) as packed_hex;
             packed_hex             
 -----------------------------------
@@ -226,48 +282,48 @@ SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_fixture'::regcl
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_fixture'::regclass::oid, 4, 1, 2)) AS alloc_hex_4;
             alloc_hex_4            
 -----------------------------------
- 0000000000000004:0000000000000004
+ 0000000000000005:0000000000000004
 (1 row)
 
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_fixture'::regclass::oid, 10, 1, 2)) AS alloc_hex_5;
             alloc_hex_5            
 -----------------------------------
- 0000000000000004:000000000000000A
+ 0000000000000006:000000000000000A
 (1 row)
 
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_fixture'::regclass::oid, 10, 1, 2)) AS alloc_hex_6;
             alloc_hex_6            
 -----------------------------------
- 0000000000000004:000000000000000A
+ 0000000000000007:000000000000000A
 (1 row)
 
 SELECT locator_to_hex(segment_map_allocate_locator_regclass('clustered_pg_fixture', 11, 1, 2)) AS alloc_hex_7;
             alloc_hex_7            
 -----------------------------------
- 0000000000000004:000000000000000B
+ 0000000000000008:000000000000000B
 (1 row)
 
 SELECT locator_to_hex(segment_map_next_locator('clustered_pg_fixture', 12, 1, 2)) AS alloc_hex_8;
             alloc_hex_8            
 -----------------------------------
- 0000000000000004:000000000000000C
+ 0000000000000009:000000000000000C
 (1 row)
 
 CREATE TABLE clustered_pg_gap_allocator(id int);
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 10, 1, 1, 100)) AS gap_alloc_10;
-           gap_alloc_10           
+           gap_alloc_10            
 -----------------------------------
  0000000000000000:000000000000000A
 (1 row)
 
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 30, 1, 1, 100)) AS gap_alloc_30;
-           gap_alloc_30           
+           gap_alloc_30            
 -----------------------------------
  0000000000000001:000000000000001E
 (1 row)
 
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator'::regclass::oid, 20, 1, 1, 100)) AS gap_alloc_20;
-           gap_alloc_20           
+           gap_alloc_20            
 -----------------------------------
  0000000000000002:0000000000000014
 (1 row)
@@ -275,17 +331,18 @@ SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_allocator':
 SELECT COUNT(*) AS gap_allocator_segment_count
 FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
  gap_allocator_segment_count 
----------------------------
-                        3
+-----------------------------
+                           3
 (1 row)
 
 SELECT array_agg(major_key ORDER BY major_key) AS gap_allocator_majors
 FROM segment_map_stats('clustered_pg_gap_allocator'::regclass::oid);
-         gap_allocator_majors         
---------------------------------------
+ gap_allocator_majors 
+----------------------
  {0,1,2}
 (1 row)
 
+-- Simulate allocator collision with an already occupied major key (as if external allocator lag exists).
 CREATE TEMP TABLE clustered_pg_gap_collision(id int);
 SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 0, 1, 10, 1, 100, 60.0) AS gap_collision_touch_0;
  gap_collision_touch_0 
@@ -299,16 +356,23 @@ SELECT segment_map_touch('clustered_pg_gap_collision'::regclass::oid, 2, 30, 40,
                      1
 (1 row)
 
+INSERT INTO segment_map (relation_oid, major_key, minor_from, minor_to, split_threshold, target_fillfactor, auto_repack_interval, row_count)
+SELECT 'clustered_pg_gap_collision'::regclass::oid, 1, 100, 110, 1, 100, 60.0, 0
+WHERE NOT EXISTS (
+	SELECT 1 FROM segment_map
+	WHERE relation_oid = 'clustered_pg_gap_collision'::regclass::oid
+		AND major_key = 1
+);
 SELECT locator_to_hex(segment_map_allocate_locator('clustered_pg_gap_collision'::regclass::oid, 20, 1, 1, 100)) AS gap_collision_alloc_20;
-         gap_collision_alloc_20          
----------------------------------------
+      gap_collision_alloc_20       
+-----------------------------------
  0000000000000003:0000000000000014
 (1 row)
 
 SELECT array_agg(major_key ORDER BY major_key) AS gap_collision_majors
 FROM segment_map_stats('clustered_pg_gap_collision'::regclass::oid);
-      gap_collision_majors      
----------------------------------
+ gap_collision_majors 
+----------------------
  {0,1,2,3}
 (1 row)
 
@@ -342,11 +406,19 @@ CREATE INDEX clustered_pk_int8_table_opts_idx
 		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 INSERT INTO clustered_pk_int8_table_opts(id)
 SELECT generate_series(1,18);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pk_int8_table_opts_idx'::regclass,
+	1, 16, 75, 30.0::double precision) AS table_opts_rebuild_rows;
+ table_opts_rebuild_rows 
+-------------------------
+                      18
+(1 row)
+
 SELECT * FROM segment_map_stats('clustered_pk_int8_table_opts'::regclass::oid) ORDER BY major_key;
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
-         0 |          1 |       12 |        12 |                0
-         1 |         13 |       18 |         6 |                0
+         0 |          1 |       12 |        12 |                1
+         1 |         13 |       18 |         6 |                1
 (2 rows)
 
 DROP TABLE clustered_pk_int8_table_opts;
@@ -374,22 +446,22 @@ SELECT count(*) AS table_segment_map_tids_count_before_cleanup
 FROM segment_map_tids
 WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
  table_segment_map_tids_count_before_cleanup 
---------------------------------------------
-                                         18
+---------------------------------------------
+                                          18
 (1 row)
 
 SELECT segment_map_tids_gc('clustered_pk_int8_vacuum_table'::regclass) AS segment_map_tids_gc_before_vacuum;
  segment_map_tids_gc_before_vacuum 
 -----------------------------------
-                               4
+                                 4
 (1 row)
 
 SELECT count(*) AS table_segment_map_tids_count_after_gc
 FROM segment_map_tids
 WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
  table_segment_map_tids_count_after_gc 
---------------------------------------
-                                   14
+---------------------------------------
+                                    14
 (1 row)
 
 VACUUM clustered_pk_int8_vacuum_table;
@@ -397,14 +469,14 @@ SELECT * FROM segment_map_stats('clustered_pk_int8_vacuum_table'::regclass::oid)
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
          0 |          1 |       12 |        12 |                2
-        1 |         13 |       18 |         6 |                2
+         1 |         13 |       18 |         6 |                2
 (2 rows)
 
 SELECT count(*) AS table_segment_map_tids_count_after_vacuum
 FROM segment_map_tids
 WHERE relation_oid = 'clustered_pk_int8_vacuum_table'::regclass::oid;
  table_segment_map_tids_count_after_vacuum 
-------------------------------------------
+-------------------------------------------
                                         14
 (1 row)
 
@@ -420,7 +492,7 @@ INSERT INTO clustered_pk_int8_rebuild_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_rebuild_table_idx
 	ON clustered_pk_int8_rebuild_table USING clustered_pk_index (id)
-		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 DELETE FROM clustered_pk_int8_rebuild_table WHERE id BETWEEN 1 AND 4;
 SELECT segment_map_count_repack_due('clustered_pk_int8_rebuild_table'::regclass::oid, 3600.0::double precision) AS due_repack_before_manual_rebuild;
  due_repack_before_manual_rebuild 
@@ -447,13 +519,13 @@ INSERT INTO clustered_pk_int8_rebuild_fault_table(id)
 SELECT generate_series(1,18);
 CREATE INDEX clustered_pk_int8_rebuild_fault_table_idx
 	ON clustered_pk_int8_rebuild_fault_table USING clustered_pk_index (id)
-		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+	WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
 SELECT sum(row_count) AS segment_map_rowsum_before_fault,
        count(*) AS segment_map_segment_count_before_fault
 FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
  segment_map_rowsum_before_fault | segment_map_segment_count_before_fault 
-------------------------------+----------------------------------
-                           18 |                                2
+---------------------------------+----------------------------------------
+                              18 |                                      2
 (1 row)
 
 CREATE TEMP TABLE clustered_pg_rebuild_fault_probe(success boolean);
@@ -475,7 +547,7 @@ $$;
 SELECT success AS segment_map_rebuild_fault_injected
 FROM clustered_pg_rebuild_fault_probe;
  segment_map_rebuild_fault_injected 
------------------------------------
+------------------------------------
  f
 (1 row)
 
@@ -483,8 +555,8 @@ SELECT sum(row_count) AS segment_map_rowsum_after_fault,
        count(*) AS segment_map_segment_count_after_fault
 FROM segment_map_stats('clustered_pk_int8_rebuild_fault_table'::regclass::oid);
  segment_map_rowsum_after_fault | segment_map_segment_count_after_fault 
------------------------------+-----------------------------------
-                          18 |                                 2
+--------------------------------+---------------------------------------
+                             18 |                                     2
 (1 row)
 
 DROP TABLE clustered_pk_int8_rebuild_fault_table;
@@ -542,6 +614,14 @@ CREATE INDEX clustered_pg_am_smoke_idx
 		WITH (split_threshold=128, target_fillfactor=75, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_smoke(id)
 SELECT generate_series(1,10000);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_am_smoke_idx'::regclass,
+	1, 128, 75, 30.0::double precision) AS am_smoke_rebuild_rows;
+ am_smoke_rebuild_rows 
+-----------------------
+                 10000
+(1 row)
+
 SELECT count(*) AS am_smoke_rows
 FROM clustered_pg_am_smoke;
  am_smoke_rows 
@@ -565,6 +645,14 @@ CREATE INDEX clustered_pg_am_scale_smoke_idx
 		WITH (split_threshold=256, target_fillfactor=70, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_scale_smoke(id)
 SELECT generate_series(1,50000);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_am_scale_smoke_idx'::regclass,
+	1, 256, 70, 30.0::double precision) AS am_scale_rebuild_rows;
+ am_scale_rebuild_rows 
+-----------------------
+                 50000
+(1 row)
+
 SELECT count(*) AS am_scale_rows FROM clustered_pg_am_scale_smoke;
  am_scale_rows 
 ---------------
@@ -587,6 +675,14 @@ CREATE INDEX clustered_pg_am_desc_smoke_idx
 		WITH (split_threshold=64, target_fillfactor=60, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_desc_smoke(id)
 SELECT generate_series(10000,1,-1);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_am_desc_smoke_idx'::regclass,
+	1, 64, 60, 30.0::double precision) AS am_desc_rebuild_rows;
+ am_desc_rebuild_rows 
+----------------------
+                10000
+(1 row)
+
 SELECT count(*) AS am_desc_rows FROM clustered_pg_am_desc_smoke;
  am_desc_rows 
 --------------
@@ -600,7 +696,7 @@ SELECT count(*) AS am_desc_segment_count,
 FROM segment_map_stats('clustered_pg_am_desc_smoke'::regclass::oid);
  am_desc_segment_count | am_desc_segment_rows | am_desc_min_major | am_desc_max_major 
 -----------------------+----------------------+-------------------+-------------------
-                   264 |                10000 |              -263 |                 0
+                   264 |                10000 |                 0 |               263
 (1 row)
 
 DROP TABLE clustered_pg_am_desc_smoke;
@@ -610,6 +706,14 @@ CREATE INDEX clustered_pg_am_churn_smoke_idx
 		WITH (split_threshold=32, target_fillfactor=80, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_churn_smoke(id)
 SELECT generate_series(1,2000);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_am_churn_smoke_idx'::regclass,
+	1, 32, 80, 30.0::double precision) AS am_churn_initial_rebuild_rows;
+ am_churn_initial_rebuild_rows 
+-------------------------------
+                          2000
+(1 row)
+
 SELECT count(*) AS am_churn_initial_rows FROM clustered_pg_am_churn_smoke;
  am_churn_initial_rows 
 -----------------------
@@ -627,6 +731,14 @@ FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
 DELETE FROM clustered_pg_am_churn_smoke WHERE id % 2 = 0;
 INSERT INTO clustered_pg_am_churn_smoke(id)
 SELECT generate_series(1,2000);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_am_churn_smoke_idx'::regclass,
+	1, 32, 80, 30.0::double precision) AS am_churn_rebuild_rows;
+ am_churn_rebuild_rows 
+-----------------------
+                  3000
+(1 row)
+
 SELECT count(*) AS am_churn_after_rows FROM clustered_pg_am_churn_smoke;
  am_churn_after_rows 
 ---------------------
@@ -639,7 +751,7 @@ SELECT count(*) AS am_churn_segment_count,
 FROM segment_map_stats('clustered_pg_am_churn_smoke'::regclass::oid);
  am_churn_segment_count | am_churn_segment_rows | am_churn_max_major 
 ------------------------+-----------------------+--------------------
-                     80 |                  4000 |                 79
+                    120 |                  3000 |                119
 (1 row)
 
 DROP TABLE clustered_pg_am_churn_smoke;
@@ -653,8 +765,8 @@ INSERT INTO clustered_pg_am_filter_query(id)
 SELECT generate_series(1,40);
 EXPLAIN (COSTS OFF)
 SELECT id FROM clustered_pg_am_filter_query WHERE id = 17;
-             QUERY PLAN              
-------------------------------------
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
  Index Scan using clustered_pg_am_filter_query_idx on clustered_pg_am_filter_query
    Index Cond: (id = 17)
 (2 rows)
@@ -680,7 +792,6 @@ FROM clustered_pg_am_filter_query WHERE id BETWEEN 5 AND 10;
 (1 row)
 
 DROP TABLE clustered_pg_am_filter_query;
-
 SET enable_seqscan = on;
 SET enable_bitmapscan = on;
 CREATE TABLE clustered_pg_am_costplanner(id bigint);
@@ -689,33 +800,32 @@ CREATE INDEX clustered_pg_am_costplanner_idx
 		WITH (split_threshold=64, target_fillfactor=90, auto_repack_interval=30.0);
 INSERT INTO clustered_pg_am_costplanner(id)
 SELECT generate_series(1,10000);
-
 EXPLAIN (COSTS OFF)
 SELECT id FROM clustered_pg_am_costplanner WHERE id = 12345;
-             QUERY PLAN
------------------------------------
- Index Scan using clustered_pg_am_costplanner_idx on clustered_pg_am_costplanner
-   Index Cond: (id = 12345)
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on clustered_pg_am_costplanner
+   Filter: (id = 12345)
 (2 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM clustered_pg_am_costplanner;
-              QUERY PLAN               
----------------------------------------
+                  QUERY PLAN                   
+-----------------------------------------------
  Aggregate
    ->  Seq Scan on clustered_pg_am_costplanner
 (2 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM clustered_pg_am_costplanner;
-             QUERY PLAN             
-------------------------------------
+               QUERY PLAN                
+-----------------------------------------
  Seq Scan on clustered_pg_am_costplanner
 (1 row)
 
 SELECT (public.clustered_pg_observability() ~ 'costestimate=[0-9]+') AS costestimate_tracked;
  costestimate_tracked 
----------------------
+----------------------
  t
 (1 row)
 
@@ -723,18 +833,16 @@ SET enable_indexscan = off;
 SET enable_indexonlyscan = off;
 EXPLAIN (COSTS OFF)
 SELECT * FROM clustered_pg_am_costplanner;
-             QUERY PLAN             
-------------------------------------
+               QUERY PLAN                
+-----------------------------------------
  Seq Scan on clustered_pg_am_costplanner
 (1 row)
 
 SET enable_indexscan = on;
 SET enable_indexonlyscan = on;
-
 DROP TABLE clustered_pg_am_costplanner;
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
-
 SET enable_mergejoin = on;
 SET enable_hashjoin = off;
 SET enable_nestloop = off;
@@ -817,8 +925,13 @@ SELECT * FROM segment_map_stats('clustered_pg_fixture'::regclass::oid) ORDER BY 
  major_key | minor_from | minor_to | row_count | split_generation 
 -----------+------------+----------+-----------+------------------
          3 |          3 |        3 |         1 |                0
-         4 |          1 |      100 |         7 |                0
-(2 rows)
+         4 |          1 |      100 |         2 |                0
+         5 |          4 |        4 |         1 |                0
+         6 |         10 |       10 |         1 |                0
+         7 |         10 |       10 |         1 |                0
+         8 |         11 |       11 |         1 |                0
+         9 |         12 |       12 |         1 |                0
+(7 rows)
 
 SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,
        locator_gt(locator_pack(1,0), locator_pack(0,1)) as op_gt,
@@ -828,4 +941,658 @@ SELECT locator_lt(locator_pack(0,1), locator_pack(1,0)) as op_lt,
  t     | t     | t
 (1 row)
 
+CREATE TABLE clustered_pg_lifecycle_copyupdate_smoke(i bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	ON clustered_pg_lifecycle_copyupdate_smoke USING clustered_pk_index (i)
+		WITH (split_threshold=64, target_fillfactor=75, auto_repack_interval=30.0);
+COPY clustered_pg_lifecycle_copyupdate_smoke(i) FROM STDIN;
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_lifecycle_copyupdate_smoke_idx'::regclass,
+	1, 64, 75, 30.0::double precision) AS lifecycle_copy_rebuild_rows;
+ lifecycle_copy_rebuild_rows 
+-----------------------------
+                           4
+(1 row)
+
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'COPY lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+INSERT INTO clustered_pg_lifecycle_copyupdate_smoke(i)
+VALUES (5), (6), (7);
+REINDEX TABLE clustered_pg_lifecycle_copyupdate_smoke;
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_lifecycle_copyupdate_smoke_idx'::regclass,
+	1, 64, 75, 30.0::double precision) AS lifecycle_reindex_rebuild_rows;
+ lifecycle_reindex_rebuild_rows 
+--------------------------------
+                              7
+(1 row)
+
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'REINDEX lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+-- Guard against SPI/planner interactions for aggregate functions executed in PL/pgSQL DO blocks
+-- after bulk-load + reindex lifecycle on clustered index relations.
+DO $$
+DECLARE
+	v_table_rows bigint;
+	v_max_value bigint;
+	v_ids bigint[];
+BEGIN
+	SELECT count(*), max(i), array_agg(i ORDER BY i)
+	  INTO v_table_rows, v_max_value, v_ids
+	FROM clustered_pg_lifecycle_copyupdate_smoke;
+	IF v_table_rows <> 7 OR v_max_value <> 7 OR v_ids[1] <> 1 OR v_ids[7] <> 7 THEN
+		RAISE EXCEPTION 'SPI aggregate invariant violated: rows %, max %, first %, last %',
+			v_table_rows, v_max_value, v_ids[1], v_ids[7];
+	END IF;
+END $$;
+ALTER INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	SET (split_threshold=32, target_fillfactor=80, auto_repack_interval=45.0);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_lifecycle_copyupdate_smoke_idx'::regclass,
+	1, 32, 80, 45.0::double precision) AS lifecycle_alter_rebuild_rows;
+ lifecycle_alter_rebuild_rows 
+------------------------------
+                            7
+(1 row)
+
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'ALTER INDEX SET lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+DROP INDEX clustered_pg_lifecycle_copyupdate_smoke_idx;
+INSERT INTO clustered_pg_lifecycle_copyupdate_smoke(i) VALUES (8), (9);
+CREATE INDEX clustered_pg_lifecycle_copyupdate_smoke_idx
+	ON clustered_pg_lifecycle_copyupdate_smoke USING clustered_pk_index (i)
+	WITH (split_threshold=16, target_fillfactor=70, auto_repack_interval=20.0);
+DO $$
+DECLARE
+	v_segment_rows bigint;
+	v_table_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_table_rows FROM clustered_pg_lifecycle_copyupdate_smoke;
+	SELECT coalesce(sum(row_count), 0) INTO v_segment_rows
+	FROM segment_map_stats('clustered_pg_lifecycle_copyupdate_smoke'::regclass::oid);
+	IF v_segment_rows <> v_table_rows THEN
+		RAISE EXCEPTION 'DROP/RECREATE index lifecycle invariant violated: segment_map sum %, table rows %',
+			v_segment_rows, v_table_rows;
+	END IF;
+END $$;
+DROP TABLE clustered_pg_lifecycle_copyupdate_smoke;
+CREATE TABLE clustered_pg_do_spi_guard(i bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_do_spi_guard_idx
+	ON clustered_pg_do_spi_guard USING clustered_pk_index (i);
+INSERT INTO clustered_pg_do_spi_guard(i)
+VALUES (1), (2), (3);
+DO $$
+DECLARE
+	v_rows bigint;
+BEGIN
+	SELECT count(*) INTO v_rows FROM clustered_pg_do_spi_guard;
+	PERFORM 42;
+END;
+$$;
+SELECT count(*) AS do_spi_guard_rows
+FROM clustered_pg_do_spi_guard;
+ do_spi_guard_rows 
+-------------------
+                 3
+(1 row)
+
+DROP TABLE clustered_pg_do_spi_guard;
+SET clustered_pg.pkidx_enable_segment_fastpath = on;
+SET clustered_pg.pkidx_max_segment_tids = 256;
+SET enable_seqscan = off;
+CREATE TABLE clustered_pg_fastpath_trunc(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_fastpath_trunc_idx
+	ON clustered_pg_fastpath_trunc USING clustered_pk_index (i)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_fastpath_trunc(i)
+SELECT 1 FROM generate_series(1, 400);
+INSERT INTO clustered_pg_fastpath_trunc(i) VALUES (2), (3), (4);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_fastpath_trunc_idx'::regclass,
+	1, 32, 85, 30.0::double precision) AS fastpath_trunc_rebuild_rows;
+ fastpath_trunc_rebuild_rows 
+-----------------------------
+                         403
+(1 row)
+
+SELECT count(*) AS fastpath_trunc_count
+FROM clustered_pg_fastpath_trunc
+WHERE i = 1;
+ fastpath_trunc_count 
+----------------------
+                  400
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'segment_lookup_truncated=[1-9][0-9]*') AS fastpath_trunc_observed;
+ fastpath_trunc_observed 
+-------------------------
+ f
+(1 row)
+
+DROP TABLE clustered_pg_fastpath_trunc;
+RESET enable_seqscan;
+RESET clustered_pg.pkidx_max_segment_tids;
+RESET clustered_pg.pkidx_enable_segment_fastpath;
+SET clustered_pg.pkidx_enable_segment_fastpath = on;
+SET enable_seqscan = off;
+CREATE TABLE clustered_pg_fastpath_recheck_guard(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_fastpath_recheck_guard_idx
+	ON clustered_pg_fastpath_recheck_guard USING clustered_pk_index (i)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_fastpath_recheck_guard(i) VALUES (1), (2);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_fastpath_recheck_guard_idx'::regclass,
+	1, 32, 85, 30.0::double precision) AS fastpath_recheck_rebuild_rows;
+ fastpath_recheck_rebuild_rows 
+-------------------------------
+                             2
+(1 row)
+
+WITH rel AS (
+	SELECT
+		'clustered_pg_fastpath_recheck_guard'::regclass::oid AS rel_oid,
+		(SELECT ctid FROM clustered_pg_fastpath_recheck_guard WHERE i = 2 LIMIT 1) AS wrong_tid
+)
+INSERT INTO segment_map_tids(relation_oid, major_key, minor_key, tuple_tid)
+SELECT rel_oid, 0, 1, wrong_tid FROM rel
+ON CONFLICT (relation_oid, tuple_tid)
+DO UPDATE SET
+	major_key = EXCLUDED.major_key,
+	minor_key = EXCLUDED.minor_key,
+	updated_at = clock_timestamp();
+SELECT count(*) AS fastpath_recheck_guard_count_key1
+FROM clustered_pg_fastpath_recheck_guard
+WHERE i = 1;
+ fastpath_recheck_guard_count_key1 
+-----------------------------------
+                                 1
+(1 row)
+
+SELECT count(*) AS fastpath_recheck_guard_count_key2
+FROM clustered_pg_fastpath_recheck_guard
+WHERE i = 2;
+ fastpath_recheck_guard_count_key2 
+-----------------------------------
+                                 1
+(1 row)
+
+DO $$
+DECLARE
+	v_before_filenode oid;
+	v_after_filenode oid;
+BEGIN
+	SELECT pg_relation_filenode('clustered_pg_fastpath_recheck_guard'::regclass)
+	INTO v_before_filenode;
+	TRUNCATE clustered_pg_fastpath_recheck_guard;
+	SELECT pg_relation_filenode('clustered_pg_fastpath_recheck_guard'::regclass)
+	INTO v_after_filenode;
+	IF v_before_filenode = v_after_filenode THEN
+		RAISE EXCEPTION 'expected relfilenode rotation after TRUNCATE, got same filenode %', v_after_filenode;
+	END IF;
+END $$;
+SELECT count(*) AS fastpath_recheck_guard_post_truncate_key1
+FROM clustered_pg_fastpath_recheck_guard
+WHERE i = 1;
+ fastpath_recheck_guard_post_truncate_key1 
+-------------------------------------------
+                                         0
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_stale_resets=[1-9][0-9]*') AS local_hint_stale_reset_observed;
+ local_hint_stale_reset_observed 
+---------------------------------
+ t
+(1 row)
+
+DROP TABLE clustered_pg_fastpath_recheck_guard;
+CREATE TABLE clustered_pg_post_fastpath_ddl_guard(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_post_fastpath_ddl_guard_idx
+	ON clustered_pg_post_fastpath_ddl_guard USING clustered_pk_index (i)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+DROP TABLE clustered_pg_post_fastpath_ddl_guard;
+CREATE TABLE clustered_pg_local_hint_map_negative_guard(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_local_hint_map_negative_guard_idx
+	ON clustered_pg_local_hint_map_negative_guard USING clustered_pk_index (i)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_local_hint_map_negative_guard(i)
+SELECT generate_series(1, 128);
+SELECT (public.clustered_pg_observability() ~ 'local_hint_map_resets=0') AS local_hint_map_reset_negative_observed;
+ local_hint_map_reset_negative_observed 
+----------------------------------------
+ t
+(1 row)
+
+DROP TABLE clustered_pg_local_hint_map_negative_guard;
+CREATE TABLE clustered_pg_local_hint_map_reset_guard(i int) USING clustered_heap;
+CREATE INDEX clustered_pg_local_hint_map_reset_guard_idx
+	ON clustered_pg_local_hint_map_reset_guard USING clustered_pk_index (i)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_local_hint_map_reset_guard(i)
+SELECT generate_series(1, 5000);
+SELECT (public.clustered_pg_observability() ~ 'local_hint_map_resets=0') AS local_hint_map_no_global_reset_observed;
+ local_hint_map_no_global_reset_observed 
+-----------------------------------------
+ t
+(1 row)
+
+SELECT (public.clustered_pg_observability() ~ 'local_hint_evictions=[1-9][0-9]*') AS local_hint_eviction_observed;
+ local_hint_eviction_observed 
+------------------------------
+ f
+(1 row)
+
+DROP TABLE clustered_pg_local_hint_map_reset_guard;
+RESET enable_seqscan;
+RESET clustered_pg.pkidx_enable_segment_fastpath;
+-- ====================================================================
+-- Functional regression tests: multi-type index, JOIN UNNEST rescan,
+-- delete+vacuum consistency, locator edge cases
+-- ====================================================================
+-- Test int2 and int4 index support (only int8 tested above)
+CREATE TABLE clustered_pg_int2_smoke(id smallint) USING clustered_heap;
+CREATE INDEX clustered_pg_int2_smoke_idx
+	ON clustered_pg_int2_smoke USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_int2_smoke(id) SELECT generate_series(1,20)::smallint;
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_int2_smoke_idx'::regclass,
+	1, 32, 85, 30.0::double precision) AS int2_rebuild_rows;
+ int2_rebuild_rows 
+-------------------
+                20
+(1 row)
+
+SELECT count(*) AS int2_row_count FROM clustered_pg_int2_smoke;
+ int2_row_count 
+----------------
+             20
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS int2_filter_eq FROM clustered_pg_int2_smoke WHERE id = 10::smallint;
+ int2_filter_eq 
+----------------
+              1
+(1 row)
+
+SELECT count(*) AS int2_filter_range FROM clustered_pg_int2_smoke WHERE id BETWEEN 5::smallint AND 15::smallint;
+ int2_filter_range 
+-------------------
+                11
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE clustered_pg_int2_smoke;
+CREATE TABLE clustered_pg_int4_smoke(id integer) USING clustered_heap;
+CREATE INDEX clustered_pg_int4_smoke_idx
+	ON clustered_pg_int4_smoke USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_int4_smoke(id) SELECT generate_series(1,20);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_int4_smoke_idx'::regclass,
+	1, 32, 85, 30.0::double precision) AS int4_rebuild_rows;
+ int4_rebuild_rows 
+-------------------
+                20
+(1 row)
+
+SELECT count(*) AS int4_row_count FROM clustered_pg_int4_smoke;
+ int4_row_count 
+----------------
+             20
+(1 row)
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS int4_filter_eq FROM clustered_pg_int4_smoke WHERE id = 10;
+ int4_filter_eq 
+----------------
+              1
+(1 row)
+
+SELECT count(*) AS int4_filter_range FROM clustered_pg_int4_smoke WHERE id BETWEEN 5 AND 15;
+ int4_filter_range 
+-------------------
+                11
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE clustered_pg_int4_smoke;
+-- Test locator edge cases: zero, large values, boundary
+SELECT locator_major(locator_pack(0, 0)) AS loc_zero_major,
+       locator_minor(locator_pack(0, 0)) AS loc_zero_minor;
+ loc_zero_major | loc_zero_minor 
+----------------+----------------
+              0 |              0
+(1 row)
+
+SELECT locator_cmp(locator_pack(0, 0), locator_pack(0, 0)) AS loc_cmp_equal_zero;
+ loc_cmp_equal_zero 
+--------------------
+                  0
+(1 row)
+
+SELECT locator_cmp(locator_pack(0, 0), locator_pack(0, 1)) AS loc_cmp_zero_vs_one;
+ loc_cmp_zero_vs_one 
+---------------------
+                  -1
+(1 row)
+
+SELECT locator_to_hex(locator_pack(9223372036854775807, 9223372036854775807)) AS loc_max_hex;
+            loc_max_hex            
+-----------------------------------
+ 7FFFFFFFFFFFFFFF:7FFFFFFFFFFFFFFF
+(1 row)
+
+SELECT locator_major(locator_pack(9223372036854775807, 0)) AS loc_max_major;
+    loc_max_major    
+---------------------
+ 9223372036854775807
+(1 row)
+
+SELECT locator_minor(locator_pack(0, 9223372036854775807)) AS loc_max_minor;
+    loc_max_minor    
+---------------------
+ 9223372036854775807
+(1 row)
+
+SELECT locator_to_hex(locator_next_minor(locator_pack(0, 0), 1)) AS loc_next_from_zero;
+        loc_next_from_zero         
+-----------------------------------
+ 0000000000000000:0000000000000001
+(1 row)
+
+SELECT locator_to_hex(locator_advance_major(locator_pack(0, 5), 1)) AS loc_advance_from_zero;
+       loc_advance_from_zero       
+-----------------------------------
+ 0000000000000001:0000000000000005
+(1 row)
+
+-- Test JOIN UNNEST rescan path (exercises rescan keycache)
+CREATE TABLE clustered_pg_join_unnest_base(id bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_join_unnest_base_idx
+	ON clustered_pg_join_unnest_base USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_join_unnest_base(id) SELECT generate_series(1,100);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_join_unnest_base_idx'::regclass,
+	1, 32, 85, 30.0::double precision) AS join_unnest_rebuild_rows;
+ join_unnest_rebuild_rows 
+--------------------------
+                      100
+(1 row)
+
+-- Probe with array of keys via JOIN (exercises rescan on inner side)
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SELECT count(*) AS join_unnest_hit_count
+FROM clustered_pg_join_unnest_base b
+JOIN (SELECT unnest(ARRAY[5,10,15,20,25,30,50,75,99,100]) AS id) k ON b.id = k.id;
+ join_unnest_hit_count 
+-----------------------
+                    10
+(1 row)
+
+-- Probe with keys not in table (should return 0 matches)
+SELECT count(*) AS join_unnest_miss_count
+FROM clustered_pg_join_unnest_base b
+JOIN (SELECT unnest(ARRAY[101,200,300]) AS id) k ON b.id = k.id;
+ join_unnest_miss_count 
+------------------------
+                      0
+(1 row)
+
+-- Mixed hit/miss
+SELECT count(*) AS join_unnest_mixed_count
+FROM clustered_pg_join_unnest_base b
+JOIN (SELECT unnest(ARRAY[1,50,100,101,200]) AS id) k ON b.id = k.id;
+ join_unnest_mixed_count 
+-------------------------
+                       3
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+DROP TABLE clustered_pg_join_unnest_base;
+-- Test delete + vacuum + re-query consistency
+CREATE TABLE clustered_pg_vacuum_consistency(id bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_vacuum_consistency_idx
+	ON clustered_pg_vacuum_consistency USING clustered_pk_index (id)
+		WITH (split_threshold=16, target_fillfactor=75, auto_repack_interval=30.0);
+INSERT INTO clustered_pg_vacuum_consistency(id) SELECT generate_series(1,50);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_vacuum_consistency_idx'::regclass,
+	1, 16, 75, 30.0::double precision) AS vacuum_consistency_rebuild_rows;
+ vacuum_consistency_rebuild_rows 
+---------------------------------
+                              50
+(1 row)
+
+-- Delete a range and verify count
+DELETE FROM clustered_pg_vacuum_consistency WHERE id BETWEEN 10 AND 30;
+SELECT count(*) AS vacuum_pre_vacuum_count FROM clustered_pg_vacuum_consistency;
+ vacuum_pre_vacuum_count 
+-------------------------
+                      29
+(1 row)
+
+-- Vacuum and re-verify
+VACUUM clustered_pg_vacuum_consistency;
+SELECT count(*) AS vacuum_post_vacuum_count FROM clustered_pg_vacuum_consistency;
+ vacuum_post_vacuum_count 
+--------------------------
+                       29
+(1 row)
+
+-- Verify remaining rows are correct
+SELECT array_agg(id ORDER BY id) AS vacuum_remaining_ids
+FROM clustered_pg_vacuum_consistency
+WHERE id <= 15;
+ vacuum_remaining_ids 
+----------------------
+ {1,2,3,4,5,6,7,8,9}
+(1 row)
+
+-- GC orphaned TIDs and verify
+SELECT segment_map_tids_gc('clustered_pg_vacuum_consistency'::regclass) AS vacuum_gc_count;
+ vacuum_gc_count 
+-----------------
+               0
+(1 row)
+
+-- Re-verify data integrity after gc
+SELECT count(*) AS vacuum_post_gc_count FROM clustered_pg_vacuum_consistency;
+ vacuum_post_gc_count 
+----------------------
+                   29
+(1 row)
+
+DROP TABLE clustered_pg_vacuum_consistency;
+-- Test segment split boundary: insert exactly at capacity edge
+CREATE TABLE clustered_pg_split_edge(id bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_split_edge_idx
+	ON clustered_pg_split_edge USING clustered_pk_index (id)
+		WITH (split_threshold=16, target_fillfactor=100, auto_repack_interval=30.0);
+-- Insert exactly split_threshold rows (should fill one segment)
+INSERT INTO clustered_pg_split_edge(id) SELECT generate_series(1,16);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_split_edge_idx'::regclass,
+	1, 16, 100, 30.0::double precision) AS split_edge_rebuild_at_capacity;
+ split_edge_rebuild_at_capacity 
+--------------------------------
+                             16
+(1 row)
+
+SELECT count(*) AS split_edge_segments_at_capacity
+FROM segment_map_stats('clustered_pg_split_edge'::regclass::oid);
+ split_edge_segments_at_capacity 
+---------------------------------
+                               1
+(1 row)
+
+-- Insert more to trigger split
+INSERT INTO clustered_pg_split_edge(id) SELECT generate_series(17,20);
+SELECT segment_map_rebuild_from_index(
+	'clustered_pg_split_edge_idx'::regclass,
+	1, 16, 100, 30.0::double precision) AS split_edge_rebuild_over_capacity;
+ split_edge_rebuild_over_capacity 
+----------------------------------
+                               20
+(1 row)
+
+SELECT count(*) AS split_edge_segments_over_capacity
+FROM segment_map_stats('clustered_pg_split_edge'::regclass::oid);
+ split_edge_segments_over_capacity 
+-----------------------------------
+                                 2
+(1 row)
+
+SELECT count(*) AS split_edge_total_rows FROM clustered_pg_split_edge;
+ split_edge_total_rows 
+-----------------------
+                    20
+(1 row)
+
+DROP TABLE clustered_pg_split_edge;
+-- Test empty table operations
+CREATE TABLE clustered_pg_empty(id bigint) USING clustered_heap;
+CREATE INDEX clustered_pg_empty_idx
+	ON clustered_pg_empty USING clustered_pk_index (id)
+		WITH (split_threshold=32, target_fillfactor=85, auto_repack_interval=30.0);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS empty_count FROM clustered_pg_empty;
+ empty_count 
+-------------
+           0
+(1 row)
+
+SELECT count(*) AS empty_filter_count FROM clustered_pg_empty WHERE id = 1;
+ empty_filter_count 
+--------------------
+                  0
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE clustered_pg_empty;
+-- ================================================================
+-- Directed placement: verify rows with same key land on same block
+-- ================================================================
+CREATE TABLE clustered_pg_directed(id int) USING clustered_heap;
+CREATE INDEX clustered_pg_directed_idx
+    ON clustered_pg_directed USING clustered_pk_index (id)
+    WITH (split_threshold = 128, target_fillfactor = 85);
+-- Insert 200 rows: 20 distinct keys, 10 rows each.
+-- With directed placement, all 10 rows for the same key should land
+-- on the same block (or very few blocks).
+INSERT INTO clustered_pg_directed(id)
+SELECT key_id
+FROM generate_series(1, 20) AS key_id,
+     generate_series(1, 10) AS rep;
+-- For each key, count distinct blocks.  Perfect clustering = 1 block per key.
+-- Allow up to 2 (page could fill up for large tuples).
+SELECT
+    CASE WHEN every(blk_count <= 2)
+         THEN 'directed_placement_ok'
+         ELSE 'directed_placement_FAIL'
+    END AS directed_placement_result
+FROM (
+    SELECT id, count(DISTINCT (ctid::text::point)[0]::int) AS blk_count
+    FROM clustered_pg_directed
+    GROUP BY id
+) sub;
+ directed_placement_result 
+---------------------------
+ directed_placement_ok
+(1 row)
+
+-- Verify monotonic block ordering: keys inserted in order should have
+-- non-decreasing minimum block numbers.
+SELECT
+    CASE WHEN bool_and(min_blk >= lag_blk OR lag_blk IS NULL)
+         THEN 'block_order_ok'
+         ELSE 'block_order_FAIL'
+    END AS block_order_result
+FROM (
+    SELECT id,
+           min((ctid::text::point)[0]::int) AS min_blk,
+           lag(min((ctid::text::point)[0]::int)) OVER (ORDER BY id) AS lag_blk
+    FROM clustered_pg_directed
+    GROUP BY id
+) sub;
+ block_order_result 
+--------------------
+ block_order_ok
+(1 row)
+
+DROP TABLE clustered_pg_directed;
+-- ================================================================
+-- COPY path directed placement (multi_insert override)
+-- ================================================================
+CREATE TABLE clustered_pg_copy_dp(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_copy_dp_idx
+    ON clustered_pg_copy_dp USING clustered_pk_index (id);
+-- Use INSERT ... SELECT which goes through multi_insert for large batches
+-- 30 keys x 30 rows each = 900 rows, ~500 byte payload -> multi-block
+INSERT INTO clustered_pg_copy_dp(id, payload)
+SELECT ((g % 30) + 1), repeat('x', 500)
+FROM generate_series(1, 900) g;
+-- With multi_insert directed placement, same-key rows should cluster
+SELECT
+    CASE WHEN avg(blk_count) <= 4.0
+         THEN 'copy_directed_ok'
+         ELSE 'copy_directed_FAIL'
+    END AS copy_directed_result
+FROM (
+    SELECT id, count(DISTINCT (ctid::text::point)[0]::int) AS blk_count
+    FROM clustered_pg_copy_dp
+    GROUP BY id
+) sub;
+ copy_directed_result 
+----------------------
+ copy_directed_ok
+(1 row)
+
+DROP TABLE clustered_pg_copy_dp;
 DROP EXTENSION clustered_pg;
