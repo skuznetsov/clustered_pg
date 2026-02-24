@@ -966,4 +966,72 @@ FROM (
 
 DROP TABLE clustered_pg_many;
 
+-- ================================================================
+-- VACUUM on directed-placement table (delete + vacuum + re-insert)
+-- ================================================================
+CREATE TABLE clustered_pg_vac_dp(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_vac_dp_idx
+    ON clustered_pg_vac_dp USING clustered_pk_index (id);
+
+-- 10 keys x 50 rows = 500 rows
+INSERT INTO clustered_pg_vac_dp(id, payload)
+SELECT ((g % 10) + 1), repeat('v', 200)
+FROM generate_series(1, 500) g;
+
+SELECT count(*) AS vac_before FROM clustered_pg_vac_dp;
+
+-- Delete 60% of rows
+DELETE FROM clustered_pg_vac_dp WHERE id <= 6;
+
+VACUUM clustered_pg_vac_dp;
+
+-- Verify remaining rows survived vacuum
+SELECT count(*) AS vac_after FROM clustered_pg_vac_dp;
+
+-- Re-insert: directed placement should still cluster new rows
+INSERT INTO clustered_pg_vac_dp(id, payload)
+SELECT ((g % 6) + 1), repeat('w', 200)
+FROM generate_series(1, 300) g;
+
+-- Verify data integrity and count
+SELECT
+    CASE WHEN count(*) = 500
+         THEN 'vac_reinsert_ok'
+         ELSE 'vac_reinsert_FAIL'
+    END AS vac_reinsert_result
+FROM clustered_pg_vac_dp;
+
+DROP TABLE clustered_pg_vac_dp;
+
+-- ================================================================
+-- TRUNCATE invalidates zone map (re-insert should not crash)
+-- ================================================================
+CREATE TABLE clustered_pg_trunc(id int, payload text) USING clustered_heap;
+CREATE INDEX clustered_pg_trunc_idx
+    ON clustered_pg_trunc USING clustered_pk_index (id);
+
+INSERT INTO clustered_pg_trunc(id, payload)
+SELECT g, repeat('t', 100)
+FROM generate_series(1, 100) g;
+
+SELECT count(*) AS before_trunc FROM clustered_pg_trunc;
+
+TRUNCATE clustered_pg_trunc;
+
+SELECT count(*) AS after_trunc FROM clustered_pg_trunc;
+
+-- Re-insert after truncate: zone map was invalidated, should rebuild cleanly
+INSERT INTO clustered_pg_trunc(id, payload)
+SELECT g, repeat('u', 100)
+FROM generate_series(1, 50) g;
+
+SELECT
+    CASE WHEN count(*) = 50
+         THEN 'trunc_reinsert_ok'
+         ELSE 'trunc_reinsert_FAIL'
+    END AS trunc_reinsert_result
+FROM clustered_pg_trunc;
+
+DROP TABLE clustered_pg_trunc;
+
 DROP EXTENSION clustered_pg;

@@ -959,7 +959,18 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 			mapkey.minor_key = minor_key;
 			entry = hash_search(relinfo->block_map, &mapkey, HASH_FIND, NULL);
 			if (entry != NULL)
-				RelationSetTargetBlock(rel, entry->block);
+			{
+				/*
+				 * Validate block is still within the relation's file.
+				 * VACUUM can truncate trailing blocks, leaving stale
+				 * zone map entries.  Evict and skip if invalid.
+				 */
+				if (entry->block < RelationGetNumberOfBlocks(rel))
+					RelationSetTargetBlock(rel, entry->block);
+				else
+					hash_search(relinfo->block_map, &mapkey,
+								HASH_REMOVE, NULL);
+			}
 
 			key_valid = true;
 		}
@@ -1098,7 +1109,13 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 				entry = hash_search(relinfo->block_map, &mapkey,
 									HASH_FIND, NULL);
 				if (entry != NULL)
-					RelationSetTargetBlock(rel, entry->block);
+				{
+					if (entry->block < RelationGetNumberOfBlocks(rel))
+						RelationSetTargetBlock(rel, entry->block);
+					else
+						hash_search(relinfo->block_map, &mapkey,
+									HASH_REMOVE, NULL);
+				}
 				break;
 			}
 		}
@@ -1190,7 +1207,13 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 				ReleaseBulkInsertStatePin(bistate);
 
 			if (entry != NULL)
-				RelationSetTargetBlock(rel, entry->block);
+			{
+				if (entry->block < RelationGetNumberOfBlocks(rel))
+					RelationSetTargetBlock(rel, entry->block);
+				else
+					hash_search(relinfo->block_map, &mapkey,
+								HASH_REMOVE, NULL);
+			}
 		}
 
 		clustered_pg_heap_multi_insert_orig(rel, sorted_slots + group_start,

@@ -178,3 +178,24 @@
   - Many distinct keys (200 keys, fast path): count + scatter verification
 [session-3] All 12 test groups pass: make installcheck (1 test, 1598ms).
 [session-3] Clean build: zero warnings, zero errors.
+[session-3] BUG FOUND: VACUUM truncation + stale zone map = crash on re-insert.
+  Root cause: VACUUM's lazy_truncate_heap calls RelationTruncate directly,
+  bypassing table AM's relation_nontransactional_truncate hook. Zone map
+  retains block numbers for blocks that no longer exist in the file.
+  On re-insert, RelationSetTargetBlock(rel, stale_block) causes
+  RelationGetBufferForTuple to read a nonexistent block → ERROR.
+  Fix: validate zone map block entries before use — check
+  entry->block < RelationGetNumberOfBlocks(rel). Evict stale entries on miss.
+  Applied to all 3 RelationSetTargetBlock call sites (tuple_insert,
+  multi_insert fast path, multi_insert group path).
+[session-3] Added 2 more test groups (14 total):
+  - VACUUM + directed placement: delete 60% → vacuum → re-insert → verify 500 rows
+  - TRUNCATE + re-insert: truncate → verify 0 → re-insert 50 → verify 50
+[session-3] Performance benchmark (100K rows, 1000 keys, interleaved, 100B payload):
+  Block scatter: directed=3.0 vs heap=100.0 (33x better)
+  Point lookup: 0.135ms vs 0.127ms (same)
+  Range 10%: 0.618ms vs 0.785ms (1.3x faster)
+  Bitmap 1%: 24 buffers vs 121 buffers (5x fewer)
+  JOIN 200 keys: 1.699ms vs 5.420ms (3.2x faster)
+[session-3] All 14 test groups pass: make installcheck (1 test, 1764ms).
+[session-3] Final clean build: zero warnings, zero errors.
