@@ -1,0 +1,11 @@
+# clustered_pg nightly boundary baseline
+# captured_on=2026-02-23
+# command=make -s --no-print-directory unnest-ab-profile-boundary-nightly UNNEST_AB_NIGHTLY_OUT_ROOT=/private/tmp UNNEST_AB_NIGHTLY_BASE_PORT=65430 UNNEST_AB_NIGHTLY_REPS=4 UNNEST_AB_NIGHTLY_STRICT_MIN_OBS=48 UNNEST_AB_NIGHTLY_KEEP_ARTIFACTS=off
+# semantics:
+#   lift_min32  -> lift count under default selected_exact_min_observations=32
+#   lift_min48  -> lift count under strict selected_exact_min_observations=48
+
+nightly_boundary_summary|scenario=balanced_wide|samples=4|lift_min32=0|lift_min48=0
+nightly_boundary_summary|scenario=boundary_40|samples=4|lift_min32=4|lift_min48=0
+nightly_boundary_summary|scenario=boundary_56|samples=4|lift_min32=4|lift_min48=4
+nightly_boundary_summary|scenario=pressure_wide|samples=4|lift_min32=4|lift_min48=4

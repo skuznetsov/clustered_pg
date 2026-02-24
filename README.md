@@ -141,6 +141,17 @@ SELECT * FROM clustered_pg.observability();
 - Zone map is per-backend (not shared memory). Each backend builds its own zone map on first insert. Stale hints degrade to standard heap placement, not errors.
 - Transaction rollback leaves stale zone map entries. These are best-effort placement hints — stale entries cause PostgreSQL to find another page, degrading performance but not correctness.
 
+## Testing
+
+```bash
+make installcheck                    # PG regression tests
+make pg-core-regression-smoke        # Core regression smoke (no running server)
+make policy-safety-selftest          # Policy and docs contract tests
+make lightweight-selftests           # Full lightweight selftest suite
+```
+
+Command selection quick map: see `OPERATIONS.md` for the full routing guide.
+
 ## Project structure
 
 ```

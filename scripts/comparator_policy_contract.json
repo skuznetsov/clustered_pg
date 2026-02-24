@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "checks": [
+    {"name": "unnest_polarity_higher", "file": "compare_unnest_ab_logsets.sh", "needle": "metric_polarity=higher_is_better"},
+    {"name": "planner_polarity_higher", "file": "compare_planner_probe_logsets.sh", "needle": "metric_polarity=higher_is_better"},
+    {"name": "perf_polarity_lower", "file": "compare_perf_probe_logsets.sh", "needle": "metric_polarity=lower_is_better"},
+    {"name": "unnest_modes_include_p05", "file": "compare_unnest_ab_logsets.sh", "needle": "supported: median|p05|p95|trimmed-mean"},
+    {"name": "planner_modes_include_p05", "file": "compare_planner_probe_logsets.sh", "needle": "supported: median|p05|p95|trimmed-mean"},
+    {"name": "perf_modes_latency_profile", "file": "compare_perf_probe_logsets.sh", "needle": "supported: median|p95|trimmed-mean"},
+    {"name": "gate_has_tail_override_flag", "file": "run_unnest_ab_probe_gate.sh", "needle": "UNNEST_GATE_ALLOW_OPTIMISTIC_TAIL"},
+    {"name": "gate_blocks_optimistic_p95_default", "file": "run_unnest_ab_probe_gate.sh", "needle": "stat_mode 'p95' is optimistic for throughput ratios; use median|p05|trimmed-mean or set UNNEST_GATE_ALLOW_OPTIMISTIC_TAIL=on to override"}
+  ]
+}
