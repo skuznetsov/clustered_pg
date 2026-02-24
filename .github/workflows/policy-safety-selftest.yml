@@ -1,0 +1,58 @@
+name: policy-safety-selftest
+
+on:
+  pull_request:
+    paths:
+      - Makefile
+      - README.md
+      - OPERATIONS.md
+      - scripts/selftest_docs_make_sentinel_cold_observe_contract.sh
+      - scripts/selftest_docs_policy_safety_quickstart_contract.sh
+      - scripts/selftest_docs_pg_core_regression_smoke_contract.sh
+      - scripts/selftest_policy_safety_workflow_contract.sh
+      - scripts/selftest_policy_safety_target_composition.sh
+      - scripts/selftest_policy_safety_workflow_target_sync.sh
+      - scripts/selftest_make_help_policy_review_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_safety_selftest.sh
+      - scripts/selftest_make_unnest_ab_boundary_history_policy_review_window_trusted_workflow.sh
+      - scripts/selftest_policy_review_manifest_prechecked_matrix.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/selftest_run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_run_unnest_ab_probe_gate.sh
+      - scripts/check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/build_unnest_ab_boundary_history_policy_review_manifest.sh
+      - .github/workflows/policy-safety-selftest.yml
+  push:
+    branches:
+      - main
+    paths:
+      - Makefile
+      - README.md
+      - OPERATIONS.md
+      - scripts/selftest_docs_make_sentinel_cold_observe_contract.sh
+      - scripts/selftest_docs_policy_safety_quickstart_contract.sh
+      - scripts/selftest_docs_pg_core_regression_smoke_contract.sh
+      - scripts/selftest_policy_safety_workflow_contract.sh
+      - scripts/selftest_policy_safety_target_composition.sh
+      - scripts/selftest_policy_safety_workflow_target_sync.sh
+      - scripts/selftest_make_help_policy_review_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_safety_selftest.sh
+      - scripts/selftest_make_unnest_ab_boundary_history_policy_review_window_trusted_workflow.sh
+      - scripts/selftest_policy_review_manifest_prechecked_matrix.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/selftest_run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_run_unnest_ab_probe_gate.sh
+      - scripts/check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/build_unnest_ab_boundary_history_policy_review_manifest.sh
+      - .github/workflows/policy-safety-selftest.yml
+
+jobs:
+  policy-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: policy-safety-selftest
+        run: make -s --no-print-directory policy-safety-selftest UNNEST_AB_SELFTEST_TMP_ROOT=/tmp UNNEST_GATE_SELFTEST_TMP_ROOT=/tmp

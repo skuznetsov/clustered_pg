@@ -513,5 +513,3 @@ Optional: set `LIGHTWEIGHT_SELFTEST_RUN_LABEL=<id>` for a human-readable per-run
 JSONL events include `schema_version=1`, stable per-run `run_id`, optional/custom `run_label`, `runner_pid`, monotonic `event_seq`, and `event_ts` (UTC RFC3339, second precision).
 
 CI note: workflow `perf-compare-selftest` stores the JSONL stream as an artifact (`clustered-pg-lightweight-selftest-<run_id>-<run_attempt>`) for post-run diagnostics.
-Runtime CI note: workflow `fastpath-runtime-selftest` runs `fastpath-perf-probe-selftest` on `macos-14` with `postgresql@18`, pins runtime selftest workload vars (`ROWS=128`, `ITERS=50`, `CHURN_ROWS=5000`, `CHURN_ITERS=50`), uploads `clustered_pg_runtime_perf_selftest.log` as an artifact, and also runs nightly (`03:17 UTC`) plus manual `workflow_dispatch`.
-Nightly additionally runs a high-churn profile via `make fastpath-perf-probe-selftest-high-churn` with a dedicated artifact (`clustered_pg_runtime_perf_selftest_high_churn.log`).

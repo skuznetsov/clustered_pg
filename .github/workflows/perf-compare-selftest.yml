@@ -1,0 +1,250 @@
+name: perf-compare-selftest
+
+on:
+  pull_request:
+    paths:
+      - scripts/compare_perf_probe_logsets.sh
+      - scripts/selftest_compare_perf_probe_logsets.sh
+      - scripts/lint_comparator_policy.sh
+      - scripts/comparator_policy_contract.json
+      - scripts/selftest_lint_comparator_policy.sh
+      - scripts/selftest_policy_lint_strict_target.sh
+      - scripts/compare_unnest_ab_logsets.sh
+      - scripts/selftest_compare_unnest_ab_logsets.sh
+      - scripts/run_unnest_ab_probe_gate.sh
+      - scripts/selftest_run_unnest_ab_probe_gate.sh
+      - scripts/selftest_run_unnest_ab_probe_mixed_shapes_warmup_validation.sh
+      - scripts/selftest_run_unnest_ab_perf_sentinel.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_probe.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/selftest_run_pg_core_regression_smoke.sh
+      - scripts/selftest_make_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/selftest_make_unnest_ab_perf_sentinel_cold_observe.sh
+      - scripts/selftest_make_help_unnest_ab_startup_sensitivity.sh
+      - scripts/selftest_make_help_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/selftest_make_help_unnest_ab_startup_script_overrides.sh
+      - scripts/selftest_make_help_pg_core_regression_smoke.sh
+      - scripts/selftest_make_defaults_unnest_ab_startup_sensitivity.sh
+      - scripts/selftest_docs_make_sentinel_cold_observe_contract.sh
+      - scripts/selftest_docs_policy_safety_quickstart_contract.sh
+      - scripts/selftest_docs_pg_core_regression_smoke_contract.sh
+      - scripts/selftest_policy_safety_workflow_contract.sh
+      - scripts/selftest_policy_safety_target_composition.sh
+      - scripts/selftest_policy_safety_workflow_target_sync.sh
+      - scripts/run_unnest_ab_perf_sentinel.sh
+      - scripts/run_unnest_ab_startup_sensitivity_probe.sh
+      - scripts/run_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/run_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/run_pg_core_regression_smoke.sh
+      - scripts/run_unnest_ab_tuning_matrix.sh
+      - scripts/selftest_run_unnest_ab_tuning_matrix.sh
+      - scripts/selftest_unnest_gate_make_defaults.sh
+      - scripts/run_unnest_ab_probe_mixed_shapes.sh
+      - scripts/summarize_unnest_ab_boundary_history.sh
+      - scripts/check_unnest_ab_boundary_history_gate.sh
+      - scripts/derive_unnest_ab_boundary_history_gate_thresholds.sh
+      - scripts/compare_unnest_ab_boundary_history_gate_policy_delta.sh
+      - scripts/accumulate_unnest_ab_boundary_history_summaries.sh
+      - scripts/build_unnest_ab_boundary_history_date_map_index.sh
+      - scripts/build_unnest_ab_boundary_history_policy_review_manifest.sh
+      - scripts/check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/benchmark_unnest_ab_boundary_history_date_map_modes.sh
+      - scripts/benchmark_unnest_ab_boundary_history_policy_review_manifest_modes.sh
+      - scripts/check_unnest_ab_kv_output_fields.sh
+      - scripts/run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_unnest_ab_probe_make_arg_contract.sh
+      - scripts/selftest_unnest_ab_gate_make_arg_contract.sh
+      - scripts/selftest_summarize_unnest_ab_boundary_history.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_gate.sh
+      - scripts/selftest_derive_unnest_ab_boundary_history_gate_thresholds.sh
+      - scripts/selftest_compare_unnest_ab_boundary_history_gate_policy_delta.sh
+      - scripts/selftest_accumulate_unnest_ab_boundary_history_summaries.sh
+      - scripts/selftest_run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_benchmark_unnest_ab_boundary_history_date_map_modes.sh
+      - scripts/selftest_benchmark_unnest_ab_boundary_history_policy_review_manifest_modes.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/selftest_make_unnest_ab_boundary_history_policy_review_window_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_review_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_safety_selftest.sh
+      - scripts/selftest_policy_review_manifest_prechecked_matrix.sh
+      - scripts/selftest_check_unnest_ab_kv_output_fields.sh
+      - scripts/check_planner_probe_cost_ratio.sh
+      - scripts/selftest_check_planner_probe_cost_ratio.sh
+      - scripts/check_planner_probe_default_path.sh
+      - scripts/selftest_check_planner_probe_default_path.sh
+      - scripts/compare_planner_probe_logsets.sh
+      - scripts/selftest_compare_planner_probe_logsets.sh
+      - scripts/summarize_planner_probe_log.sh
+      - scripts/selftest_summarize_planner_probe_log.sh
+      - scripts/run_planner_probe_with_summary.sh
+      - scripts/selftest_run_planner_probe_with_summary.sh
+      - scripts/run_planner_probe_gate.sh
+      - scripts/selftest_run_planner_probe_gate.sh
+      - scripts/tmp_clean_clustered_pg.sh
+      - scripts/selftest_tmp_clean_clustered_pg.sh
+      - scripts/selftest_runtime_tmpdir_validation.sh
+      - scripts/selftest_runtime_output_target_validation.sh
+      - scripts/selftest_runtime_port_validation.sh
+      - scripts/extract_clustered_pg_define.sh
+      - scripts/selftest_extract_clustered_pg_define.sh
+      - README.md
+      - OPERATIONS.md
+      - scripts/selftest_runtime_profile_export.sh
+      - scripts/selftest_workflow_path_filter_coverage.sh
+      - scripts/selftest_workflow_files_are_guarded.sh
+      - scripts/selftest_lightweight_workflow_script_coverage.sh
+      - scripts/selftest_selftest_script_baseline.sh
+      - scripts/selftest_run_lightweight_selftests_run_label_validation.sh
+      - scripts/selftest_run_lightweight_selftests_auto_tmp_clean_validation.sh
+      - scripts/selftest_run_lightweight_selftests_run_label_propagation.sh
+      - scripts/selftest_run_lightweight_selftests_success_stream.sh
+      - scripts/selftest_run_lightweight_selftests_failure_event.sh
+      - scripts/selftest_run_lightweight_selftests_preflight_failure_event.sh
+      - .github/workflows/workflow-path-filter-sanity.yml
+      - scripts/run_lightweight_selftests.sh
+      - docs/perf-baselines/unnest_ab_profile_boundary_nightly_baseline.kv
+      - .github/workflows/perf-compare-selftest.yml
+      - .github/workflows/policy-safety-selftest.yml
+      - Makefile
+  push:
+    paths:
+      - scripts/compare_perf_probe_logsets.sh
+      - scripts/selftest_compare_perf_probe_logsets.sh
+      - scripts/lint_comparator_policy.sh
+      - scripts/comparator_policy_contract.json
+      - scripts/selftest_lint_comparator_policy.sh
+      - scripts/selftest_policy_lint_strict_target.sh
+      - scripts/compare_unnest_ab_logsets.sh
+      - scripts/selftest_compare_unnest_ab_logsets.sh
+      - scripts/run_unnest_ab_probe_gate.sh
+      - scripts/selftest_run_unnest_ab_probe_gate.sh
+      - scripts/selftest_run_unnest_ab_probe_mixed_shapes_warmup_validation.sh
+      - scripts/selftest_run_unnest_ab_perf_sentinel.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_probe.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/selftest_run_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/selftest_run_pg_core_regression_smoke.sh
+      - scripts/selftest_make_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/selftest_make_unnest_ab_perf_sentinel_cold_observe.sh
+      - scripts/selftest_make_help_unnest_ab_startup_sensitivity.sh
+      - scripts/selftest_make_help_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/selftest_make_help_unnest_ab_startup_script_overrides.sh
+      - scripts/selftest_make_help_pg_core_regression_smoke.sh
+      - scripts/selftest_make_defaults_unnest_ab_startup_sensitivity.sh
+      - scripts/selftest_docs_make_sentinel_cold_observe_contract.sh
+      - scripts/selftest_docs_policy_safety_quickstart_contract.sh
+      - scripts/selftest_docs_pg_core_regression_smoke_contract.sh
+      - scripts/selftest_policy_safety_workflow_contract.sh
+      - scripts/selftest_policy_safety_target_composition.sh
+      - scripts/selftest_policy_safety_workflow_target_sync.sh
+      - scripts/run_unnest_ab_perf_sentinel.sh
+      - scripts/run_unnest_ab_startup_sensitivity_probe.sh
+      - scripts/run_unnest_ab_startup_sensitivity_guard.sh
+      - scripts/run_unnest_ab_startup_sensitivity_sentinel.sh
+      - scripts/run_pg_core_regression_smoke.sh
+      - scripts/run_unnest_ab_tuning_matrix.sh
+      - scripts/selftest_run_unnest_ab_tuning_matrix.sh
+      - scripts/selftest_unnest_gate_make_defaults.sh
+      - scripts/run_unnest_ab_probe_mixed_shapes.sh
+      - scripts/summarize_unnest_ab_boundary_history.sh
+      - scripts/check_unnest_ab_boundary_history_gate.sh
+      - scripts/derive_unnest_ab_boundary_history_gate_thresholds.sh
+      - scripts/compare_unnest_ab_boundary_history_gate_policy_delta.sh
+      - scripts/accumulate_unnest_ab_boundary_history_summaries.sh
+      - scripts/build_unnest_ab_boundary_history_date_map_index.sh
+      - scripts/build_unnest_ab_boundary_history_policy_review_manifest.sh
+      - scripts/check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/benchmark_unnest_ab_boundary_history_date_map_modes.sh
+      - scripts/benchmark_unnest_ab_boundary_history_policy_review_manifest_modes.sh
+      - scripts/check_unnest_ab_kv_output_fields.sh
+      - scripts/run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_unnest_ab_probe_make_arg_contract.sh
+      - scripts/selftest_unnest_ab_gate_make_arg_contract.sh
+      - scripts/selftest_summarize_unnest_ab_boundary_history.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_gate.sh
+      - scripts/selftest_derive_unnest_ab_boundary_history_gate_thresholds.sh
+      - scripts/selftest_compare_unnest_ab_boundary_history_gate_policy_delta.sh
+      - scripts/selftest_accumulate_unnest_ab_boundary_history_summaries.sh
+      - scripts/selftest_run_unnest_ab_boundary_history_policy_review_window.sh
+      - scripts/selftest_benchmark_unnest_ab_boundary_history_date_map_modes.sh
+      - scripts/selftest_benchmark_unnest_ab_boundary_history_policy_review_manifest_modes.sh
+      - scripts/selftest_check_unnest_ab_boundary_history_policy_review_manifest_freshness.sh
+      - scripts/selftest_make_unnest_ab_boundary_history_policy_review_window_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_review_trusted_workflow.sh
+      - scripts/selftest_make_help_policy_safety_selftest.sh
+      - scripts/selftest_policy_review_manifest_prechecked_matrix.sh
+      - scripts/selftest_check_unnest_ab_kv_output_fields.sh
+      - scripts/check_planner_probe_cost_ratio.sh
+      - scripts/selftest_check_planner_probe_cost_ratio.sh
+      - scripts/check_planner_probe_default_path.sh
+      - scripts/selftest_check_planner_probe_default_path.sh
+      - scripts/compare_planner_probe_logsets.sh
+      - scripts/selftest_compare_planner_probe_logsets.sh
+      - scripts/summarize_planner_probe_log.sh
+      - scripts/selftest_summarize_planner_probe_log.sh
+      - scripts/run_planner_probe_with_summary.sh
+      - scripts/selftest_run_planner_probe_with_summary.sh
+      - scripts/run_planner_probe_gate.sh
+      - scripts/selftest_run_planner_probe_gate.sh
+      - scripts/tmp_clean_clustered_pg.sh
+      - scripts/selftest_tmp_clean_clustered_pg.sh
+      - scripts/selftest_runtime_tmpdir_validation.sh
+      - scripts/selftest_runtime_output_target_validation.sh
+      - scripts/selftest_runtime_port_validation.sh
+      - scripts/extract_clustered_pg_define.sh
+      - scripts/selftest_extract_clustered_pg_define.sh
+      - README.md
+      - OPERATIONS.md
+      - scripts/selftest_runtime_profile_export.sh
+      - scripts/selftest_workflow_path_filter_coverage.sh
+      - scripts/selftest_workflow_files_are_guarded.sh
+      - scripts/selftest_lightweight_workflow_script_coverage.sh
+      - scripts/selftest_selftest_script_baseline.sh
+      - scripts/selftest_run_lightweight_selftests_run_label_validation.sh
+      - scripts/selftest_run_lightweight_selftests_auto_tmp_clean_validation.sh
+      - scripts/selftest_run_lightweight_selftests_run_label_propagation.sh
+      - scripts/selftest_run_lightweight_selftests_success_stream.sh
+      - scripts/selftest_run_lightweight_selftests_failure_event.sh
+      - scripts/selftest_run_lightweight_selftests_preflight_failure_event.sh
+      - .github/workflows/workflow-path-filter-sanity.yml
+      - scripts/run_lightweight_selftests.sh
+      - docs/perf-baselines/unnest_ab_profile_boundary_nightly_baseline.kv
+      - .github/workflows/perf-compare-selftest.yml
+      - .github/workflows/policy-safety-selftest.yml
+      - Makefile
+
+concurrency:
+  group: perf-compare-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  comparator-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure scripts are executable
+        run: chmod +x scripts/*.sh
+
+      - name: Enforce strict policy lint
+        run: make policy-lint-strict
+
+      - name: Prepare isolated tuning probe root
+        run: mkdir -p /tmp/clustered_pg_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
+
+      - name: Run lightweight script selftests
+        env:
+          LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN: "on"
+          LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S: "0"
+          UNNEST_TUNE_PROBE_OUT_ROOT: /tmp/clustered_pg_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
+        run: ./scripts/run_lightweight_selftests.sh /tmp jsonl | tee /tmp/clustered_pg_lightweight_selftests.jsonl
+
+      - name: Upload lightweight selftest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clustered-pg-lightweight-selftest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/clustered_pg_lightweight_selftests.jsonl
+          if-no-files-found: error

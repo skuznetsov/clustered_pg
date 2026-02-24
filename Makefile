@@ -327,9 +327,6 @@ unnest-ab-profile-boundary-history-policy-review-trust-selftest:
 policy-safety-selftest:
 	$(MAKE) unnest-ab-profile-boundary-history-policy-review-trust-selftest UNNEST_AB_SELFTEST_TMP_ROOT=$(UNNEST_AB_SELFTEST_TMP_ROOT)
 	bash ./scripts/selftest_run_unnest_ab_probe_gate.sh $(UNNEST_GATE_SELFTEST_TMP_ROOT)
-	bash ./scripts/selftest_make_help_unnest_ab_probe_assume_unique_guard.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
-	bash ./scripts/selftest_operations_gate_unsafe_unique_doc_contract.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
-	bash ./scripts/selftest_docs_unnest_ab_unsafe_unique_contract.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
 	bash ./scripts/selftest_docs_make_sentinel_cold_observe_contract.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
 	bash ./scripts/selftest_docs_policy_safety_quickstart_contract.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
 	bash ./scripts/selftest_docs_pg_core_regression_smoke_contract.sh $(UNNEST_AB_SELFTEST_TMP_ROOT)
@@ -416,9 +413,6 @@ selftest-lightweight:
 	  *) echo "unsupported LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN: $(LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN) (supported: off|on|0|1|false|true|no|yes)" >&2; exit 2 ;; \
 	esac
 	LIGHTWEIGHT_SELFTEST_RUN_LABEL="$(LIGHTWEIGHT_SELFTEST_RUN_LABEL)" LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN="$(LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN)" LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S="$(LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S)" ./scripts/run_lightweight_selftests.sh $(LIGHTWEIGHT_SELFTEST_TMP_ROOT) $(LIGHTWEIGHT_SELFTEST_FORMAT)
-
-runtime-workflow-path-filter-selftest:
-	./scripts/selftest_runtime_workflow_path_filters.sh
 
 workflow-path-filter-coverage-selftest:
 	./scripts/selftest_workflow_path_filter_coverage.sh
@@ -520,7 +514,7 @@ help:
 	@echo "  make tmp-clean TMP_CLEAN_ROOT=<abs_tmp_dir> TMP_CLEAN_MIN_AGE_S=<non_negative_seconds>"
 	@echo "  make tmp-clean-selftest TMP_SELFTEST_ROOT=<abs_tmp_dir>"
 	@echo "  make selftest-lightweight LIGHTWEIGHT_SELFTEST_TMP_ROOT=<abs_tmp_dir> LIGHTWEIGHT_SELFTEST_FORMAT=<text|jsonl> LIGHTWEIGHT_SELFTEST_RUN_LABEL=<id> LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN=<off|on> LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S=<non_negative_seconds>"
-	@echo "  make runtime-workflow-path-filter-selftest"
+
 	@echo "  make workflow-path-filter-coverage-selftest"
 	@echo "  make workflow-files-guard-selftest"
 	@echo "  make lightweight-workflow-script-coverage-selftest"

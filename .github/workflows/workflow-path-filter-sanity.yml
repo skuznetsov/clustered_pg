@@ -1,0 +1,37 @@
+name: workflow-path-filter-sanity
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/perf-compare-selftest.yml'
+      - '.github/workflows/workflow-path-filter-sanity.yml'
+      - 'scripts/selftest_workflow_path_filter_coverage.sh'
+      - 'scripts/selftest_workflow_files_are_guarded.sh'
+      - 'scripts/selftest_lightweight_workflow_script_coverage.sh'
+      - 'scripts/selftest_selftest_script_baseline.sh'
+      - 'Makefile'
+  push:
+    paths:
+      - '.github/workflows/perf-compare-selftest.yml'
+      - '.github/workflows/workflow-path-filter-sanity.yml'
+      - 'scripts/selftest_workflow_path_filter_coverage.sh'
+      - 'scripts/selftest_workflow_files_are_guarded.sh'
+      - 'scripts/selftest_lightweight_workflow_script_coverage.sh'
+      - 'scripts/selftest_selftest_script_baseline.sh'
+      - 'Makefile'
+  workflow_dispatch:
+
+concurrency:
+  group: workflow-path-filter-sanity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate runtime workflow path filters
+        run: make workflow-path-filter-coverage-selftest workflow-files-guard-selftest lightweight-workflow-script-coverage-selftest selftest-script-baseline
