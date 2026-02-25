@@ -167,7 +167,8 @@ BEGIN
         EXECUTE 'CREATE INDEX bench_unnest_t_idx ON bench_unnest_t(id)';
       ELSE
         EXECUTE 'CREATE TABLE bench_unnest_t(id bigint, payload text NOT NULL) USING clustered_heap';
-        EXECUTE 'CREATE INDEX bench_unnest_t_idx ON bench_unnest_t USING clustered_pk_index (id)';
+        EXECUTE 'CREATE INDEX bench_unnest_t_pkidx ON bench_unnest_t USING clustered_pk_index (id)';
+        EXECUTE 'CREATE INDEX bench_unnest_t_idx ON bench_unnest_t(id)';
       END IF;
 
       v_started := clock_timestamp();
