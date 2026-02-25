@@ -19,6 +19,7 @@
 #include "utils/errcodes.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -98,6 +99,7 @@ typedef struct ClusteredPgZoneMapRelInfo
 	Oid			key_typid;		/* INT2OID, INT4OID, or INT8OID */
 	HTAB	   *block_map;		/* minor_key -> BlockNumber */
 	bool		initialized;	/* true once clustering index found */
+	bool		probed;			/* true after first index-list scan attempt */
 } ClusteredPgZoneMapRelInfo;
 
 static HTAB	   *clustered_pg_zone_map_rels = NULL;
@@ -129,6 +131,7 @@ static bool clustered_pg_pkidx_int_key_to_int64(Datum value, Oid valueType,
 												int64 *minor_key);
 static ClusteredPgZoneMapRelInfo *clustered_pg_zone_map_get_relinfo(Relation rel);
 static void clustered_pg_zone_map_invalidate(Oid relid);
+static void clustered_pg_relcache_callback(Datum arg, Oid relid);
 static void clustered_pg_clustered_heap_tuple_insert(Relation rel,
 													TupleTableSlot *slot,
 													CommandId cid, int options,
@@ -416,6 +419,37 @@ clustered_pg_zone_map_invalidate(Oid relid)
 	}
 }
 
+/*
+ * Relcache invalidation callback: clears zone map negative cache so that
+ * newly created clustered_pk_index indexes are discovered on next insert.
+ */
+static void
+clustered_pg_relcache_callback(Datum arg, Oid relid)
+{
+	if (clustered_pg_zone_map_rels == NULL)
+		return;
+
+	if (OidIsValid(relid))
+	{
+		clustered_pg_zone_map_invalidate(relid);
+	}
+	else
+	{
+		/* InvalidOid = full invalidation: destroy all entries */
+		HASH_SEQ_STATUS status;
+		ClusteredPgZoneMapRelInfo *entry;
+
+		hash_seq_init(&status, clustered_pg_zone_map_rels);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (entry->block_map != NULL)
+				hash_destroy(entry->block_map);
+		}
+		hash_destroy(clustered_pg_zone_map_rels);
+		clustered_pg_zone_map_rels = NULL;
+	}
+}
+
 static Oid
 clustered_pg_get_pkidx_am_oid(void)
 {
@@ -484,13 +518,16 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 		info->key_typid = InvalidOid;
 		info->block_map = NULL;
 		info->initialized = false;
+		info->probed = false;
 	}
 
-	if (!info->initialized)
+	if (!info->initialized && !info->probed)
 	{
 		Oid			pkidx_am = clustered_pg_get_pkidx_am_oid();
 		List	   *indexlist;
 		ListCell   *lc;
+
+		info->probed = true;
 
 		if (!OidIsValid(pkidx_am))
 			return info;
@@ -1473,5 +1510,5 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 void
 _PG_init(void)
 {
-	/* Reserved for future GUC/hook registration */
+	CacheRegisterRelcacheCallback(clustered_pg_relcache_callback, (Datum) 0);
 }
