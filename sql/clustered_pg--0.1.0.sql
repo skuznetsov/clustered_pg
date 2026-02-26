@@ -234,4 +234,10 @@ CREATE ACCESS METHOD sorted_heap TYPE TABLE
 	HANDLER @extschema@.sorted_heap_handler;
 
 COMMENT ON ACCESS METHOD sorted_heap IS 'Sorted heap table access method with LSM-style tiered storage.';
+
+CREATE FUNCTION @extschema@.sorted_heap_zonemap_stats(regclass)
+RETURNS text
+AS '$libdir/clustered_pg', 'sorted_heap_zonemap_stats'
+LANGUAGE C STRICT;
+
 COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';

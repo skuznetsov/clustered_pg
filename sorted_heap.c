@@ -1,13 +1,15 @@
 /*
  * sorted_heap.c
  *
- * Sorted heap table access method — Phase 2 (PK-sorted bulk insert).
+ * Sorted heap table access method — Phase 3 (persistent zone maps).
  *
  * Uses standard heap page format.  Block 0 carries a meta page with
  * SortedHeapMetaPageData in special space; data lives on pages >= 1.
  * Single-row inserts delegate to heap (zero overhead).
  * multi_insert (COPY path) sorts each batch by PK before delegating
- * to heap, producing physically sorted runs.
+ * to heap, producing physically sorted runs.  After placement, per-page
+ * min/max of the first PK column (int2/4/8 only) are recorded in a
+ * persistent zone map stored in the meta page.
  * Scans, deletes, updates, and vacuum all delegate to heap.
  */
 #include "postgres.h"
@@ -16,12 +18,16 @@
 #include "access/heapam.h"
 #include "access/stratnum.h"
 #include "access/tableam.h"
+#include "access/xloginsert.h"
 #include "catalog/index.h"
 #include "catalog/pg_index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/checksum.h"
+#include "storage/smgr.h"
+#include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -33,13 +39,19 @@
 #include "sorted_heap.h"
 
 PG_FUNCTION_INFO_V1(sorted_heap_tableam_handler);
+PG_FUNCTION_INFO_V1(sorted_heap_zonemap_stats);
 
 /* ----------------------------------------------------------------
  *  Forward declarations
  * ---------------------------------------------------------------- */
-static void sorted_heap_init_meta_page(Relation rel);
+static void sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
+											ProcNumber backend, bool need_wal);
 static SortedHeapRelInfo *sorted_heap_get_relinfo(Relation rel);
 static void sorted_heap_relinfo_invalidate(Oid relid);
+
+static bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
+static void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
+static void sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info);
 
 static void sorted_heap_relation_set_new_filelocator(Relation rel,
 													 const RelFileLocator *rlocator,
@@ -116,7 +128,7 @@ sorted_heap_init_routine(void)
 	sorted_heap_am_routine.relation_copy_for_cluster =
 		sorted_heap_relation_copy_for_cluster;
 
-	/* Bulk insert — sort batch by PK */
+	/* Bulk insert — sort batch by PK + update zone map */
 	sorted_heap_am_routine.multi_insert = sorted_heap_multi_insert;
 
 	/* Index build — needs rd_tableam swap to delegate to heap */
@@ -136,9 +148,31 @@ sorted_heap_tableam_handler(PG_FUNCTION_ARGS)
 }
 
 /* ----------------------------------------------------------------
+ *  Key conversion utility
+ * ---------------------------------------------------------------- */
+static bool
+sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out)
+{
+	switch (typid)
+	{
+		case INT2OID:
+			*out = (int64) DatumGetInt16(value);
+			return true;
+		case INT4OID:
+			*out = (int64) DatumGetInt32(value);
+			return true;
+		case INT8OID:
+			*out = DatumGetInt64(value);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* ----------------------------------------------------------------
  *  PK detection infrastructure
  *
- *  Per-relation cache of PK columns and sort operators.
+ *  Per-relation cache of PK columns, sort operators, and zone map.
  *  Populated lazily on first multi_insert.  Invalidated by
  *  relcache callback when indexes are created/dropped.
  * ---------------------------------------------------------------- */
@@ -174,6 +208,10 @@ sorted_heap_get_relinfo(Relation rel)
 		info->pk_probed = false;
 		info->pk_index_oid = InvalidOid;
 		info->nkeys = 0;
+		info->zm_usable = false;
+		info->zm_loaded = false;
+		info->zm_pk_typid = InvalidOid;
+		info->zm_nentries = 0;
 	}
 
 	if (!info->pk_probed)
@@ -234,13 +272,24 @@ sorted_heap_get_relinfo(Relation rel)
 
 			if (usable)
 			{
+				Oid		first_col_typid;
+
 				info->pk_index_oid = pk_oid;
 				info->nkeys = nkeys;
+
+				/* Determine zone map usability from first PK column type */
+				first_col_typid = TupleDescAttr(RelationGetDescr(rel),
+												info->attNums[0] - 1)->atttypid;
+				info->zm_pk_typid = first_col_typid;
+				info->zm_usable = (first_col_typid == INT2OID ||
+								   first_col_typid == INT4OID ||
+								   first_col_typid == INT8OID);
 			}
 			else
 			{
 				info->pk_index_oid = InvalidOid;
 				info->nkeys = 0;
+				info->zm_usable = false;
 			}
 
 			index_close(idxrel, AccessShareLock);
@@ -249,6 +298,7 @@ sorted_heap_get_relinfo(Relation rel)
 		{
 			info->pk_index_oid = InvalidOid;
 			info->nkeys = 0;
+			info->zm_usable = false;
 		}
 
 		info->pk_probed = true;
@@ -262,7 +312,8 @@ sorted_heap_get_relinfo(Relation rel)
  *
  * When an index is created or dropped, PG fires relcache invalidation
  * for the parent table.  We clear pk_probed so the next multi_insert
- * re-discovers the (possibly new) PK.
+ * re-discovers the (possibly new) PK.  Also clear zm_loaded so the
+ * zone map is re-read from disk.
  */
 void
 sorted_heap_relcache_callback(Datum arg, Oid relid)
@@ -277,7 +328,10 @@ sorted_heap_relcache_callback(Datum arg, Oid relid)
 		info = hash_search(sorted_heap_relinfo_hash, &relid,
 						   HASH_FIND, NULL);
 		if (info != NULL)
+		{
 			info->pk_probed = false;
+			info->zm_loaded = false;
+		}
 	}
 	else
 	{
@@ -287,7 +341,10 @@ sorted_heap_relcache_callback(Datum arg, Oid relid)
 
 		hash_seq_init(&status, sorted_heap_relinfo_hash);
 		while ((info = hash_seq_search(&status)) != NULL)
+		{
 			info->pk_probed = false;
+			info->zm_loaded = false;
+		}
 	}
 }
 
@@ -304,35 +361,125 @@ sorted_heap_relinfo_invalidate(Oid relid)
 }
 
 /* ----------------------------------------------------------------
- *  Meta page initialization
+ *  Zone map load / flush
  * ---------------------------------------------------------------- */
+
+/*
+ * Load zone map from meta page into relinfo cache.
+ * Handles v2 meta pages gracefully (no zone map data).
+ */
 static void
-sorted_heap_init_meta_page(Relation rel)
+sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
+{
+	Buffer		metabuf;
+	Page		metapage;
+	SortedHeapMetaPageData *meta;
+
+	metabuf = ReadBufferExtended(rel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
+								 RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+	metapage = BufferGetPage(metabuf);
+	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+
+	if (meta->shm_magic == SORTED_HEAP_MAGIC &&
+		meta->shm_version >= 3 && meta->shm_zonemap_nentries > 0)
+	{
+		uint16	n = Min(meta->shm_zonemap_nentries, SORTED_HEAP_ZONEMAP_MAX);
+
+		info->zm_nentries = n;
+		memcpy(info->zm_entries, meta->shm_zonemap,
+			   n * sizeof(SortedHeapZoneMapEntry));
+	}
+	else
+	{
+		info->zm_nentries = 0;
+	}
+
+	info->zm_loaded = true;
+	UnlockReleaseBuffer(metabuf);
+}
+
+/*
+ * Flush zone map from relinfo cache to meta page via GenericXLog.
+ */
+static void
+sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info)
 {
 	Buffer				metabuf;
 	Page				metapage;
 	GenericXLogState   *state;
 	SortedHeapMetaPageData *meta;
 
-	metabuf = ExtendBufferedRel(BMR_REL(rel), MAIN_FORKNUM, NULL,
-								EB_LOCK_FIRST);
-
-	Assert(BufferGetBlockNumber(metabuf) == SORTED_HEAP_META_BLOCK);
+	metabuf = ReadBufferExtended(rel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
+								 RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
 	state = GenericXLogStart(rel);
-	metapage = GenericXLogRegisterBuffer(state, metabuf,
-										 GENERIC_XLOG_FULL_IMAGE);
-
-	PageInit(metapage, BLCKSZ, sizeof(SortedHeapMetaPageData));
+	metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
 
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+	meta->shm_zonemap_nentries = info->zm_nentries;
+	meta->shm_zonemap_pk_typid = info->zm_pk_typid;
+	memcpy(meta->shm_zonemap, info->zm_entries,
+		   info->zm_nentries * sizeof(SortedHeapZoneMapEntry));
+
+	GenericXLogFinish(state);
+	UnlockReleaseBuffer(metabuf);
+}
+
+/* ----------------------------------------------------------------
+ *  Meta page initialization via smgr
+ *
+ *  During relation_set_new_filelocator (CREATE TABLE / TRUNCATE),
+ *  rel->rd_locator still points to the OLD filenode.  We bypass the
+ *  buffer manager and write the meta page directly to the correct
+ *  locator using smgrextend + log_newpage.
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
+								ProcNumber backend, bool need_wal)
+{
+	SMgrRelation		srel;
+	PGAlignedBlock		buf;
+	Page				page;
+	SortedHeapMetaPageData *meta;
+	RelFileLocator		rlocator_copy;
+
+	srel = smgropen(*rlocator, backend);
+
+	page = (Page) buf.data;
+	PageInit(page, BLCKSZ, sizeof(SortedHeapMetaPageData));
+
+	/* Mark page as full so heap never tries to use block 0 for data */
+	((PageHeader) page)->pd_lower = ((PageHeader) page)->pd_upper;
+
+	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(page);
 	meta->shm_magic = SORTED_HEAP_MAGIC;
 	meta->shm_version = SORTED_HEAP_VERSION;
 	meta->shm_flags = 0;
 	meta->shm_pk_index_oid = InvalidOid;
+	meta->shm_zonemap_nentries = 0;
+	meta->shm_zonemap_reserved = 0;
+	meta->shm_zonemap_pk_typid = InvalidOid;
 
-	GenericXLogFinish(state);
-	UnlockReleaseBuffer(metabuf);
+	/* Initialize zone map entries to sentinel */
+	for (int i = 0; i < SORTED_HEAP_ZONEMAP_MAX; i++)
+	{
+		meta->shm_zonemap[i].zme_min = PG_INT64_MAX;
+		meta->shm_zonemap[i].zme_max = PG_INT64_MIN;
+	}
+
+	/* WAL-log first (sets LSN on page), then checksum, then write */
+	if (need_wal)
+	{
+		rlocator_copy = *rlocator;
+		log_newpage(&rlocator_copy, MAIN_FORKNUM,
+					SORTED_HEAP_META_BLOCK, page, true);
+	}
+
+	PageSetChecksumInplace(page, SORTED_HEAP_META_BLOCK);
+	smgrextend(srel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
+			   buf.data, false);
 }
 
 /* ----------------------------------------------------------------
@@ -350,7 +497,10 @@ sorted_heap_relation_set_new_filelocator(Relation rel,
 	heap->relation_set_new_filelocator(rel, rlocator, persistence,
 									   freezeXid, minmulti);
 
-	sorted_heap_init_meta_page(rel);
+	/* Write meta page to the NEW file using its locator directly */
+	sorted_heap_init_meta_page_smgr(rlocator, rel->rd_backend,
+									persistence == RELPERSISTENCE_PERMANENT);
+
 	sorted_heap_relinfo_invalidate(RelationGetRelid(rel));
 }
 
@@ -360,8 +510,6 @@ sorted_heap_relation_nontransactional_truncate(Relation rel)
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
 
 	heap->relation_nontransactional_truncate(rel);
-
-	sorted_heap_init_meta_page(rel);
 	sorted_heap_relinfo_invalidate(RelationGetRelid(rel));
 }
 
@@ -400,8 +548,8 @@ sorted_heap_relation_copy_for_cluster(Relation OldTable,
  *
  *  If a PK exists, sort the incoming batch of slot pointers by PK
  *  using qsort_arg + SortSupport, then delegate to heap's
- *  multi_insert.  This avoids tuplesort's MinimalTuple slot
- *  incompatibility with COPY's BufferHeapTupleTableSlot.
+ *  multi_insert.  After placement, update zone map with per-page
+ *  min/max of the first PK column.
  * ---------------------------------------------------------------- */
 
 /* Comparison context passed through qsort_arg */
@@ -448,6 +596,7 @@ sorted_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 
 	info = sorted_heap_get_relinfo(rel);
 
+	/* Phase 2: sort batch by PK */
 	if (OidIsValid(info->pk_index_oid) && nslots > 1)
 	{
 		SortSupportData *sortKeys;
@@ -474,7 +623,109 @@ sorted_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		pfree(sortKeys);
 	}
 
+	/* Delegate to heap */
 	heap->multi_insert(rel, slots, nslots, cid, options, bistate);
+
+	/* Phase 3: update zone map from placed tuples */
+	if (info->zm_usable)
+	{
+		bool	zm_dirty = false;
+		int		i;
+
+		if (!info->zm_loaded)
+			sorted_heap_zonemap_load(rel, info);
+
+		for (i = 0; i < nslots; i++)
+		{
+			BlockNumber				blk;
+			uint32					zmidx;
+			Datum					val;
+			bool					isnull;
+			int64					key;
+			SortedHeapZoneMapEntry *e;
+
+			blk = ItemPointerGetBlockNumber(&slots[i]->tts_tid);
+			if (blk < 1)
+				continue;		/* skip meta page */
+			zmidx = blk - 1;	/* data block 1 → index 0 */
+			if (zmidx >= SORTED_HEAP_ZONEMAP_MAX)
+				continue;		/* beyond zone map capacity */
+
+			val = slot_getattr(slots[i], info->attNums[0], &isnull);
+			if (isnull)
+				continue;
+			if (!sorted_heap_key_to_int64(val, info->zm_pk_typid, &key))
+				continue;
+
+			e = &info->zm_entries[zmidx];
+			if (e->zme_min == PG_INT64_MAX)
+			{
+				/* First tuple tracked on this page */
+				e->zme_min = key;
+				e->zme_max = key;
+			}
+			else
+			{
+				if (key < e->zme_min)
+					e->zme_min = key;
+				if (key > e->zme_max)
+					e->zme_max = key;
+			}
+
+			if (zmidx >= info->zm_nentries)
+				info->zm_nentries = zmidx + 1;
+
+			zm_dirty = true;
+		}
+
+		if (zm_dirty)
+			sorted_heap_zonemap_flush(rel, info);
+	}
+}
+
+/* ----------------------------------------------------------------
+ *  Observability: sorted_heap_zonemap_stats(regclass) → text
+ * ---------------------------------------------------------------- */
+Datum
+sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel;
+	Buffer		metabuf;
+	Page		metapage;
+	SortedHeapMetaPageData *meta;
+	StringInfoData buf;
+	int			show;
+
+	rel = table_open(relid, AccessShareLock);
+
+	metabuf = ReadBufferExtended(rel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
+								 RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+	metapage = BufferGetPage(metabuf);
+	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u flags=%u",
+					 meta->shm_version,
+					 (unsigned) meta->shm_zonemap_nentries,
+					 (unsigned) meta->shm_zonemap_pk_typid,
+					 meta->shm_flags);
+
+	/* Show first few entries for debugging */
+	show = Min(meta->shm_zonemap_nentries, 5);
+	for (int i = 0; i < show; i++)
+	{
+		appendStringInfo(&buf, " [%d:" INT64_FORMAT ".." INT64_FORMAT "]",
+						 i + 1,
+						 meta->shm_zonemap[i].zme_min,
+						 meta->shm_zonemap[i].zme_max);
+	}
+
+	UnlockReleaseBuffer(metabuf);
+	table_close(rel, AccessShareLock);
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 
 /* ----------------------------------------------------------------

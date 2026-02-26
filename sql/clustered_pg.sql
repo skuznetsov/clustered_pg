@@ -675,4 +675,140 @@ SELECT count(*) AS sh2_vac_count FROM sh2_vac;
 DROP TABLE sh2_vac;
 DROP TABLE sh2_src9;
 
+-- ================================================================
+-- sorted_heap Table AM: Phase 3 tests (Zone Maps)
+-- ================================================================
+
+-- Test SH3-1: COPY with int PK — zone map created
+CREATE TABLE sh3_zonemap(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src1 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 500) g ORDER BY random();
+COPY sh3_src1 TO '/tmp/sh3_zonemap.csv' CSV;
+COPY sh3_zonemap FROM '/tmp/sh3_zonemap.csv' CSV;
+-- Verify zone map was populated
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_zonemap'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+         THEN 'zonemap_created_ok'
+         ELSE 'zonemap_created_FAIL'
+    END AS sh3_zonemap_created;
+SELECT count(*) AS sh3_zonemap_count FROM sh3_zonemap;
+DROP TABLE sh3_zonemap;
+DROP TABLE sh3_src1;
+
+-- Test SH3-2: Text PK — zone map not used (graceful degradation)
+CREATE TABLE sh3_textpk(name text PRIMARY KEY, val int) USING sorted_heap;
+CREATE TEMP TABLE sh3_src2 AS
+    SELECT 'item_' || lpad(g::text, 4, '0') AS name, g AS val
+    FROM generate_series(1, 100) g ORDER BY random();
+COPY sh3_src2 TO '/tmp/sh3_textpk.csv' CSV;
+COPY sh3_textpk FROM '/tmp/sh3_textpk.csv' CSV;
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_textpk'::regclass) LIKE '%nentries=0%'
+         THEN 'zonemap_textpk_skip_ok'
+         ELSE 'zonemap_textpk_skip_FAIL'
+    END AS sh3_textpk_result;
+SELECT count(*) AS sh3_textpk_count FROM sh3_textpk;
+DROP TABLE sh3_textpk;
+DROP TABLE sh3_src2;
+
+-- Test SH3-3: No PK — zone map not used, data accessible
+CREATE TABLE sh3_nopk(id int, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src3 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 100) g ORDER BY random();
+COPY sh3_src3 TO '/tmp/sh3_nopk.csv' CSV;
+COPY sh3_nopk FROM '/tmp/sh3_nopk.csv' CSV;
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_nopk'::regclass) LIKE '%nentries=0%'
+         THEN 'zonemap_nopk_skip_ok'
+         ELSE 'zonemap_nopk_skip_FAIL'
+    END AS sh3_nopk_result;
+SELECT count(*) AS sh3_nopk_count FROM sh3_nopk;
+DROP TABLE sh3_nopk;
+DROP TABLE sh3_src3;
+
+-- Test SH3-4: TRUNCATE resets zone map
+CREATE TABLE sh3_trunc(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src4 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 100) g ORDER BY random();
+COPY sh3_src4 TO '/tmp/sh3_trunc.csv' CSV;
+COPY sh3_trunc FROM '/tmp/sh3_trunc.csv' CSV;
+-- Verify zone map has entries
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_trunc'::regclass) LIKE '%nentries=0%'
+         THEN 'pre_trunc_FAIL'
+         ELSE 'pre_trunc_has_entries'
+    END AS sh3_trunc_before;
+TRUNCATE sh3_trunc;
+-- Verify zone map is reset after truncate
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_trunc'::regclass) LIKE '%nentries=0%'
+         THEN 'zonemap_trunc_ok'
+         ELSE 'zonemap_trunc_FAIL'
+    END AS sh3_trunc_after;
+DROP TABLE sh3_trunc;
+DROP TABLE sh3_src4;
+
+-- Test SH3-5: Zone map entries have correct min/max ranges
+CREATE TABLE sh3_ranges(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src5 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 100) g ORDER BY random();
+COPY sh3_src5 TO '/tmp/sh3_ranges.csv' CSV;
+COPY sh3_ranges FROM '/tmp/sh3_ranges.csv' CSV;
+-- Zone map should contain entries; first entry's min should be >= 1
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_ranges'::regclass) LIKE 'version=3 nentries=% pk_typid=23 flags=0 [1:%'
+         THEN 'zonemap_ranges_ok'
+         ELSE 'zonemap_ranges_FAIL'
+    END AS sh3_ranges_result;
+-- All data accessible
+SELECT count(*) AS sh3_ranges_count FROM sh3_ranges;
+DROP TABLE sh3_ranges;
+DROP TABLE sh3_src5;
+
+-- Test SH3-6: COPY + DELETE + VACUUM — zone map survives, data accessible
+CREATE TABLE sh3_vacuum(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src6 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 500) g ORDER BY random();
+COPY sh3_src6 TO '/tmp/sh3_vacuum.csv' CSV;
+COPY sh3_vacuum FROM '/tmp/sh3_vacuum.csv' CSV;
+DELETE FROM sh3_vacuum WHERE id BETWEEN 100 AND 200;
+VACUUM sh3_vacuum;
+-- Zone map still has entries (conservative — may be wider than actual data)
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_vacuum'::regclass) LIKE 'version=3 nentries=%'
+         THEN 'zonemap_vacuum_ok'
+         ELSE 'zonemap_vacuum_FAIL'
+    END AS sh3_vacuum_result;
+SELECT count(*) AS sh3_vacuum_count FROM sh3_vacuum;
+-- Verify data accessible after vacuum
+SELECT count(*) AS sh3_vacuum_range FROM sh3_vacuum WHERE id BETWEEN 50 AND 150;
+DROP TABLE sh3_vacuum;
+DROP TABLE sh3_src6;
+
+-- Test SH3-7: Existing Phase 2 sort still works with zone map
+CREATE TABLE sh3_sort(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh3_src7 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 500) g ORDER BY id DESC;
+COPY sh3_src7 TO '/tmp/sh3_sort.csv' CSV;
+COPY sh3_sort FROM '/tmp/sh3_sort.csv' CSV;
+-- Physical sort order still correct
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'zonemap_sort_ok'
+         ELSE 'zonemap_sort_FAIL'
+    END AS sh3_sort_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh3_sort
+) sub
+WHERE inv;
+-- Zone map populated
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh3_sort'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+         THEN 'zonemap_sort_stats_ok'
+         ELSE 'zonemap_sort_stats_FAIL'
+    END AS sh3_sort_stats;
+DROP TABLE sh3_sort;
+DROP TABLE sh3_src7;
+
 DROP EXTENSION clustered_pg;
