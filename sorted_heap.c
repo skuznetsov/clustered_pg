@@ -20,6 +20,7 @@
 #include "access/tableam.h"
 #include "access/xloginsert.h"
 #include "catalog/index.h"
+#include "commands/cluster.h"
 #include "catalog/pg_index.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
@@ -33,6 +34,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/sortsupport.h"
 #include "executor/tuptable.h"
 
@@ -40,6 +42,8 @@
 
 PG_FUNCTION_INFO_V1(sorted_heap_tableam_handler);
 PG_FUNCTION_INFO_V1(sorted_heap_zonemap_stats);
+PG_FUNCTION_INFO_V1(sorted_heap_compact);
+PG_FUNCTION_INFO_V1(sorted_heap_rebuild_zonemap_sql);
 
 /* ----------------------------------------------------------------
  *  Forward declarations
@@ -52,6 +56,8 @@ static void sorted_heap_relinfo_invalidate(Oid relid);
 static bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
 static void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
 static void sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info);
+static void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
+												 AttrNumber pk_attnum);
 
 static void sorted_heap_relation_set_new_filelocator(Relation rel,
 													 const RelFileLocator *rlocator,
@@ -428,6 +434,105 @@ sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info)
 }
 
 /* ----------------------------------------------------------------
+ *  Zone map rebuild — full table scan
+ *
+ *  Scans all tuples in a relation, computes per-page min/max of the
+ *  first PK column, and writes the result to the meta page.  Used by
+ *  relation_copy_for_cluster (CLUSTER path) and the standalone
+ *  sorted_heap_rebuild_zonemap() SQL function.
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
+									 AttrNumber pk_attnum)
+{
+	SortedHeapZoneMapEntry entries[SORTED_HEAP_ZONEMAP_MAX];
+	uint16			nentries = 0;
+	TableScanDesc	scan;
+	TupleTableSlot *slot;
+	Buffer			metabuf;
+	Page			metapage;
+	GenericXLogState *state;
+	SortedHeapMetaPageData *meta;
+
+	/* Only integer PK types get zone maps */
+	if (pk_typid != INT2OID && pk_typid != INT4OID && pk_typid != INT8OID)
+		return;
+
+	/* Initialize entries to sentinel */
+	for (int i = 0; i < SORTED_HEAP_ZONEMAP_MAX; i++)
+	{
+		entries[i].zme_min = PG_INT64_MAX;
+		entries[i].zme_max = PG_INT64_MIN;
+	}
+
+	/* Scan all tuples, build per-page min/max */
+	slot = table_slot_create(rel, NULL);
+	scan = table_beginscan(rel, SnapshotAny, 0, NULL);
+
+	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	{
+		BlockNumber		blk;
+		uint32			zmidx;
+		Datum			val;
+		bool			isnull;
+		int64			key;
+		SortedHeapZoneMapEntry *e;
+
+		blk = ItemPointerGetBlockNumber(&slot->tts_tid);
+		if (blk < 1)
+			continue;			/* skip meta page */
+		zmidx = blk - 1;
+		if (zmidx >= SORTED_HEAP_ZONEMAP_MAX)
+			continue;			/* beyond zone map capacity */
+
+		val = slot_getattr(slot, pk_attnum, &isnull);
+		if (isnull)
+			continue;
+		if (!sorted_heap_key_to_int64(val, pk_typid, &key))
+			continue;
+
+		e = &entries[zmidx];
+		if (e->zme_min == PG_INT64_MAX)
+		{
+			e->zme_min = key;
+			e->zme_max = key;
+		}
+		else
+		{
+			if (key < e->zme_min)
+				e->zme_min = key;
+			if (key > e->zme_max)
+				e->zme_max = key;
+		}
+
+		if (zmidx >= nentries)
+			nentries = zmidx + 1;
+	}
+
+	table_endscan(scan);
+	ExecDropSingleTupleTableSlot(slot);
+
+	/* Write zone map to meta page */
+	metabuf = ReadBufferExtended(rel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
+								 RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+
+	state = GenericXLogStart(rel);
+	metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+	meta->shm_zonemap_nentries = nentries;
+	meta->shm_zonemap_pk_typid = pk_typid;
+	memcpy(meta->shm_zonemap, entries,
+		   nentries * sizeof(SortedHeapZoneMapEntry));
+
+	GenericXLogFinish(state);
+	UnlockReleaseBuffer(metabuf);
+
+	/* Invalidate relinfo cache so next access re-reads */
+	sorted_heap_relinfo_invalidate(RelationGetRelid(rel));
+}
+
+/* ----------------------------------------------------------------
  *  Meta page initialization via smgr
  *
  *  During relation_set_new_filelocator (CREATE TABLE / TRUNCATE),
@@ -535,12 +640,25 @@ sorted_heap_relation_copy_for_cluster(Relation OldTable,
 									  double *tups_recently_dead)
 {
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+	SortedHeapRelInfo *old_info;
 
+	/* Let heap copy data (sorted by OldIndex if use_sort) */
 	heap->relation_copy_for_cluster(OldTable, NewTable, OldIndex,
 									use_sort, OldestXmin,
 									xid_cutoff, multi_cutoff,
 									num_tuples, tups_vacuumed,
 									tups_recently_dead);
+
+	/*
+	 * Rebuild zone map on NewTable from actual page contents.
+	 * NewTable has no indexes yet (PG rebuilds them after this callback),
+	 * so we get PK metadata from OldTable which has the same schema.
+	 */
+	old_info = sorted_heap_get_relinfo(OldTable);
+	if (old_info->zm_usable)
+		sorted_heap_rebuild_zonemap_internal(NewTable,
+											 old_info->zm_pk_typid,
+											 old_info->attNums[0]);
 }
 
 /* ----------------------------------------------------------------
@@ -821,4 +939,83 @@ sorted_heap_index_validate_scan(Relation tableRelation,
 	PG_END_TRY();
 
 	tableRelation->rd_tableam = old_tableam;
+}
+
+/* ----------------------------------------------------------------
+ *  sorted_heap_compact(regclass) → void
+ *
+ *  Convenience wrapper: finds the PK index and runs CLUSTER via
+ *  cluster_rel().  Data is rewritten in global PK order with a
+ *  fresh zone map built by relation_copy_for_cluster.
+ * ---------------------------------------------------------------- */
+Datum
+sorted_heap_compact(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	Relation		rel;
+	Oid				pk_index_oid;
+	ClusterParams	params;
+
+	/* Open with lightweight lock to discover PK index */
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_tableam != &sorted_heap_am_routine)
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a sorted_heap table",
+						RelationGetRelationName(rel))));
+	}
+
+	if (!rel->rd_indexvalid)
+		RelationGetIndexList(rel);
+	pk_index_oid = rel->rd_pkindex;
+	table_close(rel, AccessShareLock);
+
+	if (!OidIsValid(pk_index_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("\"%s\" has no primary key",
+						RelationGetRelationName(rel))));
+
+	/* cluster_rel needs AccessExclusiveLock; it closes the relation */
+	rel = table_open(relid, AccessExclusiveLock);
+	memset(&params, 0, sizeof(params));
+	cluster_rel(rel, pk_index_oid, &params);
+
+	PG_RETURN_VOID();
+}
+
+/* ----------------------------------------------------------------
+ *  sorted_heap_rebuild_zonemap(regclass) → void
+ *
+ *  Rebuild zone map from actual page contents without rewriting
+ *  data.  Useful after VACUUM or when zone map becomes stale.
+ * ---------------------------------------------------------------- */
+Datum
+sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	Relation		rel;
+	SortedHeapRelInfo *info;
+
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_tableam != &sorted_heap_am_routine)
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a sorted_heap table",
+						RelationGetRelationName(rel))));
+	}
+
+	info = sorted_heap_get_relinfo(rel);
+	if (info->zm_usable)
+		sorted_heap_rebuild_zonemap_internal(rel, info->zm_pk_typid,
+											 info->attNums[0]);
+
+	table_close(rel, AccessShareLock);
+	PG_RETURN_VOID();
 }

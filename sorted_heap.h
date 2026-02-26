@@ -70,6 +70,8 @@ typedef struct SortedHeapRelInfo
 
 extern Datum sorted_heap_tableam_handler(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_zonemap_stats(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_compact(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS);
 extern void sorted_heap_relcache_callback(Datum arg, Oid relid);
 
 #endif							/* SORTED_HEAP_H */

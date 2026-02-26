@@ -811,4 +811,126 @@ SELECT
 DROP TABLE sh3_sort;
 DROP TABLE sh3_src7;
 
+-- ================================================================
+-- sorted_heap Table AM: Phase 4 tests (Compaction)
+-- ================================================================
+
+-- Test SH4-1: Multiple COPY batches → compact → global sort
+CREATE TABLE sh4_compact(id int PRIMARY KEY, val text) USING sorted_heap;
+-- Batch 1: ids 201-400 (will be after batch 2 in PK order)
+CREATE TEMP TABLE sh4_src1 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(201, 400) g ORDER BY random();
+COPY sh4_src1 TO '/tmp/sh4_batch1.csv' CSV;
+COPY sh4_compact FROM '/tmp/sh4_batch1.csv' CSV;
+-- Batch 2: ids 1-200 (physically after batch 1 but lower PK)
+CREATE TEMP TABLE sh4_src2 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 200) g ORDER BY random();
+COPY sh4_src2 TO '/tmp/sh4_batch2.csv' CSV;
+COPY sh4_compact FROM '/tmp/sh4_batch2.csv' CSV;
+
+SELECT count(*) AS sh4_pre_compact_count FROM sh4_compact;
+
+-- Compact: rewrites in global PK order
+SELECT sorted_heap_compact('sh4_compact'::regclass);
+
+-- Verify global sort — zero inversions
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'compact_sorted_ok'
+         ELSE 'compact_sorted_FAIL'
+    END AS sh4_compact_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh4_compact
+) sub
+WHERE inv;
+
+SELECT count(*) AS sh4_post_compact_count FROM sh4_compact;
+
+DROP TABLE sh4_compact;
+DROP TABLE sh4_src1;
+DROP TABLE sh4_src2;
+
+-- Test SH4-2: Zone map accuracy after compaction
+CREATE TABLE sh4_zonemap(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh4_zm_src AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 500) g ORDER BY random();
+COPY sh4_zm_src TO '/tmp/sh4_zonemap.csv' CSV;
+COPY sh4_zonemap FROM '/tmp/sh4_zonemap.csv' CSV;
+SELECT sorted_heap_compact('sh4_zonemap'::regclass);
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh4_zonemap'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+         THEN 'compact_zonemap_ok'
+         ELSE 'compact_zonemap_FAIL'
+    END AS sh4_zonemap_result;
+SELECT count(*) AS sh4_zonemap_count FROM sh4_zonemap;
+DROP TABLE sh4_zonemap;
+DROP TABLE sh4_zm_src;
+
+-- Test SH4-3: Compact table without PK — should error
+CREATE TABLE sh4_nopk(id int, val text) USING sorted_heap;
+INSERT INTO sh4_nopk SELECT g, 'v' || g FROM generate_series(1, 10) g;
+SELECT sorted_heap_compact('sh4_nopk'::regclass);
+DROP TABLE sh4_nopk;
+
+-- Test SH4-4: Compact after DELETE + VACUUM
+CREATE TABLE sh4_vacuum(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh4_vac_src AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 500) g ORDER BY random();
+COPY sh4_vac_src TO '/tmp/sh4_vacuum.csv' CSV;
+COPY sh4_vacuum FROM '/tmp/sh4_vacuum.csv' CSV;
+DELETE FROM sh4_vacuum WHERE id BETWEEN 100 AND 300;
+VACUUM sh4_vacuum;
+SELECT sorted_heap_compact('sh4_vacuum'::regclass);
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'compact_vacuum_sorted_ok'
+         ELSE 'compact_vacuum_sorted_FAIL'
+    END AS sh4_vacuum_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh4_vacuum
+) sub
+WHERE inv;
+SELECT count(*) AS sh4_vacuum_count FROM sh4_vacuum;
+DROP TABLE sh4_vacuum;
+DROP TABLE sh4_vac_src;
+
+-- Test SH4-5: Standalone zonemap rebuild
+CREATE TABLE sh4_rebuild(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh4_rebuild SELECT g, 'v' || g FROM generate_series(1, 100) g;
+SELECT sorted_heap_rebuild_zonemap('sh4_rebuild'::regclass);
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh4_rebuild'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+         THEN 'rebuild_zonemap_ok'
+         ELSE 'rebuild_zonemap_FAIL'
+    END AS sh4_rebuild_result;
+DROP TABLE sh4_rebuild;
+
+-- Test SH4-6: Compact with bigint PK
+CREATE TABLE sh4_bigint(id bigint PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh4_big_src AS
+    SELECT g::bigint AS id, 'v' || g AS val FROM generate_series(1, 300) g ORDER BY random();
+COPY sh4_big_src TO '/tmp/sh4_bigint.csv' CSV;
+COPY sh4_bigint FROM '/tmp/sh4_bigint.csv' CSV;
+CREATE TEMP TABLE sh4_big_src2 AS
+    SELECT (g + 300)::bigint AS id, 'w' || g AS val FROM generate_series(1, 300) g ORDER BY random();
+COPY sh4_big_src2 TO '/tmp/sh4_bigint2.csv' CSV;
+COPY sh4_bigint FROM '/tmp/sh4_bigint2.csv' CSV;
+SELECT sorted_heap_compact('sh4_bigint'::regclass);
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'compact_bigint_sorted_ok'
+         ELSE 'compact_bigint_sorted_FAIL'
+    END AS sh4_bigint_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh4_bigint
+) sub
+WHERE inv;
+SELECT count(*) AS sh4_bigint_count FROM sh4_bigint;
+DROP TABLE sh4_bigint;
+DROP TABLE sh4_big_src;
+DROP TABLE sh4_big_src2;
+
 DROP EXTENSION clustered_pg;
