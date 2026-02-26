@@ -425,6 +425,44 @@ sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 		last_match = i + 1;
 	}
 
+	/*
+	 * Handle pages beyond zone map capacity.  These have unknown content,
+	 * so we must include them unless the upper bound falls entirely within
+	 * the covered range.  After COMPACT the data is sorted, so uncovered
+	 * pages hold values above the last covered entry's max — but we don't
+	 * rely on that invariant here to stay safe for incremental COPYs.
+	 */
+	if (info->zm_nentries < total_blocks - 1)
+	{
+		bool		uncovered_safe_to_skip = false;
+		BlockNumber first_uncovered = (BlockNumber) info->zm_nentries + 1;
+
+		/*
+		 * Optimisation for sorted data: if the last covered entry has a
+		 * finite max, and the query's upper bound is at or below that max,
+		 * uncovered pages (which hold higher values) can't match.
+		 */
+		if (bounds->has_hi && info->zm_nentries > 0)
+		{
+			int64	last_max =
+				info->zm_entries[info->zm_nentries - 1].zme_max;
+
+			if (last_max != PG_INT64_MAX &&
+				(bounds->hi_inclusive ? bounds->hi <= last_max
+									 : bounds->hi < last_max))
+				uncovered_safe_to_skip = true;
+		}
+
+		if (!uncovered_safe_to_skip)
+		{
+			/* Must scan all uncovered pages */
+			if (first_uncovered < first_match)
+				first_match = first_uncovered;
+			if (total_blocks - 1 > last_match)
+				last_match = total_blocks - 1;
+		}
+	}
+
 	if (first_match >= total_blocks)
 	{
 		/* No blocks match — minimal scan that finds nothing */
