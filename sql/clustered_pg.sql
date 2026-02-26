@@ -395,4 +395,284 @@ FROM (
 
 DROP TABLE clustered_pg_join;
 
+-- ================================================================
+-- sorted_heap Table AM: Phase 1 tests
+-- ================================================================
+
+-- Test SH-1: Create table with sorted_heap AM
+CREATE TABLE sh_basic(id bigint, val text) USING sorted_heap;
+
+-- Test SH-2: Single INSERT + SELECT
+INSERT INTO sh_basic(id, val) VALUES (1, 'hello');
+SELECT count(*) AS sh_single_count FROM sh_basic;
+
+-- Test SH-3: Bulk INSERT
+INSERT INTO sh_basic(id, val)
+SELECT g, 'row_' || g FROM generate_series(2, 100) g;
+SELECT count(*) AS sh_multi_count FROM sh_basic;
+
+-- Test SH-4: Data roundtrip (correct values returned)
+SELECT id, val FROM sh_basic WHERE id = 50;
+
+-- Test SH-5: DELETE
+DELETE FROM sh_basic WHERE id BETWEEN 20 AND 30;
+SELECT count(*) AS sh_after_delete FROM sh_basic;
+
+-- Test SH-6: UPDATE
+UPDATE sh_basic SET val = 'updated' WHERE id = 1;
+SELECT val AS sh_updated_val FROM sh_basic WHERE id = 1;
+
+-- Test SH-7: VACUUM
+VACUUM sh_basic;
+SELECT count(*) AS sh_after_vacuum FROM sh_basic;
+
+-- Test SH-8: Index creation and index scan
+CREATE INDEX sh_basic_idx ON sh_basic USING btree (id);
+SET enable_seqscan = off;
+SELECT count(*) AS sh_idx_count FROM sh_basic WHERE id = 50;
+RESET enable_seqscan;
+
+-- Test SH-9: TRUNCATE + re-insert
+TRUNCATE sh_basic;
+SELECT count(*) AS sh_after_trunc FROM sh_basic;
+INSERT INTO sh_basic(id, val) VALUES (1, 'after_truncate');
+SELECT count(*) AS sh_reinsert FROM sh_basic;
+
+DROP TABLE sh_basic;
+
+-- Test SH-10: Empty table
+CREATE TABLE sh_empty(id bigint) USING sorted_heap;
+SELECT count(*) AS sh_empty FROM sh_empty;
+DROP TABLE sh_empty;
+
+-- Test SH-11: Bulk multi-insert path (large batch)
+CREATE TABLE sh_bulk(id int, payload text) USING sorted_heap;
+INSERT INTO sh_bulk(id, payload)
+SELECT g, repeat('x', 200) FROM generate_series(1, 1000) g;
+SELECT count(*) AS sh_bulk_count FROM sh_bulk;
+SELECT count(*) AS sh_bulk_range
+FROM sh_bulk WHERE id BETWEEN 500 AND 510;
+DROP TABLE sh_bulk;
+
+-- Test SH-12: ANALYZE
+CREATE TABLE sh_analyze(id bigint, val text) USING sorted_heap;
+INSERT INTO sh_analyze(id, val)
+SELECT g, repeat('a', 100) FROM generate_series(1, 500) g;
+ANALYZE sh_analyze;
+SELECT count(*) AS sh_post_analyze FROM sh_analyze;
+DROP TABLE sh_analyze;
+
+-- Test SH-13: NULL values
+CREATE TABLE sh_null(id bigint, val text) USING sorted_heap;
+INSERT INTO sh_null(id, val) VALUES (NULL, 'null_id');
+INSERT INTO sh_null(id, val) VALUES (1, NULL);
+INSERT INTO sh_null(id, val) VALUES (NULL, NULL);
+SELECT count(*) AS sh_null_count FROM sh_null;
+DROP TABLE sh_null;
+
+-- Test SH-14: Co-existence with clustered_heap
+CREATE TABLE ch_coexist(id int, payload text) USING clustered_heap;
+CREATE INDEX ch_coexist_pkidx ON ch_coexist USING clustered_pk_index (id);
+CREATE INDEX ch_coexist_idx ON ch_coexist USING btree (id);
+CREATE TABLE sh_coexist(id int, payload text) USING sorted_heap;
+INSERT INTO ch_coexist(id, payload) SELECT g, 'ch_' || g FROM generate_series(1, 10) g;
+INSERT INTO sh_coexist(id, payload) SELECT g, 'sh_' || g FROM generate_series(1, 10) g;
+SELECT
+    (SELECT count(*) FROM ch_coexist) AS ch_count,
+    (SELECT count(*) FROM sh_coexist) AS sh_count;
+DROP TABLE ch_coexist;
+DROP TABLE sh_coexist;
+
+-- Test SH-15: COPY path (exercises multi_insert)
+CREATE TABLE sh_copy(id int, val text) USING sorted_heap;
+COPY sh_copy FROM stdin;
+1	alpha
+2	beta
+3	gamma
+4	delta
+5	epsilon
+\.
+SELECT count(*) AS sh_copy_count FROM sh_copy;
+DROP TABLE sh_copy;
+
+-- ================================================================
+-- sorted_heap Table AM: Phase 2 tests (PK-sorted COPY)
+-- ================================================================
+
+-- Test SH2-1: COPY with int PK — verify physical sort order
+CREATE TABLE sh2_pk_int(id int PRIMARY KEY, val text) USING sorted_heap;
+-- Generate data in reverse order, COPY into sorted_heap
+CREATE TEMP TABLE sh2_src1 AS
+    SELECT id, 'v' || id AS val FROM generate_series(1, 500) id ORDER BY id DESC;
+COPY sh2_src1 TO '/tmp/sh2_pk_int.csv' CSV;
+COPY sh2_pk_int FROM '/tmp/sh2_pk_int.csv' CSV;
+-- Verify zero inversions in physical order vs PK order
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'pk_int_sorted_ok'
+         ELSE 'pk_int_sorted_FAIL'
+    END AS sh2_pk_int_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh2_pk_int
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_pk_int_count FROM sh2_pk_int;
+DROP TABLE sh2_pk_int;
+DROP TABLE sh2_src1;
+
+-- Test SH2-2: COPY with composite PK (text, int)
+CREATE TABLE sh2_composite(cat text, id int, val text, PRIMARY KEY(cat, id)) USING sorted_heap;
+CREATE TEMP TABLE sh2_src2 AS
+    SELECT chr(65 + (g % 5)) AS cat, g AS id, 'v' || g AS val
+    FROM generate_series(1, 200) g
+    ORDER BY random();
+COPY sh2_src2 TO '/tmp/sh2_composite.csv' CSV;
+COPY sh2_composite FROM '/tmp/sh2_composite.csv' CSV;
+-- Verify sort: cat ASC, then id ASC within cat
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'composite_sorted_ok'
+         ELSE 'composite_sorted_FAIL'
+    END AS sh2_composite_result
+FROM (
+    SELECT (cat < lag(cat) OVER (ORDER BY ctid))
+        OR (cat = lag(cat) OVER (ORDER BY ctid)
+            AND id < lag(id) OVER (ORDER BY ctid)) AS inv
+    FROM sh2_composite
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_composite_count FROM sh2_composite;
+DROP TABLE sh2_composite;
+DROP TABLE sh2_src2;
+
+-- Test SH2-3: COPY without PK (no crash, works as heap)
+CREATE TABLE sh2_nopk(id int, val text) USING sorted_heap;
+CREATE TEMP TABLE sh2_src3 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 100) g ORDER BY random();
+COPY sh2_src3 TO '/tmp/sh2_nopk.csv' CSV;
+COPY sh2_nopk FROM '/tmp/sh2_nopk.csv' CSV;
+SELECT count(*) AS sh2_nopk_count FROM sh2_nopk;
+DROP TABLE sh2_nopk;
+DROP TABLE sh2_src3;
+
+-- Test SH2-4: PK created after table — relcache callback triggers re-detection
+CREATE TABLE sh2_latepk(id int, val text) USING sorted_heap;
+-- COPY without PK (unsorted)
+CREATE TEMP TABLE sh2_src4 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 50) g ORDER BY random();
+COPY sh2_src4 TO '/tmp/sh2_latepk.csv' CSV;
+COPY sh2_latepk FROM '/tmp/sh2_latepk.csv' CSV;
+-- Now add PK
+ALTER TABLE sh2_latepk ADD PRIMARY KEY (id);
+-- COPY more data — this batch should be sorted
+TRUNCATE sh2_src4;
+INSERT INTO sh2_src4 SELECT g, 'w' || g FROM generate_series(51, 100) g ORDER BY random();
+COPY sh2_src4 TO '/tmp/sh2_latepk2.csv' CSV;
+COPY sh2_latepk FROM '/tmp/sh2_latepk2.csv' CSV;
+-- Verify second batch is sorted (filter by id > 50 to check only new rows)
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'latepk_sorted_ok'
+         ELSE 'latepk_sorted_FAIL'
+    END AS sh2_latepk_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh2_latepk
+    WHERE id > 50
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_latepk_count FROM sh2_latepk;
+DROP TABLE sh2_latepk;
+DROP TABLE sh2_src4;
+
+-- Test SH2-5: COPY with text PK (collation-aware sort)
+CREATE TABLE sh2_textpk(name text PRIMARY KEY, val int) USING sorted_heap;
+CREATE TEMP TABLE sh2_src5 AS
+    SELECT 'item_' || lpad(g::text, 4, '0') AS name, g AS val
+    FROM generate_series(1, 200) g
+    ORDER BY random();
+COPY sh2_src5 TO '/tmp/sh2_textpk.csv' CSV;
+COPY sh2_textpk FROM '/tmp/sh2_textpk.csv' CSV;
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'textpk_sorted_ok'
+         ELSE 'textpk_sorted_FAIL'
+    END AS sh2_textpk_result
+FROM (
+    SELECT name < lag(name) OVER (ORDER BY ctid) AS inv
+    FROM sh2_textpk
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_textpk_count FROM sh2_textpk;
+DROP TABLE sh2_textpk;
+DROP TABLE sh2_src5;
+
+-- Test SH2-6: COPY with NULLs in non-PK columns (no crash)
+CREATE TABLE sh2_nulls(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh2_src6(id int, val text);
+INSERT INTO sh2_src6 VALUES (5, NULL), (3, 'three'), (1, NULL), (4, 'four'), (2, NULL);
+COPY sh2_src6 TO '/tmp/sh2_nulls.csv' CSV;
+COPY sh2_nulls FROM '/tmp/sh2_nulls.csv' CSV;
+-- Still sorted by PK
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'nulls_sorted_ok'
+         ELSE 'nulls_sorted_FAIL'
+    END AS sh2_nulls_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh2_nulls
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_nulls_count FROM sh2_nulls;
+DROP TABLE sh2_nulls;
+DROP TABLE sh2_src6;
+
+-- Test SH2-7: INSERT...SELECT (tuple_insert path) — works, no crash
+CREATE TABLE sh2_insert_sel(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh2_insert_sel SELECT g, 'v' || g FROM generate_series(1, 100) g;
+SELECT count(*) AS sh2_insert_sel_count FROM sh2_insert_sel;
+DROP TABLE sh2_insert_sel;
+
+-- Test SH2-8: Single inserts still work after Phase 2 changes
+CREATE TABLE sh2_singles(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh2_singles VALUES (5, 'e');
+INSERT INTO sh2_singles VALUES (3, 'c');
+INSERT INTO sh2_singles VALUES (1, 'a');
+INSERT INTO sh2_singles VALUES (4, 'd');
+INSERT INTO sh2_singles VALUES (2, 'b');
+SELECT count(*) AS sh2_singles_count FROM sh2_singles;
+-- Verify data roundtrip
+SELECT id, val FROM sh2_singles ORDER BY id;
+DROP TABLE sh2_singles;
+
+-- Test SH2-9: COPY + VACUUM + more COPY (PK cache survives)
+CREATE TABLE sh2_vac(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh2_src9 AS
+    SELECT g AS id, 'v' || g AS val FROM generate_series(1, 200) g ORDER BY random();
+COPY sh2_src9 TO '/tmp/sh2_vac.csv' CSV;
+COPY sh2_vac FROM '/tmp/sh2_vac.csv' CSV;
+DELETE FROM sh2_vac WHERE id <= 100;
+VACUUM sh2_vac;
+-- Second COPY after vacuum
+TRUNCATE sh2_src9;
+INSERT INTO sh2_src9 SELECT g, 'w' || g FROM generate_series(201, 400) g ORDER BY random();
+COPY sh2_src9 TO '/tmp/sh2_vac2.csv' CSV;
+COPY sh2_vac FROM '/tmp/sh2_vac2.csv' CSV;
+SELECT
+    CASE WHEN count(*) = 0
+         THEN 'vac_sorted_ok'
+         ELSE 'vac_sorted_FAIL'
+    END AS sh2_vac_result
+FROM (
+    SELECT id < lag(id) OVER (ORDER BY ctid) AS inv
+    FROM sh2_vac
+    WHERE id > 200
+) sub
+WHERE inv;
+SELECT count(*) AS sh2_vac_count FROM sh2_vac;
+DROP TABLE sh2_vac;
+DROP TABLE sh2_src9;
+
 DROP EXTENSION clustered_pg;

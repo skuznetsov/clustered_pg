@@ -1,5 +1,6 @@
 EXTENSION = clustered_pg
-MODULES = clustered_pg
+MODULE_big = clustered_pg
+OBJS = clustered_pg.o sorted_heap.o
 DATA = sql/clustered_pg--0.1.0.sql
 DOCS =
 REGRESS = clustered_pg

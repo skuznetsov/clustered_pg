@@ -224,4 +224,14 @@ USING clustered_pk_index ADD
 
 COMMENT ON ACCESS METHOD clustered_heap IS 'Clustered table access method with directed placement via zone map.';
 COMMENT ON ACCESS METHOD clustered_pk_index IS 'Clustered index AM for key discovery (scan callbacks disabled; use btree for queries).';
+
+CREATE FUNCTION @extschema@.sorted_heap_handler(internal)
+RETURNS table_am_handler
+AS '$libdir/clustered_pg', 'sorted_heap_tableam_handler'
+LANGUAGE C STRICT;
+
+CREATE ACCESS METHOD sorted_heap TYPE TABLE
+	HANDLER @extschema@.sorted_heap_handler;
+
+COMMENT ON ACCESS METHOD sorted_heap IS 'Sorted heap table access method with LSM-style tiered storage.';
 COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';
