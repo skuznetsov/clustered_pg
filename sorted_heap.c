@@ -50,10 +50,7 @@ PG_FUNCTION_INFO_V1(sorted_heap_rebuild_zonemap_sql);
  * ---------------------------------------------------------------- */
 static void sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 											ProcNumber backend, bool need_wal);
-static SortedHeapRelInfo *sorted_heap_get_relinfo(Relation rel);
 static void sorted_heap_relinfo_invalidate(Oid relid);
-
-static bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
 static void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
 static void sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info);
 static void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
@@ -77,6 +74,9 @@ static void sorted_heap_relation_copy_for_cluster(Relation OldTable,
 												  double *num_tuples,
 												  double *tups_vacuumed,
 												  double *tups_recently_dead);
+static void sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
+									 CommandId cid, int options,
+									 struct BulkInsertStateData *bistate);
 static void sorted_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 									 int nslots, CommandId cid, int options,
 									 struct BulkInsertStateData *bistate);
@@ -101,7 +101,7 @@ static void sorted_heap_index_validate_scan(Relation tableRelation,
  *  Static state
  * ---------------------------------------------------------------- */
 static bool sorted_heap_am_initialized = false;
-static TableAmRoutine sorted_heap_am_routine;
+TableAmRoutine sorted_heap_am_routine;
 static HTAB *sorted_heap_relinfo_hash = NULL;
 
 /* ----------------------------------------------------------------
@@ -134,6 +134,9 @@ sorted_heap_init_routine(void)
 	sorted_heap_am_routine.relation_copy_for_cluster =
 		sorted_heap_relation_copy_for_cluster;
 
+	/* Single-row insert — invalidates zone map valid flag */
+	sorted_heap_am_routine.tuple_insert = sorted_heap_tuple_insert;
+
 	/* Bulk insert — sort batch by PK + update zone map */
 	sorted_heap_am_routine.multi_insert = sorted_heap_multi_insert;
 
@@ -156,7 +159,7 @@ sorted_heap_tableam_handler(PG_FUNCTION_ARGS)
 /* ----------------------------------------------------------------
  *  Key conversion utility
  * ---------------------------------------------------------------- */
-static bool
+bool
 sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out)
 {
 	switch (typid)
@@ -199,7 +202,7 @@ sorted_heap_ensure_relinfo_hash(void)
 										   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 }
 
-static SortedHeapRelInfo *
+SortedHeapRelInfo *
 sorted_heap_get_relinfo(Relation rel)
 {
 	Oid				relid = RelationGetRelid(rel);
@@ -310,6 +313,15 @@ sorted_heap_get_relinfo(Relation rel)
 		info->pk_probed = true;
 	}
 
+	/* Auto-load zone map if usable PK and not yet loaded */
+	if (info->zm_usable && !info->zm_loaded)
+	{
+		BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+
+		if (nblocks > 1)		/* meta page + at least 1 data page */
+			sorted_heap_zonemap_load(rel, info);
+	}
+
 	return info;
 }
 
@@ -395,10 +407,13 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 		info->zm_nentries = n;
 		memcpy(info->zm_entries, meta->shm_zonemap,
 			   n * sizeof(SortedHeapZoneMapEntry));
+		info->zm_scan_valid =
+			(meta->shm_flags & SHM_FLAG_ZONEMAP_VALID) != 0;
 	}
 	else
 	{
 		info->zm_nentries = 0;
+		info->zm_scan_valid = false;
 	}
 
 	info->zm_loaded = true;
@@ -522,6 +537,7 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
 	meta->shm_zonemap_nentries = nentries;
 	meta->shm_zonemap_pk_typid = pk_typid;
+	meta->shm_flags |= SHM_FLAG_ZONEMAP_VALID;
 	memcpy(meta->shm_zonemap, entries,
 		   nentries * sizeof(SortedHeapZoneMapEntry));
 
@@ -939,6 +955,53 @@ sorted_heap_index_validate_scan(Relation tableRelation,
 	PG_END_TRY();
 
 	tableRelation->rd_tableam = old_tableam;
+}
+
+/* ----------------------------------------------------------------
+ *  tuple_insert — invalidate zone map valid flag
+ *
+ *  Delegates to heap, then clears SHM_FLAG_ZONEMAP_VALID on the
+ *  first single-row INSERT after a COMPACT/REBUILD cycle.
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
+						 CommandId cid, int options,
+						 struct BulkInsertStateData *bistate)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+	SortedHeapRelInfo *info;
+
+	/* Let heap do the actual insert */
+	heap->tuple_insert(rel, slot, cid, options, bistate);
+
+	/* Clear zone map valid flag on first INSERT after compact */
+	info = sorted_heap_get_relinfo(rel);
+	if (info->zm_scan_valid)
+	{
+		Buffer				metabuf;
+		Page				metapage;
+		SortedHeapMetaPageData *meta;
+
+		metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
+									 SORTED_HEAP_META_BLOCK,
+									 RBM_NORMAL, NULL);
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+		metapage = BufferGetPage(metabuf);
+		meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+
+		if (meta->shm_flags & SHM_FLAG_ZONEMAP_VALID)
+		{
+			GenericXLogState *state = GenericXLogStart(rel);
+
+			metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+			meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+			meta->shm_flags &= ~SHM_FLAG_ZONEMAP_VALID;
+			GenericXLogFinish(state);
+		}
+
+		UnlockReleaseBuffer(metabuf);
+		info->zm_scan_valid = false;
+	}
 }
 
 /* ----------------------------------------------------------------

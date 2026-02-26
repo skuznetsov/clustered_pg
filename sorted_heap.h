@@ -4,6 +4,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "access/attnum.h"
+#include "access/tableam.h"
 
 #define SORTED_HEAP_MAGIC		0x534F5254	/* 'SORT' */
 #define SORTED_HEAP_VERSION		3
@@ -13,6 +14,7 @@
 
 /* Flag bits for shm_flags */
 #define SORTED_HEAP_FLAG_ZONEMAP_STALE	0x0001
+#define SHM_FLAG_ZONEMAP_VALID			0x0002	/* zone map safe for scan pruning */
 
 /*
  * Per-page zone map entry: min/max of first PK column as int64.
@@ -63,6 +65,7 @@ typedef struct SortedHeapRelInfo
 	/* Zone map cache */
 	bool		zm_usable;			/* first PK col is int2/4/8 */
 	bool		zm_loaded;			/* zone map read from meta page */
+	bool		zm_scan_valid;		/* zone map valid for scan pruning */
 	Oid			zm_pk_typid;		/* type of first PK column */
 	uint16		zm_nentries;		/* number of valid entries */
 	SortedHeapZoneMapEntry zm_entries[SORTED_HEAP_ZONEMAP_MAX];
@@ -73,5 +76,11 @@ extern Datum sorted_heap_zonemap_stats(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_compact(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS);
 extern void sorted_heap_relcache_callback(Datum arg, Oid relid);
+
+/* Exported for sorted_heap_scan.c */
+extern TableAmRoutine sorted_heap_am_routine;
+extern SortedHeapRelInfo *sorted_heap_get_relinfo(Relation rel);
+extern bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
+extern void sorted_heap_scan_init(void);
 
 #endif							/* SORTED_HEAP_H */

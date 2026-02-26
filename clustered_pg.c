@@ -1513,4 +1513,5 @@ _PG_init(void)
 {
 	CacheRegisterRelcacheCallback(clustered_pg_relcache_callback, (Datum) 0);
 	CacheRegisterRelcacheCallback(sorted_heap_relcache_callback, (Datum) 0);
+	sorted_heap_scan_init();
 }

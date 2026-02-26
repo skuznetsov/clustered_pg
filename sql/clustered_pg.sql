@@ -933,4 +933,78 @@ DROP TABLE sh4_bigint;
 DROP TABLE sh4_big_src;
 DROP TABLE sh4_big_src2;
 
+-- ================================================================
+-- sorted_heap Table AM: Phase 5 tests (Scan Pruning via Zone Maps)
+-- ================================================================
+
+-- Helper: check if EXPLAIN plan contains a pattern
+CREATE FUNCTION sh5_plan_contains(query text, pattern text) RETURNS boolean AS $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query
+    LOOP
+        IF r."QUERY PLAN" LIKE '%' || pattern || '%' THEN
+            RETURN true;
+        END IF;
+    END LOOP;
+    RETURN false;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Setup: load data via COPY, enough for many pages
+CREATE TABLE sh5_scan(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh5_src AS
+    SELECT g AS id, repeat('x', 100) AS val FROM generate_series(1, 2000) g ORDER BY random();
+COPY sh5_src TO '/tmp/sh5_scan.csv' CSV;
+COPY sh5_scan FROM '/tmp/sh5_scan.csv' CSV;
+
+-- Disable index scans to test seq scan vs custom scan
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+-- Test SH5-1: Before compact — no pruning (zone map not valid)
+SELECT sh5_plan_contains(
+    'SELECT * FROM sh5_scan WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh5_before_compact;
+
+-- Compact + analyze
+SELECT sorted_heap_compact('sh5_scan'::regclass);
+ANALYZE sh5_scan;
+
+-- Test SH5-2: After compact — custom scan used for range query
+SELECT sh5_plan_contains(
+    'SELECT * FROM sh5_scan WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh5_after_compact;
+
+-- Test SH5-3: Range query — correct results
+SELECT count(*) AS sh5_range_count FROM sh5_scan WHERE id BETWEEN 100 AND 200;
+
+-- Test SH5-4: Point query — correct result
+SELECT count(*) AS sh5_point_count FROM sh5_scan WHERE id = 500;
+
+-- Test SH5-5: Full scan (no WHERE) — all rows
+SELECT count(*) AS sh5_full_count FROM sh5_scan;
+
+-- Test SH5-6: INSERT invalidates zone map, falls back to seq scan
+INSERT INTO sh5_scan VALUES (2001, 'extra');
+SELECT sh5_plan_contains(
+    'SELECT * FROM sh5_scan WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh5_after_insert;
+SELECT count(*) AS sh5_after_insert_range FROM sh5_scan WHERE id BETWEEN 100 AND 200;
+
+-- Test SH5-7: Re-compact restores pruning
+SELECT sorted_heap_compact('sh5_scan'::regclass);
+ANALYZE sh5_scan;
+SELECT sh5_plan_contains(
+    'SELECT * FROM sh5_scan WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh5_recompact;
+SELECT count(*) AS sh5_recompact_range FROM sh5_scan WHERE id BETWEEN 100 AND 200;
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE sh5_scan;
+DROP TABLE sh5_src;
+DROP FUNCTION sh5_plan_contains(text, text);
+
 DROP EXTENSION clustered_pg;
