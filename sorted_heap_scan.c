@@ -28,6 +28,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
@@ -58,6 +59,10 @@ typedef struct SortedHeapScanState
 	BlockNumber		total_blocks;
 	BlockNumber		scan_start;
 	BlockNumber		scan_nblocks;
+	/* Per-scan stats for EXPLAIN ANALYZE */
+	BlockNumber		scanned_blocks;
+	BlockNumber		pruned_blocks;
+	BlockNumber		last_blk;			/* track block transitions */
 } SortedHeapScanState;
 
 /* ----------------------------------------------------------------
@@ -101,6 +106,13 @@ static void sorted_heap_explain_custom_scan(CustomScanState *node,
 /* ----------------------------------------------------------------
  *  Static state
  * ---------------------------------------------------------------- */
+/* GUC: allow users to disable scan pruning at runtime */
+bool sorted_heap_enable_scan_pruning = true;
+
+/* Global stats for sorted_heap scans (backend-local, reset on restart) */
+static uint64 sh_total_scans = 0;
+static uint64 sh_total_blocks_pruned = 0;
+
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
 static CustomPathMethods sorted_heap_path_methods = {
@@ -150,6 +162,10 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	/* Chain to previous hook */
 	if (prev_set_rel_pathlist_hook)
 		prev_set_rel_pathlist_hook(root, rel, rti, rte);
+
+	/* GUC kill switch */
+	if (!sorted_heap_enable_scan_pruning)
+		return;
 
 	/* Only base relations with restrictions */
 	if (rel->reloptkind != RELOPT_BASEREL)
@@ -590,6 +606,11 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 	/* Load relinfo for per-block zone map checks */
 	shstate->relinfo = sorted_heap_get_relinfo(rel);
 
+	/* Init per-scan stats */
+	shstate->scanned_blocks = 0;
+	shstate->pruned_blocks = 0;
+	shstate->last_blk = InvalidBlockNumber;
+
 	/* Open heap scan without syncscan (conflicts with setscanlimits) */
 	shstate->heap_scan = table_beginscan(rel, estate->es_snapshot,
 										 0, NULL);
@@ -620,6 +641,14 @@ sorted_heap_exec_custom_scan(CustomScanState *node)
 								  ForwardScanDirection, slot))
 	{
 		BlockNumber blk = ItemPointerGetBlockNumber(&slot->tts_tid);
+		bool		new_block = (blk != shstate->last_blk);
+
+		/* Track block transitions for EXPLAIN ANALYZE */
+		if (new_block)
+		{
+			shstate->scanned_blocks++;
+			shstate->last_blk = blk;
+		}
 
 		/* Per-block zone map check for fine-grained pruning */
 		if (blk >= 1 && (blk - 1) < shstate->relinfo->zm_nentries)
@@ -628,7 +657,11 @@ sorted_heap_exec_custom_scan(CustomScanState *node)
 				&shstate->relinfo->zm_entries[blk - 1];
 
 			if (!sorted_heap_zone_overlaps(e, &shstate->bounds))
+			{
+				if (new_block)
+					shstate->pruned_blocks++;
 				continue;
+			}
 		}
 
 		/* Evaluate quals */
@@ -652,6 +685,10 @@ static void
 sorted_heap_end_custom_scan(CustomScanState *node)
 {
 	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
+
+	/* Accumulate global stats */
+	sh_total_scans++;
+	sh_total_blocks_pruned += shstate->pruned_blocks;
 
 	if (shstate->heap_scan)
 	{
@@ -699,4 +736,30 @@ sorted_heap_explain_custom_scan(CustomScanState *node, List *ancestors,
 					 shstate->total_blocks - shstate->scan_nblocks);
 	ExplainPropertyText("Zone Map", buf.data, es);
 	pfree(buf.data);
+
+	if (es->analyze)
+	{
+		ExplainPropertyInteger("Scanned Blocks", NULL,
+							   shstate->scanned_blocks, es);
+		ExplainPropertyInteger("Pruned Blocks", NULL,
+							   shstate->pruned_blocks, es);
+	}
+}
+
+/* ----------------------------------------------------------------
+ *  SQL-callable scan stats function
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(sorted_heap_scan_stats);
+
+Datum
+sorted_heap_scan_stats(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "scans=" UINT64_FORMAT
+					 " blocks_pruned=" UINT64_FORMAT,
+					 sh_total_scans, sh_total_blocks_pruned);
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }

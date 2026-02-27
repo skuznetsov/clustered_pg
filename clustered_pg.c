@@ -1511,6 +1511,17 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 void
 _PG_init(void)
 {
+	DefineCustomBoolVariable("sorted_heap.enable_scan_pruning",
+							 "Enable zone map scan pruning for sorted_heap tables.",
+							 NULL,
+							 &sorted_heap_enable_scan_pruning,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	MarkGUCPrefixReserved("sorted_heap");
+
 	CacheRegisterRelcacheCallback(clustered_pg_relcache_callback, (Datum) 0);
 	CacheRegisterRelcacheCallback(sorted_heap_relcache_callback, (Datum) 0);
 	sorted_heap_scan_init();

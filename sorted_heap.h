@@ -82,5 +82,9 @@ extern TableAmRoutine sorted_heap_am_routine;
 extern SortedHeapRelInfo *sorted_heap_get_relinfo(Relation rel);
 extern bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
 extern void sorted_heap_scan_init(void);
+extern Datum sorted_heap_scan_stats(PG_FUNCTION_ARGS);
+
+/* GUC variable */
+extern bool sorted_heap_enable_scan_pruning;
 
 #endif							/* SORTED_HEAP_H */

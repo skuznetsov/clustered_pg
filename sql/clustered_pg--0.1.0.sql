@@ -250,4 +250,9 @@ RETURNS void
 AS '$libdir/clustered_pg', 'sorted_heap_rebuild_zonemap_sql'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION @extschema@.sorted_heap_scan_stats()
+RETURNS text
+AS '$libdir/clustered_pg', 'sorted_heap_scan_stats'
+LANGUAGE C STRICT;
+
 COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';
