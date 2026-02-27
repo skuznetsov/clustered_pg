@@ -1323,6 +1323,11 @@ sorted_heap_compact(PG_FUNCTION_ARGS)
 				 errmsg("\"%s\" has no primary key",
 						RelationGetRelationName(rel))));
 
+	ereport(NOTICE,
+			(errmsg("sorted_heap_compact acquires AccessExclusiveLock"),
+			 errhint("Schedule during maintenance windows. "
+					 "Concurrent reads and writes are blocked.")));
+
 	/* cluster_rel needs AccessExclusiveLock; it closes the relation */
 	rel = table_open(relid, AccessExclusiveLock);
 	memset(&params, 0, sizeof(params));

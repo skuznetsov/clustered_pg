@@ -170,11 +170,18 @@ Makefile                – PGXS build
 
 ## Limitations
 
-- Zone map capacity: 500 pages. Larger tables have an uncovered tail that
-  is always scanned (unless the query's upper bound falls within covered range).
-- Zone map tracks first PK column only, integer types only (int2/int4/int8).
-- Single-row INSERT does not update the zone map — invalidates scan pruning
-  until the next compact.
+- Zone map capacity: 16,788 pages (~131 MB). 500 entries in meta page +
+  up to 32 overflow pages with 509 entries each. Tables beyond this limit
+  have an uncovered tail that is always scanned.
+- Zone map tracks first PK column only. Supported types: int2, int4, int8,
+  timestamp, timestamptz, date. Composite PK `(a, b)` prunes on `a` only;
+  PostgreSQL's standard qual evaluation handles `b`.
+- Single-row INSERT into a page covered by the zone map updates the entry
+  in-place (preserving scan pruning). INSERT into an uncovered page
+  invalidates scan pruning until the next compact.
+- `sorted_heap_compact()` acquires AccessExclusiveLock (full table lock).
+  Schedule during maintenance windows. Online compaction would require
+  pg_repack-style infrastructure.
 - `heap_setscanlimits()` only supports contiguous block ranges.
 - UPDATE does not re-sort; use compact periodically for write-heavy workloads.
 

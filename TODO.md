@@ -86,21 +86,25 @@ Basic `sorted_heap` AM that delegates everything to heap.
 
 ## Known Limitations
 
-- Zone map capacity: 500 entries (pages). Tables > 500 pages have uncovered
-  tail that cannot be pruned unless query upper bound is within covered range.
-- Zone map only tracks first PK column of integer type (int2/int4/int8).
-- Single-row INSERT delegates to heap without zone map update — invalidates
+- Zone map capacity: 16,788 pages (~131 MB). 500 in meta page + up to
+  32 overflow pages × 509 entries each.
+- Zone map tracks first PK column only. Supported: int2/int4/int8,
+  timestamp, timestamptz, date. Composite PK `(a, b)` prunes on `a`;
+  standard qual evaluation handles `b`.
+- Single-row INSERT into a covered page updates zone map in-place
+  (preserving scan pruning). INSERT into an uncovered page invalidates
   scan pruning until next compact.
+- `sorted_heap_compact()` acquires AccessExclusiveLock — blocks all
+  concurrent reads and writes.
 - `heap_setscanlimits()` only supports contiguous block ranges.
   Non-contiguous pruning handled per-block in ExecCustomScan (still reads
   pages, but skips tuple processing).
-- No incremental zone map update for single-row inserts.
 
 ## Possible Future Work
 
-- Incremental zone map maintenance on single-row INSERT
-- Larger zone map (multi-page or external storage) for tables > 500 pages
-- Zone map support for non-integer types (text, uuid, timestamp)
+- Online compact (pg_repack-style) to avoid AccessExclusiveLock
+- Multi-column zone map for composite PK pruning
+- Zone map support for text, uuid types
 - Merge multiple sorted runs without full CLUSTER rewrite
 - Parallel custom scan support
 - Index-only scan equivalent using zone map
