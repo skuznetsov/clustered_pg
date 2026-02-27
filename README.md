@@ -1,168 +1,182 @@
 # clustered_pg
 
-PostgreSQL extension implementing physically clustered storage via a custom Table AM. Rows with the same key are placed on the same (or adjacent) heap blocks at INSERT time, so standard btree and BRIN indexes operate at near-optimal I/O efficiency without periodic `CLUSTER` maintenance.
+PostgreSQL extension providing physically sorted storage via custom Table AMs.
+The primary access method is **`sorted_heap`** — a heap-based AM that sorts
+COPY batches by primary key, maintains per-page zone maps, and uses a custom
+scan provider to skip irrelevant blocks at query time.
 
 ## How it works
 
-`clustered_pg` provides two access methods:
+`sorted_heap` keeps data physically ordered by primary key:
 
-- **`clustered_heap`** (Table AM) — wraps the standard heap with a **directed placement** layer. On INSERT and COPY, the extension extracts the clustering key from each tuple, looks up a per-relation in-memory **zone map** (`key → block number`), and calls `RelationSetTargetBlock` to steer PostgreSQL's buffer manager toward the block where that key already lives. This keeps rows physically grouped by key.
+1. **Sorted bulk insert** — `multi_insert` (COPY path) sorts each batch by PK
+   before delegating to the standard heap. This produces physically sorted runs.
 
-- **`clustered_pk_index`** (Index AM) — a lightweight index whose only job is **key discovery**: the table AM finds it at first INSERT to learn which column is the clustering key. Scan callbacks are disabled (`amgettuple=NULL`); the planner always uses a standard btree for queries.
+2. **Zone maps** — Block 0 is a meta page storing per-page `(min, max)` of the
+   first PK column (int2/int4/int8). Up to 500 page entries fit in the meta
+   page's special space.
+
+3. **Compaction** — `sorted_heap_compact(regclass)` does a full CLUSTER rewrite,
+   producing a globally sorted table and rebuilding the zone map.
+
+4. **Scan pruning** — A `set_rel_pathlist_hook` injects a `SortedHeapScan`
+   custom path when the WHERE clause has PK predicates. The executor calls
+   `heap_setscanlimits()` to physically skip pruned blocks, then does per-block
+   zone map checks for non-contiguous filtering.
+
+```
+COPY → sort by PK → heap insert → update zone map
+                                        ↓
+compact → CLUSTER rewrite → rebuild zone map → set valid flag
+                                                    ↓
+SELECT WHERE pk op const → planner hook → extract bounds
+    → zone map lookup → block range → heap_setscanlimits → skip I/O
+```
 
 ## Performance
 
-Benchmarks on 100K rows, 1000 distinct keys, interleaved insert order, 100-byte payload:
+Benchmark on 500K rows, integer PK, ~100 byte payload per row (~78 MB table):
 
-| Metric | `clustered_heap` + btree | Standard heap + btree | Improvement |
-|---|---|---|---|
-| Block scatter (blocks/key) | 3.0 | 100.0 | **33x fewer** |
-| Point lookup (1 key) | 0.135 ms | 0.127 ms | same |
-| Range scan (10% rows) | 0.618 ms | 0.785 ms | 1.3x faster |
-| Bitmap scan (1% rows) | 24 buffers | 121 buffers | **5x fewer** |
-| JOIN 200 keys (UNNEST) | 1.7 ms / 1K buffers | 5.4 ms / 20K buffers | **3.2x faster / 20x fewer buffers** |
+| Query | Heap (Seq Scan) | sorted_heap (SortedHeapScan) | Speedup |
+|-------|----------------|------------------------------|---------|
+| Narrow range (100 rows) | 12.6 ms / 8621 bufs | 0.053 ms / 3 bufs | **237x** |
+| Medium range (5K rows) | 12.5 ms / 8621 bufs | 0.634 ms / 87 bufs | **20x** |
+| Point query (1 row) | 12.3 ms / 8621 bufs | 0.015 ms / 1 buf | **820x** |
+| Wide range (20%, 100K rows) | 13.3 ms / 8621 bufs | 13.3 ms / 8622 bufs | ~1x |
+| Full scan (no WHERE) | 14.3 ms | 14.8 ms | ~1x |
 
-INSERT overhead is ~10% (282 ms vs 257 ms for 100K rows), acceptable given the clustering benefit.
-
-BRIN indexes are also highly effective on directed-placement tables: 22 heap blocks for 1% selectivity vs 119 on standard heap.
+Zone map pruning eliminates I/O for selective queries while adding no overhead
+for full scans.
 
 ## Quick start
 
 ### Requirements
 
-- PostgreSQL 17+ (developed on 18)
+- PostgreSQL 17+ (developed on 18devel)
 - Standard PGXS build toolchain (`pg_config` in PATH)
 
 ### Build and install
 
 ```bash
-make
-make install
+make && make install
 ```
 
-### Create a clustered table
+### Create a sorted_heap table
 
 ```sql
 CREATE EXTENSION clustered_pg;
 
--- 1. Table with clustered storage
 CREATE TABLE events (
-    tenant_id  int,
-    event_time timestamptz,
-    payload    text
-) USING clustered_heap;
+    id      int PRIMARY KEY,
+    ts      timestamptz,
+    payload text
+) USING sorted_heap;
 
--- 2. Clustering key index (tells the table AM which column to cluster on)
-CREATE INDEX events_pkidx ON events
-    USING clustered_pk_index (tenant_id);
-
--- 3. Standard btree for query serving
-CREATE INDEX events_btree ON events USING btree (tenant_id);
-
--- Rows inserted for the same tenant_id will be physically co-located.
+-- Bulk load (COPY path sorts by PK automatically)
 INSERT INTO events
-SELECT (i % 100), now(), repeat('x', 80)
-FROM generate_series(1, 10000) i;
-```
+SELECT i, now() - (i || ' seconds')::interval, repeat('x', 80)
+FROM generate_series(1, 100000) i;
 
-The three-object pattern is the recommended production setup:
-1. `clustered_heap` — directed placement on INSERT/COPY
-2. `clustered_pk_index` — key discovery for the table AM
-3. `btree` — query serving (planner always prefers it)
+-- Compact to globally sort and build zone map
+SELECT clustered_pg.sorted_heap_compact('events'::regclass);
+
+-- Zone map pruning kicks in automatically
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM events WHERE id BETWEEN 500 AND 600;
+-- Custom Scan (SortedHeapScan)
+-- Zone Map: 2 of 1946 blocks (pruned 1944)
+```
 
 ### Run tests
 
 ```bash
-make installcheck PGPORT=5432
+make installcheck
 ```
-
-This runs 14 regression test groups covering: int2/int4 index types, locator edge cases, JOIN UNNEST correctness, delete + vacuum consistency, split boundaries, empty tables, directed placement verification, COPY bulk path, UPDATE/DELETE, NULL keys, many-key fast path, VACUUM + re-insert, TRUNCATE + zone map invalidation, and JOIN + btree production pattern.
-
-## Architecture
-
-### Directed placement (Table AM)
-
-The core mechanism is in `tuple_insert` and `multi_insert` overrides:
-
-1. On first INSERT, the table AM discovers the `clustered_pk_index` via catalog lookup and caches the key attribute number and type OID.
-2. For each tuple, it extracts the clustering key, looks up the zone map (in-memory HTAB: `int64 key → BlockNumber`), and sets `RelationSetTargetBlock` before delegating to the standard heap insert.
-3. After insertion, it records the actual block where the tuple landed.
-
-The `multi_insert` path (used by COPY) has an adaptive strategy:
-- **≤64 distinct keys** → sort + group: full clustering with per-group `ReleaseBulkInsertStatePin`
-- **>64 distinct keys** → fast path: single heap_multi_insert call with lightweight zone map recording
-
-### Zone map
-
-- Per-relation HTAB stored in `TopMemoryContext` (survives transactions)
-- Overflow guard: max 1M keys per relation (auto-reset on overflow)
-- Cross-relation guard: max 256 relations (full cleanup on overflow)
-- Stale block validation: before each `RelationSetTargetBlock`, checks `block < RelationGetNumberOfBlocks(rel)` and evicts stale entries (protects against VACUUM heap truncation)
-- Invalidated on: `set_new_filelocator`, `TRUNCATE`, `copy_data`, `copy_for_cluster`
 
 ## SQL API
 
-### Access methods
+### sorted_heap (Table AM)
+
+```sql
+-- Create table with sorted storage
+CREATE TABLE t (id int PRIMARY KEY, val text) USING sorted_heap;
+
+-- Compact: full rewrite + zone map rebuild
+SELECT clustered_pg.sorted_heap_compact('t'::regclass);
+
+-- Inspect zone map stats
+SELECT clustered_pg.sorted_heap_zonemap_stats('t'::regclass);
+
+-- Manual zone map rebuild (without compaction)
+SELECT clustered_pg.sorted_heap_rebuild_zonemap('t'::regclass);
+```
+
+Zone map scan pruning is automatic — the planner hook detects `sorted_heap`
+tables with a valid zone map and injects a `SortedHeapScan` custom path when
+the WHERE clause contains PK predicates (`=`, `<`, `<=`, `>`, `>=`, `BETWEEN`).
+
+### clustered_heap (Table AM) — legacy
+
+The extension also provides `clustered_heap`, a directed-placement Table AM
+that routes INSERTs to the block where the same key already lives. This
+requires a companion `clustered_pk_index` for key discovery and a standard
+btree for query serving.
 
 ```sql
 CREATE TABLE t (...) USING clustered_heap;
-CREATE INDEX ON t USING clustered_pk_index (key_column);
+CREATE INDEX ON t USING clustered_pk_index (key_col);
+CREATE INDEX ON t USING btree (key_col);
 ```
-
-Supported key types: `int2`, `int4`, `int8`.
-
-### Locator functions
-
-```sql
-locator_pack(major bigint, minor bigint) → clustered_locator
-locator_pack_int8(bigint) → clustered_locator
-locator_major(clustered_locator) → bigint
-locator_minor(clustered_locator) → bigint
-locator_to_hex(clustered_locator) → text
-locator_cmp(a, b) → int
-locator_advance_major(locator, delta) → clustered_locator
-locator_next_minor(locator, delta) → clustered_locator
-```
-
-Comparison operators (`<`, `<=`, `=`, `>=`, `>`, `<>`) and a btree operator class (`clustered_locator_ops`) are provided.
 
 ### Observability
 
 ```sql
 SELECT clustered_pg.version();
-SELECT * FROM clustered_pg.observability();
+SELECT clustered_pg.observability();
 ```
+
+## Architecture
+
+### Source files
+
+```
+sorted_heap.h           – Meta page layout, zone map structs, SortedHeapRelInfo
+sorted_heap.c           – Table AM: sorted multi_insert, zone map, compact
+sorted_heap_scan.c      – Custom scan provider: planner hook, block pruning
+clustered_pg.c          – Extension entry, legacy clustered_heap AM
+sql/clustered_pg--0.1.0.sql – Extension install SQL
+sql/clustered_pg.sql    – Regression tests
+Makefile                – PGXS build
+```
+
+### Zone map details
+
+- Stored in block 0's special space as `SortedHeapMetaPageData`
+- 500 entries max (24-byte header + 500 * 16-byte entries = 8024 bytes)
+- Each entry: `(int64 min, int64 max)` for one data page
+- Updated atomically via GenericXLog during `multi_insert`
+- Validity flag (`SHM_FLAG_ZONEMAP_VALID`): set by compact/rebuild, cleared
+  on first single-row INSERT — prevents stale pruning
+
+### Custom scan provider
+
+- Hooks into `set_rel_pathlist_hook`
+- Extracts PK bounds from `baserestrictinfo` OpExprs
+- Maps operator OIDs to btree strategies via `get_op_opfamily_strategy()`
+- Computes contiguous block range from zone map overlap
+- Uses `heap_setscanlimits(start, nblocks)` for physical I/O skip
+- Per-block zone map check in `ExecCustomScan` for fine-grained pruning
+- EXPLAIN shows: `Zone Map: N of M blocks (pruned P)`
 
 ## Limitations
 
-- Clustering key must be a single-column integer (`int2`, `int4`, or `int8`)
-- NULL clustering keys are rejected by the index AM
-- UPDATE does not re-cluster: PostgreSQL routes updates through `heap_update`, not `tuple_insert`. Directed placement only applies to INSERT/COPY. This is acceptable for append-heavy workloads.
-- Zone map is per-backend (not shared memory). Each backend builds its own zone map on first insert. Stale hints degrade to standard heap placement, not errors.
-- Transaction rollback leaves stale zone map entries. These are best-effort placement hints — stale entries cause PostgreSQL to find another page, degrading performance but not correctness.
-
-## Testing
-
-```bash
-make installcheck                    # PG regression tests
-make pg-core-regression-smoke        # Core regression smoke (no running server)
-make policy-safety-selftest          # Policy and docs contract tests
-make lightweight-selftests           # Full lightweight selftest suite
-```
-
-Command selection quick map: see `OPERATIONS.md` for the full routing guide.
-
-## Project structure
-
-```
-clustered_pg.c                  – Extension source (~1630 lines)
-sql/clustered_pg--0.1.0.sql     – Extension install SQL (~230 lines)
-sql/clustered_pg.sql            – Regression tests (~405 lines, 14 test groups)
-expected/clustered_pg.out       – Expected test output
-clustered_pg.control            – Extension metadata
-Makefile                        – PGXS build
-scripts/                        – Operational shell scripts and selftests
-```
+- Zone map capacity: 500 pages. Larger tables have an uncovered tail that
+  is always scanned (unless the query's upper bound falls within covered range).
+- Zone map tracks first PK column only, integer types only (int2/int4/int8).
+- Single-row INSERT does not update the zone map — invalidates scan pruning
+  until the next compact.
+- `heap_setscanlimits()` only supports contiguous block ranges.
+- UPDATE does not re-sort; use compact periodically for write-heavy workloads.
 
 ## License
 
