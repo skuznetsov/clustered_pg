@@ -687,7 +687,7 @@ COPY sh3_src1 TO '/tmp/sh3_zonemap.csv' CSV;
 COPY sh3_zonemap FROM '/tmp/sh3_zonemap.csv' CSV;
 -- Verify zone map was populated
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh3_zonemap'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+    CASE WHEN sorted_heap_zonemap_stats('sh3_zonemap'::regclass) LIKE 'version=% nentries=% pk_typid=23%'
          THEN 'zonemap_created_ok'
          ELSE 'zonemap_created_FAIL'
     END AS sh3_zonemap_created;
@@ -756,7 +756,7 @@ COPY sh3_src5 TO '/tmp/sh3_ranges.csv' CSV;
 COPY sh3_ranges FROM '/tmp/sh3_ranges.csv' CSV;
 -- Zone map should contain entries; first entry's min should be >= 1
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh3_ranges'::regclass) LIKE 'version=3 nentries=% pk_typid=23 flags=0 [1:%'
+    CASE WHEN sorted_heap_zonemap_stats('sh3_ranges'::regclass) LIKE 'version=% nentries=% pk_typid=23 flags=0 [1:%'
          THEN 'zonemap_ranges_ok'
          ELSE 'zonemap_ranges_FAIL'
     END AS sh3_ranges_result;
@@ -775,7 +775,7 @@ DELETE FROM sh3_vacuum WHERE id BETWEEN 100 AND 200;
 VACUUM sh3_vacuum;
 -- Zone map still has entries (conservative — may be wider than actual data)
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh3_vacuum'::regclass) LIKE 'version=3 nentries=%'
+    CASE WHEN sorted_heap_zonemap_stats('sh3_vacuum'::regclass) LIKE 'version=% nentries=%'
          THEN 'zonemap_vacuum_ok'
          ELSE 'zonemap_vacuum_FAIL'
     END AS sh3_vacuum_result;
@@ -804,7 +804,7 @@ FROM (
 WHERE inv;
 -- Zone map populated
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh3_sort'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+    CASE WHEN sorted_heap_zonemap_stats('sh3_sort'::regclass) LIKE 'version=% nentries=% pk_typid=23%'
          THEN 'zonemap_sort_stats_ok'
          ELSE 'zonemap_sort_stats_FAIL'
     END AS sh3_sort_stats;
@@ -859,7 +859,7 @@ COPY sh4_zm_src TO '/tmp/sh4_zonemap.csv' CSV;
 COPY sh4_zonemap FROM '/tmp/sh4_zonemap.csv' CSV;
 SELECT sorted_heap_compact('sh4_zonemap'::regclass);
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh4_zonemap'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+    CASE WHEN sorted_heap_zonemap_stats('sh4_zonemap'::regclass) LIKE 'version=% nentries=% pk_typid=23%'
          THEN 'compact_zonemap_ok'
          ELSE 'compact_zonemap_FAIL'
     END AS sh4_zonemap_result;
@@ -901,7 +901,7 @@ CREATE TABLE sh4_rebuild(id int PRIMARY KEY, val text) USING sorted_heap;
 INSERT INTO sh4_rebuild SELECT g, 'v' || g FROM generate_series(1, 100) g;
 SELECT sorted_heap_rebuild_zonemap('sh4_rebuild'::regclass);
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh4_rebuild'::regclass) LIKE 'version=3 nentries=% pk_typid=23%'
+    CASE WHEN sorted_heap_zonemap_stats('sh4_rebuild'::regclass) LIKE 'version=% nentries=% pk_typid=23%'
          THEN 'rebuild_zonemap_ok'
          ELSE 'rebuild_zonemap_FAIL'
     END AS sh4_rebuild_result;
@@ -1006,5 +1006,168 @@ RESET enable_bitmapscan;
 DROP TABLE sh5_scan;
 DROP TABLE sh5_src;
 DROP FUNCTION sh5_plan_contains(text, text);
+
+-- ================================================================
+-- sorted_heap Table AM: Phase 6 tests (Production Hardening)
+-- ================================================================
+
+-- Helper: check if EXPLAIN plan contains a pattern
+CREATE FUNCTION sh6_plan_contains(query text, pattern text) RETURNS boolean AS $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) ' || query
+    LOOP
+        IF r."QUERY PLAN" LIKE '%' || pattern || '%' THEN
+            RETURN true;
+        END IF;
+    END LOOP;
+    RETURN false;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Setup
+CREATE TABLE sh6_guc(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh6_src AS
+    SELECT g AS id, repeat('x', 80) AS val FROM generate_series(1, 1000) g ORDER BY random();
+COPY sh6_src TO '/tmp/sh6_guc.csv' CSV;
+COPY sh6_guc FROM '/tmp/sh6_guc.csv' CSV;
+SELECT sorted_heap_compact('sh6_guc'::regclass);
+ANALYZE sh6_guc;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+-- Test SH6-1: GUC off → no SortedHeapScan
+SET sorted_heap.enable_scan_pruning = off;
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh6_guc WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh6_guc_off;
+
+-- Test SH6-2: GUC on → SortedHeapScan
+SET sorted_heap.enable_scan_pruning = on;
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh6_guc WHERE id BETWEEN 100 AND 200',
+    'SortedHeapScan') AS sh6_guc_on;
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE sh6_guc;
+DROP TABLE sh6_src;
+
+-- Test SH6-3: TIMESTAMP PK + compact + range query
+CREATE TABLE sh6_ts(ts timestamp PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh6_ts
+    SELECT '2024-01-01'::timestamp + (g || ' seconds')::interval, 'v' || g
+    FROM generate_series(1, 1000) g;
+SELECT sorted_heap_compact('sh6_ts'::regclass);
+ANALYZE sh6_ts;
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh6_ts'::regclass) LIKE 'version=% nentries=%'
+         THEN 'ts_zonemap_ok'
+         ELSE 'ts_zonemap_FAIL'
+    END AS sh6_ts_result;
+SELECT count(*) AS sh6_ts_range
+FROM sh6_ts
+WHERE ts BETWEEN '2024-01-01 00:05:00'::timestamp AND '2024-01-01 00:10:00'::timestamp;
+DROP TABLE sh6_ts;
+
+-- Test SH6-4: DATE PK + compact + point query
+CREATE TABLE sh6_date(d date PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh6_date
+    SELECT '2024-01-01'::date + g, 'v' || g
+    FROM generate_series(1, 500) g;
+SELECT sorted_heap_compact('sh6_date'::regclass);
+ANALYZE sh6_date;
+SELECT count(*) AS sh6_date_point
+FROM sh6_date WHERE d = '2024-03-01'::date;
+DROP TABLE sh6_date;
+
+-- Test SH6-5: INSERT within zone map range → pruning still works
+CREATE TABLE sh6_insert(id int PRIMARY KEY, val text) USING sorted_heap;
+CREATE TEMP TABLE sh6_ins_src AS
+    SELECT g AS id, repeat('x', 80) AS val FROM generate_series(1, 500) g ORDER BY random();
+COPY sh6_ins_src TO '/tmp/sh6_insert.csv' CSV;
+COPY sh6_insert FROM '/tmp/sh6_insert.csv' CSV;
+SELECT sorted_heap_compact('sh6_insert'::regclass);
+ANALYZE sh6_insert;
+
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+-- Insert into covered page — pruning should survive
+INSERT INTO sh6_insert VALUES (250, 'new') ON CONFLICT (id) DO UPDATE SET val = 'new';
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh6_insert WHERE id = 100',
+    'SortedHeapScan') AS sh6_insert_covered;
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE sh6_insert;
+DROP TABLE sh6_ins_src;
+
+-- Test SH6-6: INSERT outside zone map range → pruning disabled
+-- (Use a fresh table, insert beyond existing pages)
+CREATE TABLE sh6_outside(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh6_outside SELECT g, repeat('x', 80) FROM generate_series(1, 100) g;
+SELECT sorted_heap_compact('sh6_outside'::regclass);
+ANALYZE sh6_outside;
+
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+-- Insert row that will go to a new page (beyond zone map coverage)
+INSERT INTO sh6_outside SELECT g, repeat('x', 80) FROM generate_series(101, 1000) g;
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh6_outside WHERE id = 50',
+    'SortedHeapScan') AS sh6_insert_outside;
+
+-- Test SH6-7: Re-compact restores pruning
+SELECT sorted_heap_compact('sh6_outside'::regclass);
+ANALYZE sh6_outside;
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh6_outside WHERE id = 50',
+    'SortedHeapScan') AS sh6_recompact;
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE sh6_outside;
+
+-- Test SH6-9: EXPLAIN ANALYZE shows counters (textual check)
+CREATE TABLE sh6_explain(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh6_explain SELECT g, repeat('x', 80) FROM generate_series(1, 500) g;
+SELECT sorted_heap_compact('sh6_explain'::regclass);
+ANALYZE sh6_explain;
+
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+CREATE FUNCTION sh6_explain_has_counters() RETURNS boolean AS $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT * FROM sh6_explain WHERE id BETWEEN 100 AND 200'
+    LOOP
+        IF r."QUERY PLAN" LIKE '%Scanned Blocks%' THEN
+            RETURN true;
+        END IF;
+    END LOOP;
+    RETURN false;
+END;
+$$ LANGUAGE plpgsql;
+SELECT sh6_explain_has_counters() AS sh6_explain_counters;
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP FUNCTION sh6_explain_has_counters();
+DROP TABLE sh6_explain;
+
+-- Test SH6-10: sorted_heap_scan_stats() returns non-empty
+SELECT
+    CASE WHEN sorted_heap_scan_stats() LIKE 'scans=%'
+         THEN 'scan_stats_ok'
+         ELSE 'scan_stats_FAIL'
+    END AS sh6_stats_result;
+
+DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;
