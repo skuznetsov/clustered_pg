@@ -29,12 +29,13 @@ SELECT ... WHERE pk_col <op> const
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 86 | Meta page layout, zone map structs, SortedHeapRelInfo |
+| `sorted_heap.h` | 144 | Meta page layout, zone map structs, SortedHeapRelInfo |
 | `sorted_heap.c` | 1084 | Table AM: sorted multi_insert, zone map persistence, compact |
 | `sorted_heap_scan.c` | 702 | Custom scan provider: planner hook, block pruning, EXPLAIN |
+| `sorted_heap_online.c` | 595 | Online compact: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1517 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1010 | Regression tests |
-| `expected/clustered_pg.out` | 1492 | Expected test output |
+| `sql/clustered_pg.sql` | 1230 | Regression tests |
+| `expected/clustered_pg.out` | 1867 | Expected test output |
 
 ## Completed Phases
 
@@ -74,15 +75,34 @@ Basic `sorted_heap` AM that delegates everything to heap.
   upper bound falls within covered range
 - EXPLAIN output: "Zone Map: N of M blocks (pruned P)"
 
-## Benchmark Results (500K rows, ~78MB)
+## Benchmark Results (500K rows, ~56 MB, warm cache)
+
+PostgreSQL 18.1, Apple M-series, zone map v4 with overflow pages.
+
+### sorted_heap vs Heap SeqScan (no index)
+
+Primary use case — sorted_heap eliminates the need for a separate index.
 
 | Query | Heap (SeqScan) | sorted_heap (SortedHeapScan) | Speedup |
 |-------|---------------|------------------------------|---------|
-| Narrow range (100 rows) | 12.6ms / 8621 bufs | 0.053ms / 3 bufs | 237x |
-| Medium range (5K rows) | 12.5ms / 8621 bufs | 0.634ms / 87 bufs | 20x |
-| Point query (1 row) | 12.3ms / 8621 bufs | 0.015ms / 1 buf | 820x |
-| Wide range (100K rows) | 13.3ms / 8621 bufs | 13.3ms / 8622 bufs | ~1x |
-| Full scan | 14.3ms | 14.8ms | ~1x |
+| Point query (1 row) | 10.1ms / 7143 bufs | 0.017ms / 1 buf | 595x |
+| Narrow range (100 rows) | 11.7ms / 7143 bufs | 0.018ms / 2 bufs | 650x |
+| Medium range (5K rows) | 11.3ms / 7143 bufs | 0.512ms / 73 bufs | 22x |
+| Wide range (100K rows) | 21.5ms / 7143 bufs | 7.3ms / 1430 bufs | 3x |
+| Full scan | 14.8ms / 7143 bufs | 15.2ms / 7158 bufs | ~1x |
+
+### sorted_heap vs Heap IndexScan (btree PK)
+
+| Query | Heap (IndexScan) | sorted_heap (SortedHeapScan) | Ratio |
+|-------|-----------------|------------------------------|-------|
+| Point query (1 row) | 0.009ms / 4 bufs | 0.017ms / 1 buf | 0.5x |
+| Narrow range (100 rows) | 0.015ms / 6 bufs | 0.018ms / 2 bufs | ~1x |
+| Medium range (5K rows) | 0.477ms / 89 bufs | 0.512ms / 73 bufs | ~1x |
+| Wide range (100K rows) | 9.0ms / 1706 bufs | 7.3ms / 1430 bufs | 1.2x |
+
+Zone map granularity is per-page, so point queries are ~2x slower than
+btree. For wide ranges sorted_heap wins on buffer hits due to physical
+sort order (sequential I/O vs random index lookups).
 
 ## Known Limitations
 
@@ -95,14 +115,32 @@ Basic `sorted_heap` AM that delegates everything to heap.
   (preserving scan pruning). INSERT into an uncovered page invalidates
   scan pruning until next compact.
 - `sorted_heap_compact()` acquires AccessExclusiveLock — blocks all
-  concurrent reads and writes.
+  concurrent reads and writes. Use `sorted_heap_compact_online()` for
+  non-blocking compaction.
 - `heap_setscanlimits()` only supports contiguous block ranges.
   Non-contiguous pruning handled per-block in ExecCustomScan (still reads
   pages, but skips tuple processing).
 
+### Phase 6 — Production Hardening
+- GUC `sorted_heap.enable_scan_pruning` (default on)
+- Timestamp/date PK support in zone map
+- INSERT-after-compact zone map updates
+- EXPLAIN ANALYZE counters (Scanned Blocks, Pruned Blocks)
+- Shared memory scan statistics (`sorted_heap_scan_stats()`)
+
+### Phase 7 — Online Compact
+- `sorted_heap_compact_online(regclass)` — PROCEDURE (use with CALL)
+- Trigger-based change capture (pg_repack-style)
+- Phase 1: UNLOGGED log table + AFTER ROW trigger (committed mid-call)
+- Phase 2: Index scan in PK order → bulk copy to new table
+  (ShareUpdateExclusiveLock — concurrent reads and writes allowed)
+- Phase 3: Replay log entries, up to 10 convergence passes
+- AccessExclusiveLock only for brief final filenode swap
+- PK→TID hash table for O(1) replay lookups
+- Zone map rebuilt on new table before swap
+
 ## Possible Future Work
 
-- Online compact (pg_repack-style) to avoid AccessExclusiveLock
 - Multi-column zone map for composite PK pruning
 - Zone map support for text, uuid types
 - Merge multiple sorted runs without full CLUSTER rewrite
