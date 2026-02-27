@@ -228,6 +228,10 @@ sorted_heap_get_relinfo(Relation rel)
 		info->zm_loaded = false;
 		info->zm_pk_typid = InvalidOid;
 		info->zm_nentries = 0;
+		info->zm_overflow = NULL;
+		info->zm_overflow_nentries = 0;
+		info->zm_total_entries = 0;
+		info->zm_overflow_npages = 0;
 	}
 
 	if (!info->pk_probed)
@@ -359,6 +363,13 @@ sorted_heap_relcache_callback(Datum arg, Oid relid)
 		{
 			info->pk_probed = false;
 			info->zm_loaded = false;
+			if (info->zm_overflow)
+			{
+				pfree(info->zm_overflow);
+				info->zm_overflow = NULL;
+			}
+			info->zm_overflow_nentries = 0;
+			info->zm_total_entries = 0;
 		}
 	}
 	else
@@ -372,6 +383,13 @@ sorted_heap_relcache_callback(Datum arg, Oid relid)
 		{
 			info->pk_probed = false;
 			info->zm_loaded = false;
+			if (info->zm_overflow)
+			{
+				pfree(info->zm_overflow);
+				info->zm_overflow = NULL;
+			}
+			info->zm_overflow_nentries = 0;
+			info->zm_total_entries = 0;
 		}
 	}
 }
@@ -382,8 +400,17 @@ sorted_heap_relcache_callback(Datum arg, Oid relid)
 static void
 sorted_heap_relinfo_invalidate(Oid relid)
 {
+	SortedHeapRelInfo *info;
+
 	if (sorted_heap_relinfo_hash == NULL)
 		return;
+
+	info = hash_search(sorted_heap_relinfo_hash, &relid, HASH_FIND, NULL);
+	if (info != NULL && info->zm_overflow != NULL)
+	{
+		pfree(info->zm_overflow);
+		info->zm_overflow = NULL;
+	}
 
 	hash_search(sorted_heap_relinfo_hash, &relid, HASH_REMOVE, NULL);
 }
@@ -413,17 +440,96 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 		meta->shm_version >= 3 && meta->shm_zonemap_nentries > 0)
 	{
 		uint16	n = Min(meta->shm_zonemap_nentries, SORTED_HEAP_ZONEMAP_MAX);
+		uint16	overflow_npages = 0;
 
 		info->zm_nentries = n;
 		memcpy(info->zm_entries, meta->shm_zonemap,
 			   n * sizeof(SortedHeapZoneMapEntry));
 		info->zm_scan_valid =
 			(meta->shm_flags & SHM_FLAG_ZONEMAP_VALID) != 0;
+
+		/* Read overflow page count (v4+ only) */
+		if (meta->shm_version >= 4)
+			overflow_npages = meta->shm_overflow_npages;
+
+		info->zm_overflow_npages = overflow_npages;
+		info->zm_total_entries = n;
+
+		/* Read overflow pages if present */
+		if (overflow_npages > 0)
+		{
+			BlockNumber	ovfl_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+			uint32	total_overflow = 0;
+			uint32	max_overflow;
+			int		p;
+
+			max_overflow = (uint32) overflow_npages *
+				SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+
+			/* Copy block numbers while we still hold the lock */
+			memcpy(ovfl_blocks, meta->shm_overflow_blocks,
+				   overflow_npages * sizeof(BlockNumber));
+
+			/* Release meta page lock before reading overflow pages */
+			UnlockReleaseBuffer(metabuf);
+
+			/* Free old overflow cache */
+			if (info->zm_overflow)
+			{
+				pfree(info->zm_overflow);
+				info->zm_overflow = NULL;
+			}
+
+			info->zm_overflow = (SortedHeapZoneMapEntry *)
+				MemoryContextAllocZero(TopMemoryContext,
+									   max_overflow *
+									   sizeof(SortedHeapZoneMapEntry));
+
+			for (p = 0; p < overflow_npages; p++)
+			{
+				Buffer		ovfl_buf;
+				Page		ovfl_page;
+				SortedHeapOverflowPageData *ovfl;
+
+				if (ovfl_blocks[p] == InvalidBlockNumber)
+					break;
+
+				ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+											  ovfl_blocks[p], RBM_NORMAL,
+											  NULL);
+				LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
+				ovfl_page = BufferGetPage(ovfl_buf);
+				ovfl = (SortedHeapOverflowPageData *)
+					PageGetSpecialPointer(ovfl_page);
+
+				if (ovfl->shmo_magic == SORTED_HEAP_MAGIC &&
+					ovfl->shmo_nentries > 0)
+				{
+					uint16 ne = Min(ovfl->shmo_nentries,
+									SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE);
+
+					memcpy(&info->zm_overflow[total_overflow],
+						   ovfl->shmo_entries,
+						   ne * sizeof(SortedHeapZoneMapEntry));
+					total_overflow += ne;
+				}
+
+				UnlockReleaseBuffer(ovfl_buf);
+			}
+
+			info->zm_overflow_nentries = total_overflow;
+			info->zm_total_entries = n + total_overflow;
+			info->zm_loaded = true;
+			return;		/* already released metabuf */
+		}
 	}
 	else
 	{
 		info->zm_nentries = 0;
 		info->zm_scan_valid = false;
+		info->zm_overflow_nentries = 0;
+		info->zm_total_entries = 0;
+		info->zm_overflow_npages = 0;
 	}
 
 	info->zm_loaded = true;
@@ -475,21 +581,33 @@ static void
 sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 									 AttrNumber pk_attnum)
 {
-	SortedHeapZoneMapEntry entries[SORTED_HEAP_ZONEMAP_MAX];
-	uint16			nentries = 0;
+	SortedHeapZoneMapEntry *entries;
+	uint32			nentries = 0;
+	uint32			max_entries;
 	TableScanDesc	scan;
 	TupleTableSlot *slot;
 	Buffer			metabuf;
 	Page			metapage;
-	GenericXLogState *state;
+	GenericXLogState *gxlog_state;
 	SortedHeapMetaPageData *meta;
+	uint16			meta_nentries;
+	uint16			overflow_npages = 0;
+	BlockNumber		overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
 
-	/* Only integer PK types get zone maps */
-	if (pk_typid != INT2OID && pk_typid != INT4OID && pk_typid != INT8OID)
+	/* Only supported PK types get zone maps */
+	if (!sorted_heap_key_to_int64(Int32GetDatum(0), pk_typid, &(int64){0}))
 		return;
 
-	/* Initialize entries to sentinel */
-	for (int i = 0; i < SORTED_HEAP_ZONEMAP_MAX; i++)
+	/* Compute max capacity: meta page + max overflow pages */
+	max_entries = SORTED_HEAP_ZONEMAP_MAX +
+		(uint32) SORTED_HEAP_OVERFLOW_MAX_PAGES *
+		SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+
+	entries = (SortedHeapZoneMapEntry *)
+		palloc(max_entries * sizeof(SortedHeapZoneMapEntry));
+
+	/* Initialize to sentinel */
+	for (uint32 i = 0; i < max_entries; i++)
 	{
 		entries[i].zme_min = PG_INT64_MAX;
 		entries[i].zme_max = PG_INT64_MIN;
@@ -512,8 +630,8 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 		if (blk < 1)
 			continue;			/* skip meta page */
 		zmidx = blk - 1;
-		if (zmidx >= SORTED_HEAP_ZONEMAP_MAX)
-			continue;			/* beyond zone map capacity */
+		if (zmidx >= max_entries)
+			continue;			/* beyond total capacity */
 
 		val = slot_getattr(slot, pk_attnum, &isnull);
 		if (isnull)
@@ -542,22 +660,92 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	table_endscan(scan);
 	ExecDropSingleTupleTableSlot(slot);
 
+	/* Split entries: first 500 go to meta page, rest to overflow pages */
+	meta_nentries = Min(nentries, SORTED_HEAP_ZONEMAP_MAX);
+
+	/* Initialize overflow block numbers */
+	for (int i = 0; i < SORTED_HEAP_OVERFLOW_MAX_PAGES; i++)
+		overflow_blocks[i] = InvalidBlockNumber;
+
+	/* Create overflow pages if needed */
+	if (nentries > SORTED_HEAP_ZONEMAP_MAX)
+	{
+		uint32		overflow_entries = nentries - SORTED_HEAP_ZONEMAP_MAX;
+		SMgrRelation srel = RelationGetSmgr(rel);
+		BlockNumber	next_blk = smgrnblocks(srel, MAIN_FORKNUM);
+		RelFileLocator rlocator = rel->rd_locator;
+
+		overflow_npages =
+			(overflow_entries + SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE - 1) /
+			SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+
+		if (overflow_npages > SORTED_HEAP_OVERFLOW_MAX_PAGES)
+			overflow_npages = SORTED_HEAP_OVERFLOW_MAX_PAGES;
+
+		for (int p = 0; p < overflow_npages; p++)
+		{
+			PGAlignedBlock	aligned_buf;
+			Page			ovfl_page;
+			SortedHeapOverflowPageData *ovfl;
+			uint32			start = SORTED_HEAP_ZONEMAP_MAX +
+				(uint32) p * SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+			uint32			count = Min(SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE,
+										nentries - start);
+
+			ovfl_page = (Page) aligned_buf.data;
+			PageInit(ovfl_page, BLCKSZ,
+					 sizeof(SortedHeapOverflowPageData));
+
+			/* Mark page as full so heap never uses it */
+			((PageHeader) ovfl_page)->pd_lower =
+				((PageHeader) ovfl_page)->pd_upper;
+
+			ovfl = (SortedHeapOverflowPageData *)
+				PageGetSpecialPointer(ovfl_page);
+			ovfl->shmo_magic = SORTED_HEAP_MAGIC;
+			ovfl->shmo_nentries = count;
+			ovfl->shmo_page_index = p;
+			memcpy(ovfl->shmo_entries, &entries[start],
+				   count * sizeof(SortedHeapZoneMapEntry));
+
+			/* WAL-log, then checksum, then write */
+			log_newpage(&rlocator, MAIN_FORKNUM, next_blk,
+						ovfl_page, true);
+			PageSetChecksumInplace(ovfl_page, next_blk);
+			smgrextend(srel, MAIN_FORKNUM, next_blk,
+					   aligned_buf.data, false);
+
+			overflow_blocks[p] = next_blk;
+			next_blk++;
+		}
+	}
+
 	/* Write zone map to meta page */
 	metabuf = ReadBufferExtended(rel, MAIN_FORKNUM, SORTED_HEAP_META_BLOCK,
 								 RBM_NORMAL, NULL);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
-	state = GenericXLogStart(rel);
-	metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+	gxlog_state = GenericXLogStart(rel);
+	metapage = GenericXLogRegisterBuffer(gxlog_state, metabuf, 0);
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
-	meta->shm_zonemap_nentries = nentries;
+	meta->shm_zonemap_nentries = meta_nentries;
 	meta->shm_zonemap_pk_typid = pk_typid;
 	meta->shm_flags |= SHM_FLAG_ZONEMAP_VALID;
 	memcpy(meta->shm_zonemap, entries,
-		   nentries * sizeof(SortedHeapZoneMapEntry));
+		   meta_nentries * sizeof(SortedHeapZoneMapEntry));
 
-	GenericXLogFinish(state);
+	/* Write overflow metadata (v4+) */
+	if (meta->shm_version >= 4)
+	{
+		meta->shm_overflow_npages = overflow_npages;
+		memcpy(meta->shm_overflow_blocks, overflow_blocks,
+			   sizeof(overflow_blocks));
+	}
+
+	GenericXLogFinish(gxlog_state);
 	UnlockReleaseBuffer(metabuf);
+
+	pfree(entries);
 
 	/* Invalidate relinfo cache so next access re-reads */
 	sorted_heap_relinfo_invalidate(RelationGetRelid(rel));
@@ -595,7 +783,7 @@ sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 	meta->shm_flags = 0;
 	meta->shm_pk_index_oid = InvalidOid;
 	meta->shm_zonemap_nentries = 0;
-	meta->shm_zonemap_reserved = 0;
+	meta->shm_overflow_npages = 0;
 	meta->shm_zonemap_pk_typid = InvalidOid;
 
 	/* Initialize zone map entries to sentinel */
@@ -604,6 +792,10 @@ sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 		meta->shm_zonemap[i].zme_min = PG_INT64_MAX;
 		meta->shm_zonemap[i].zme_max = PG_INT64_MIN;
 	}
+
+	/* Initialize overflow block pointers */
+	for (int i = 0; i < SORTED_HEAP_OVERFLOW_MAX_PAGES; i++)
+		meta->shm_overflow_blocks[i] = InvalidBlockNumber;
 
 	/* WAL-log first (sets LSN on page), then checksum, then write */
 	if (need_wal)
@@ -855,11 +1047,14 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u flags=%u",
+	appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u flags=%u"
+					 " overflow_pages=%u",
 					 meta->shm_version,
 					 (unsigned) meta->shm_zonemap_nentries,
 					 (unsigned) meta->shm_zonemap_pk_typid,
-					 meta->shm_flags);
+					 meta->shm_flags,
+					 (meta->shm_version >= 4) ?
+					 (unsigned) meta->shm_overflow_npages : 0);
 
 	/* Show first few entries for debugging */
 	show = Min(meta->shm_zonemap_nentries, 5);

@@ -185,7 +185,7 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Load relinfo and check zone map validity */
 	info = sorted_heap_get_relinfo(table_rel);
-	if (!info->zm_usable || !info->zm_loaded || info->zm_nentries == 0)
+	if (!info->zm_usable || !info->zm_loaded || info->zm_total_entries == 0)
 	{
 		table_close(table_rel, NoLock);
 		return;
@@ -424,11 +424,20 @@ sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 {
 	BlockNumber		first_match = total_blocks;
 	BlockNumber		last_match = 0;
-	uint16			i;
+	uint32			i;
+	uint32			zm_entries_count = info->zm_total_entries;
+	BlockNumber		data_blocks;
 
-	for (i = 0; i < info->zm_nentries; i++)
+	/*
+	 * Compute effective data page count by excluding meta page and
+	 * overflow pages from total_blocks.
+	 */
+	data_blocks = (total_blocks > 1 + info->zm_overflow_npages) ?
+		total_blocks - 1 - info->zm_overflow_npages : 0;
+
+	for (i = 0; i < zm_entries_count; i++)
 	{
-		SortedHeapZoneMapEntry *e = &info->zm_entries[i];
+		SortedHeapZoneMapEntry *e = sorted_heap_get_zm_entry(info, i);
 
 		if (e->zme_min == PG_INT64_MAX)
 			continue;			/* empty page */
@@ -442,26 +451,25 @@ sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 	}
 
 	/*
-	 * Handle pages beyond zone map capacity.  These have unknown content,
-	 * so we must include them unless the upper bound falls entirely within
-	 * the covered range.  After COMPACT the data is sorted, so uncovered
-	 * pages hold values above the last covered entry's max — but we don't
-	 * rely on that invariant here to stay safe for incremental COPYs.
+	 * Handle data pages beyond zone map capacity.  These have unknown
+	 * content, so we must include them unless the upper bound falls
+	 * entirely within the covered range.
 	 */
-	if (info->zm_nentries < total_blocks - 1)
+	if (zm_entries_count < data_blocks)
 	{
 		bool		uncovered_safe_to_skip = false;
-		BlockNumber first_uncovered = (BlockNumber) info->zm_nentries + 1;
+		BlockNumber first_uncovered = (BlockNumber) zm_entries_count + 1;
 
 		/*
 		 * Optimisation for sorted data: if the last covered entry has a
 		 * finite max, and the query's upper bound is at or below that max,
 		 * uncovered pages (which hold higher values) can't match.
 		 */
-		if (bounds->has_hi && info->zm_nentries > 0)
+		if (bounds->has_hi && zm_entries_count > 0)
 		{
-			int64	last_max =
-				info->zm_entries[info->zm_nentries - 1].zme_max;
+			SortedHeapZoneMapEntry *last_e =
+				sorted_heap_get_zm_entry(info, zm_entries_count - 1);
+			int64	last_max = last_e->zme_max;
 
 			if (last_max != PG_INT64_MAX &&
 				(bounds->hi_inclusive ? bounds->hi <= last_max
@@ -471,11 +479,13 @@ sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 
 		if (!uncovered_safe_to_skip)
 		{
-			/* Must scan all uncovered pages */
+			/* Must scan all uncovered data pages (but not overflow pages) */
+			BlockNumber last_data_block = data_blocks;
+
 			if (first_uncovered < first_match)
 				first_match = first_uncovered;
-			if (total_blocks - 1 > last_match)
-				last_match = total_blocks - 1;
+			if (last_data_block > last_match)
+				last_match = last_data_block;
 		}
 	}
 
@@ -651,10 +661,10 @@ sorted_heap_exec_custom_scan(CustomScanState *node)
 		}
 
 		/* Per-block zone map check for fine-grained pruning */
-		if (blk >= 1 && (blk - 1) < shstate->relinfo->zm_nentries)
+		if (blk >= 1 && (blk - 1) < shstate->relinfo->zm_total_entries)
 		{
 			SortedHeapZoneMapEntry *e =
-				&shstate->relinfo->zm_entries[blk - 1];
+				sorted_heap_get_zm_entry(shstate->relinfo, blk - 1);
 
 			if (!sorted_heap_zone_overlaps(e, &shstate->bounds))
 			{
