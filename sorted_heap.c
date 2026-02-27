@@ -173,6 +173,13 @@ sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out)
 		case INT8OID:
 			*out = DatumGetInt64(value);
 			return true;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			*out = DatumGetInt64(value);	/* int64 microseconds */
+			return true;
+		case DATEOID:
+			*out = (int64) DatumGetInt32(value);	/* DateADT is int32 */
+			return true;
 		default:
 			return false;
 	}
@@ -292,7 +299,10 @@ sorted_heap_get_relinfo(Relation rel)
 				info->zm_pk_typid = first_col_typid;
 				info->zm_usable = (first_col_typid == INT2OID ||
 								   first_col_typid == INT4OID ||
-								   first_col_typid == INT8OID);
+								   first_col_typid == INT8OID ||
+								   first_col_typid == TIMESTAMPOID ||
+								   first_col_typid == TIMESTAMPTZOID ||
+								   first_col_typid == DATEOID);
 			}
 			else
 			{
