@@ -973,10 +973,14 @@ sorted_heap_index_validate_scan(Relation tableRelation,
 }
 
 /* ----------------------------------------------------------------
- *  tuple_insert — invalidate zone map valid flag
+ *  tuple_insert — incremental zone map update
  *
- *  Delegates to heap, then clears SHM_FLAG_ZONEMAP_VALID on the
- *  first single-row INSERT after a COMPACT/REBUILD cycle.
+ *  Delegates to heap, then either:
+ *  (a) updates the zone map entry in-place if the tuple landed in
+ *      a block already covered by the zone map, preserving scan
+ *      pruning validity; or
+ *  (b) clears SHM_FLAG_ZONEMAP_VALID if the tuple landed outside
+ *      zone map coverage (new/uncovered page).
  * ---------------------------------------------------------------- */
 static void
 sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
@@ -989,33 +993,100 @@ sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 	/* Let heap do the actual insert */
 	heap->tuple_insert(rel, slot, cid, options, bistate);
 
-	/* Clear zone map valid flag on first INSERT after compact */
 	info = sorted_heap_get_relinfo(rel);
-	if (info->zm_scan_valid)
+	if (info->zm_scan_valid && info->zm_usable)
 	{
-		Buffer				metabuf;
-		Page				metapage;
-		SortedHeapMetaPageData *meta;
+		BlockNumber		blk = ItemPointerGetBlockNumber(&slot->tts_tid);
+		uint32			zmidx = (blk >= 1) ? (blk - 1) : 0;
 
-		metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
-									 SORTED_HEAP_META_BLOCK,
-									 RBM_NORMAL, NULL);
-		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-		metapage = BufferGetPage(metabuf);
-		meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
-
-		if (meta->shm_flags & SHM_FLAG_ZONEMAP_VALID)
+		if (blk >= 1 && zmidx < info->zm_nentries)
 		{
-			GenericXLogState *state = GenericXLogStart(rel);
+			/*
+			 * Block within zone map coverage — update entry in-place.
+			 * Extract PK value and widen min/max if needed.
+			 */
+			Datum		val;
+			bool		isnull;
+			int64		key;
 
-			metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
-			meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
-			meta->shm_flags &= ~SHM_FLAG_ZONEMAP_VALID;
-			GenericXLogFinish(state);
+			slot_getallattrs(slot);
+			val = slot_getattr(slot, info->attNums[0], &isnull);
+
+			if (!isnull && sorted_heap_key_to_int64(val, info->zm_pk_typid, &key))
+			{
+				SortedHeapZoneMapEntry *cached = &info->zm_entries[zmidx];
+				bool		need_update = false;
+
+				if (key < cached->zme_min)
+				{
+					cached->zme_min = key;
+					need_update = true;
+				}
+				if (key > cached->zme_max)
+				{
+					cached->zme_max = key;
+					need_update = true;
+				}
+
+				if (need_update)
+				{
+					/* Write updated entry to meta page */
+					Buffer				metabuf;
+					Page				metapage;
+					GenericXLogState   *state;
+					SortedHeapMetaPageData *meta;
+
+					metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
+												 SORTED_HEAP_META_BLOCK,
+												 RBM_NORMAL, NULL);
+					LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+
+					state = GenericXLogStart(rel);
+					metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+					meta = (SortedHeapMetaPageData *)
+						PageGetSpecialPointer(metapage);
+
+					meta->shm_zonemap[zmidx].zme_min = cached->zme_min;
+					meta->shm_zonemap[zmidx].zme_max = cached->zme_max;
+
+					GenericXLogFinish(state);
+					UnlockReleaseBuffer(metabuf);
+				}
+			}
+			/* Zone map stays valid — pruning preserved */
 		}
+		else
+		{
+			/*
+			 * Block outside zone map coverage — invalidate.
+			 * Conservative: can't prune without zone map data.
+			 */
+			Buffer				metabuf;
+			Page				metapage;
+			SortedHeapMetaPageData *meta;
 
-		UnlockReleaseBuffer(metabuf);
-		info->zm_scan_valid = false;
+			metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
+										 SORTED_HEAP_META_BLOCK,
+										 RBM_NORMAL, NULL);
+			LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+			metapage = BufferGetPage(metabuf);
+			meta = (SortedHeapMetaPageData *)
+				PageGetSpecialPointer(metapage);
+
+			if (meta->shm_flags & SHM_FLAG_ZONEMAP_VALID)
+			{
+				GenericXLogState *state = GenericXLogStart(rel);
+
+				metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
+				meta = (SortedHeapMetaPageData *)
+					PageGetSpecialPointer(metapage);
+				meta->shm_flags &= ~SHM_FLAG_ZONEMAP_VALID;
+				GenericXLogFinish(state);
+			}
+
+			UnlockReleaseBuffer(metabuf);
+			info->zm_scan_valid = false;
+		}
 	}
 }
 
