@@ -53,8 +53,7 @@ static void sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 static void sorted_heap_relinfo_invalidate(Oid relid);
 static void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
 static void sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info);
-static void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
-												 AttrNumber pk_attnum);
+/* sorted_heap_rebuild_zonemap_internal is declared in sorted_heap.h (non-static) */
 
 static void sorted_heap_relation_set_new_filelocator(Relation rel,
 													 const RelFileLocator *rlocator,
@@ -577,7 +576,7 @@ sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info)
  *  relation_copy_for_cluster (CLUSTER path) and the standalone
  *  sorted_heap_rebuild_zonemap() SQL function.
  * ---------------------------------------------------------------- */
-static void
+void
 sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 									 AttrNumber pk_attnum)
 {

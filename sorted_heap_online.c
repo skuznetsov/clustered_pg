@@ -1,0 +1,600 @@
+/*
+ * sorted_heap_online.c
+ *
+ * Online (non-blocking) compaction for sorted_heap tables.
+ *
+ * Uses a pg_repack-style trigger-based approach:
+ *   Phase 1: Create log table + AFTER trigger to capture concurrent DML
+ *   Phase 2: Copy old table → new table in PK order (ShareUpdateExclusiveLock)
+ *   Phase 3: Replay captured changes, brief AccessExclusiveLock for swap
+ *
+ * During phases 1-2, concurrent SELECTs and DML proceed normally.
+ * AccessExclusiveLock is held only for the final filenode swap.
+ */
+#include "postgres.h"
+
+#include "access/heapam.h"
+#include "access/multixact.h"
+#include "access/tableam.h"
+#include "access/xact.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_am.h"
+#include "commands/cluster.h"
+#include "commands/defrem.h"
+#include "commands/trigger.h"
+#include "executor/spi.h"
+#include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "storage/lmgr.h"
+#include "utils/builtins.h"
+#include "utils/hsearch.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+
+#include "sorted_heap.h"
+
+/* ----------------------------------------------------------------
+ *  PK → TID hash table for fast lookups in new table
+ * ---------------------------------------------------------------- */
+typedef struct PKTidEntry
+{
+	int64			pk_val;		/* hash key */
+	ItemPointerData tid;		/* location in new table */
+	char			status;		/* STATUS_IN_USE */
+} PKTidEntry;
+
+#define SH_COMPACT_MAX_PASSES	10
+
+/* ----------------------------------------------------------------
+ *  Log table + trigger management
+ * ---------------------------------------------------------------- */
+
+/*
+ * Create the log table and AFTER trigger.  Commits the DDL so concurrent
+ * backends can see the trigger immediately.
+ *
+ * Returns the log table's schema-qualified name (palloc'd).
+ */
+static char *
+create_log_infrastructure(Oid relid, const char *relname,
+						  AttrNumber pk_attnum)
+{
+	StringInfoData sql;
+	char	   *log_table_name;
+
+	/* Generate unique log table name in pg_temp to avoid schema issues */
+	log_table_name = psprintf("_sh_compact_log_%u", relid);
+
+	initStringInfo(&sql);
+
+	/* Create unlogged log table for minimal WAL overhead */
+	appendStringInfo(&sql,
+					 "CREATE UNLOGGED TABLE %s ("
+					 "  id bigserial,"
+					 "  action char(1) NOT NULL,"
+					 "  pk_val int8 NOT NULL"
+					 ")",
+					 log_table_name);
+	SPI_execute(sql.data, false, 0);
+	resetStringInfo(&sql);
+
+	/* Index on id for efficient ordered reads */
+	appendStringInfo(&sql,
+					 "CREATE INDEX ON %s (id)",
+					 log_table_name);
+	SPI_execute(sql.data, false, 0);
+	resetStringInfo(&sql);
+
+	/* Install AFTER trigger to capture concurrent DML */
+	appendStringInfo(&sql,
+					 "CREATE TRIGGER _sh_compact_trigger "
+					 "AFTER INSERT OR UPDATE OR DELETE ON %s "
+					 "FOR EACH ROW EXECUTE FUNCTION "
+					 "sorted_heap_compact_trigger('%s', '%d')",
+					 get_rel_name(relid),
+					 log_table_name,
+					 pk_attnum);
+	SPI_execute(sql.data, false, 0);
+	pfree(sql.data);
+
+	/* Commit so trigger is visible to other backends */
+	SPI_commit();
+	SPI_start_transaction();
+
+	return log_table_name;
+}
+
+/*
+ * Drop the log table and trigger.  Best-effort cleanup.
+ */
+static void
+drop_log_infrastructure(Oid relid, const char *log_table_name)
+{
+	StringInfoData sql;
+
+	initStringInfo(&sql);
+
+	/* Drop trigger first */
+	appendStringInfo(&sql,
+					 "DROP TRIGGER IF EXISTS _sh_compact_trigger ON %s",
+					 get_rel_name(relid));
+	SPI_execute(sql.data, false, 0);
+	resetStringInfo(&sql);
+
+	/* Drop log table */
+	appendStringInfo(&sql,
+					 "DROP TABLE IF EXISTS %s",
+					 log_table_name);
+	SPI_execute(sql.data, false, 0);
+
+	pfree(sql.data);
+}
+
+/* ----------------------------------------------------------------
+ *  Trigger function: capture DML into log table
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(sorted_heap_compact_trigger);
+
+Datum
+sorted_heap_compact_trigger(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	char	   *log_table_name;
+	AttrNumber	pk_attnum;
+	HeapTuple	tuple;
+	Datum		pk_datum;
+	bool		isnull;
+	int64		pk_val;
+	Oid			pk_typid;
+	char		action;
+	StringInfoData sql;
+	Oid			argtypes[2];
+	Datum		values[2];
+	char		nulls[2];
+
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		elog(ERROR, "sorted_heap_compact_trigger: not called by trigger manager");
+
+	if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
+		elog(ERROR, "sorted_heap_compact_trigger: must be AFTER trigger");
+
+	if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+		elog(ERROR, "sorted_heap_compact_trigger: must be FOR EACH ROW");
+
+	/* Parse trigger arguments */
+	if (trigdata->tg_trigger->tgnargs != 2)
+		elog(ERROR, "sorted_heap_compact_trigger: expected 2 args (log_table, pk_attnum)");
+
+	log_table_name = trigdata->tg_trigger->tgargs[0];
+	pk_attnum = atoi(trigdata->tg_trigger->tgargs[1]);
+
+	/* Determine action */
+	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		action = 'I';
+	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		action = 'U';
+	else
+		action = 'D';
+
+	/* Get the affected tuple */
+	if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		tuple = trigdata->tg_trigtuple;
+	else
+		tuple = trigdata->tg_newtuple;
+
+	/* Extract PK value and convert to int64 */
+	pk_datum = heap_getattr(tuple, pk_attnum,
+							trigdata->tg_relation->rd_att, &isnull);
+	if (isnull)
+		elog(ERROR, "sorted_heap_compact_trigger: PK column is NULL");
+
+	/* Get PK type from tuple descriptor */
+	pk_typid = TupleDescAttr(trigdata->tg_relation->rd_att,
+							 pk_attnum - 1)->atttypid;
+	if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &pk_val))
+		elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
+			 pk_typid);
+
+	/* Insert into log table via SPI */
+	SPI_connect();
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql,
+					 "INSERT INTO %s (action, pk_val) VALUES ($1, $2)",
+					 log_table_name);
+
+	argtypes[0] = CHAROID;
+	argtypes[1] = INT8OID;
+	values[0] = CharGetDatum(action);
+	values[1] = Int64GetDatum(pk_val);
+	nulls[0] = ' ';
+	nulls[1] = ' ';
+
+	SPI_execute_with_args(sql.data, 2, argtypes, values, nulls, false, 0);
+	pfree(sql.data);
+
+	SPI_finish();
+
+	return PointerGetDatum(NULL);
+}
+
+/* ----------------------------------------------------------------
+ *  Copy phase: index scan in PK order → new table
+ * ---------------------------------------------------------------- */
+static double
+sorted_heap_copy_sorted(Relation old_rel, Relation new_rel,
+						Relation pk_index, Snapshot snapshot,
+						HTAB *pk_tid_map, AttrNumber pk_attnum,
+						Oid pk_typid)
+{
+	IndexScanDesc iscan;
+	TupleTableSlot *slot;
+	double		ntuples = 0;
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	iscan = index_beginscan(old_rel, pk_index, snapshot, NULL, 0, 0);
+	index_rescan(iscan, NULL, 0, NULL, 0);
+
+	slot = table_slot_create(old_rel, NULL);
+
+	while (index_getnext_slot(iscan, ForwardScanDirection, slot))
+	{
+		Datum		val;
+		bool		isnull;
+		int64		key;
+
+		/* Insert into new table via heap AM (skip zone map updates) */
+		heap->tuple_insert(new_rel, slot, GetCurrentCommandId(true),
+						   0, NULL);
+
+		/* Track PK → TID mapping for replay */
+		slot_getallattrs(slot);
+		val = slot_getattr(slot, pk_attnum, &isnull);
+		if (!isnull && sorted_heap_key_to_int64(val, pk_typid, &key))
+		{
+			PKTidEntry *entry;
+			bool		found;
+
+			entry = hash_search(pk_tid_map, &key, HASH_ENTER, &found);
+			entry->pk_val = key;
+			ItemPointerCopy(&slot->tts_tid, &entry->tid);
+		}
+
+		ntuples++;
+
+		/* Allow interrupts for long copies */
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	index_endscan(iscan);
+
+	return ntuples;
+}
+
+/* ----------------------------------------------------------------
+ *  Replay phase: apply log entries to new table
+ * ---------------------------------------------------------------- */
+static int64
+sorted_heap_replay_log(Relation old_rel, Relation new_rel,
+					   const char *log_table_name,
+					   int64 *last_processed_id,
+					   HTAB *pk_tid_map,
+					   AttrNumber pk_attnum, Oid pk_typid,
+					   Oid pk_index_oid)
+{
+	StringInfoData sql;
+	int64		processed = 0;
+	int			ret;
+	uint64		i;
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql,
+					 "SELECT id, action, pk_val FROM %s "
+					 "WHERE id > %lld ORDER BY id",
+					 log_table_name,
+					 (long long) *last_processed_id);
+
+	ret = SPI_execute(sql.data, true, 0);
+	pfree(sql.data);
+
+	if (ret != SPI_OK_SELECT)
+		elog(ERROR, "sorted_heap_replay_log: SPI_execute failed: %d", ret);
+
+	for (i = 0; i < SPI_processed; i++)
+	{
+		HeapTuple	spi_tuple = SPI_tuptable->vals[i];
+		TupleDesc	spi_desc = SPI_tuptable->tupdesc;
+		bool		isnull;
+		int64		log_id;
+		char		action;
+		int64		pk_val;
+
+		log_id = DatumGetInt64(SPI_getbinval(spi_tuple, spi_desc, 1, &isnull));
+		action = DatumGetChar(SPI_getbinval(spi_tuple, spi_desc, 2, &isnull));
+		pk_val = DatumGetInt64(SPI_getbinval(spi_tuple, spi_desc, 3, &isnull));
+
+		/* For DELETE or UPDATE: remove old version from new table */
+		if (action == 'D' || action == 'U')
+		{
+			PKTidEntry *entry;
+
+			entry = hash_search(pk_tid_map, &pk_val, HASH_FIND, NULL);
+			if (entry != NULL)
+			{
+				simple_heap_delete(new_rel, &entry->tid);
+				hash_search(pk_tid_map, &pk_val, HASH_REMOVE, NULL);
+			}
+		}
+
+		/* For INSERT or UPDATE: copy current version from old table */
+		if (action == 'I' || action == 'U')
+		{
+			Relation	pk_index;
+			IndexScanDesc iscan;
+			ScanKeyData skey[1];
+			TupleTableSlot *slot;
+			Datum		pk_datum;
+
+			/* Build scan key for the PK value */
+			pk_datum = Int64GetDatum(pk_val);
+
+			/* Convert int64 back to native PK type for index scan */
+			switch (pk_typid)
+			{
+				case INT2OID:
+					pk_datum = Int16GetDatum((int16) pk_val);
+					break;
+				case INT4OID:
+					pk_datum = Int32GetDatum((int32) pk_val);
+					break;
+				case INT8OID:
+					pk_datum = Int64GetDatum(pk_val);
+					break;
+				case TIMESTAMPOID:
+				case TIMESTAMPTZOID:
+					pk_datum = Int64GetDatum(pk_val);
+					break;
+				case DATEOID:
+					pk_datum = Int32GetDatum((int32) pk_val);
+					break;
+				default:
+					elog(ERROR, "sorted_heap_replay_log: unsupported PK type %u",
+						 pk_typid);
+			}
+
+			{
+				Oid		opclass = GetDefaultOpClass(pk_typid, BTREE_AM_OID);
+				Oid		opfamily = get_opclass_family(opclass);
+				Oid		eq_opr = get_opfamily_member(opfamily, pk_typid,
+													 pk_typid,
+													 BTEqualStrategyNumber);
+				RegProcedure eq_proc = get_opcode(eq_opr);
+
+				ScanKeyInit(&skey[0],
+							1,		/* first index column */
+							BTEqualStrategyNumber,
+							eq_proc,
+							pk_datum);
+			}
+
+			pk_index = index_open(pk_index_oid, AccessShareLock);
+			iscan = index_beginscan(old_rel, pk_index,
+									GetActiveSnapshot(), NULL, 1, 0);
+			index_rescan(iscan, skey, 1, NULL, 0);
+
+			slot = table_slot_create(old_rel, NULL);
+
+			if (index_getnext_slot(iscan, ForwardScanDirection, slot))
+			{
+				PKTidEntry *entry;
+				bool		found;
+
+				/* Insert into new table */
+				heap->tuple_insert(new_rel, slot,
+								   GetCurrentCommandId(true), 0, NULL);
+
+				/* Update PK→TID map */
+				entry = hash_search(pk_tid_map, &pk_val, HASH_ENTER, &found);
+				entry->pk_val = pk_val;
+				ItemPointerCopy(&slot->tts_tid, &entry->tid);
+			}
+			/* If row not found in old_rel, it was deleted — skip */
+
+			ExecDropSingleTupleTableSlot(slot);
+			index_endscan(iscan);
+			index_close(pk_index, AccessShareLock);
+		}
+
+		*last_processed_id = log_id;
+		processed++;
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	return processed;
+}
+
+/* ----------------------------------------------------------------
+ *  Main entry point: sorted_heap_compact_online(regclass)
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(sorted_heap_compact_online);
+
+Datum
+sorted_heap_compact_online(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	Relation		rel;
+	SortedHeapRelInfo *info;
+	AttrNumber		pk_attnum;
+	Oid				pk_typid;
+	Oid				pk_index_oid;
+	Oid				table_am_oid;
+	char		   *log_table_name = NULL;
+	Oid				new_relid = InvalidOid;
+	HASHCTL			hashctl;
+	HTAB		   *pk_tid_map;
+	int64			last_id = 0;
+	double			ntuples;
+	int				pass;
+
+	/* Phase 1: Validate and collect PK info */
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_tableam != &sorted_heap_am_routine)
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a sorted_heap table",
+						RelationGetRelationName(rel))));
+	}
+
+	info = sorted_heap_get_relinfo(rel);
+	if (!OidIsValid(info->pk_index_oid))
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("\"%s\" has no primary key",
+						RelationGetRelationName(rel))));
+	}
+
+	pk_attnum = info->attNums[0];
+	pk_typid = info->zm_pk_typid;
+	pk_index_oid = info->pk_index_oid;
+	table_am_oid = rel->rd_rel->relam;
+	table_close(rel, AccessShareLock);
+
+	ereport(NOTICE,
+			(errmsg("online compact: starting for \"%s\"",
+					get_rel_name(relid)),
+			 errhint("Concurrent reads and writes are allowed. "
+					 "Brief exclusive lock at the end for swap.")));
+
+	/* Use non-atomic SPI so we can commit DDL mid-function */
+	SPI_connect_ext(SPI_OPT_NONATOMIC);
+
+	PG_TRY();
+	{
+		Relation	new_rel;
+		Relation	pk_index;
+		Snapshot	snapshot;
+
+		/* Phase 1b: Create log infrastructure (commits to make visible) */
+		log_table_name = create_log_infrastructure(relid,
+												   get_rel_name(relid),
+												   pk_attnum);
+
+		/* Phase 1c: Create new heap (same schema as old) */
+		new_relid = make_new_heap(relid, InvalidOid, table_am_oid,
+								  RELPERSISTENCE_PERMANENT,
+								  AccessShareLock);
+
+		/* Initialize PK → TID hash table */
+		memset(&hashctl, 0, sizeof(hashctl));
+		hashctl.keysize = sizeof(int64);
+		hashctl.entrysize = sizeof(PKTidEntry);
+		hashctl.hcxt = CurrentMemoryContext;
+		pk_tid_map = hash_create("pk_tid_map", 1024, &hashctl,
+								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		/* Phase 2: Copy data (ShareUpdateExclusiveLock allows concurrent DML) */
+		rel = table_open(relid, ShareUpdateExclusiveLock);
+		new_rel = table_open(new_relid, AccessExclusiveLock);
+		pk_index = index_open(pk_index_oid, AccessShareLock);
+		snapshot = GetTransactionSnapshot();
+
+		ntuples = sorted_heap_copy_sorted(rel, new_rel, pk_index, snapshot,
+										  pk_tid_map, pk_attnum, pk_typid);
+
+		ereport(NOTICE,
+				(errmsg("online compact: copied %.0f tuples", ntuples)));
+
+		index_close(pk_index, AccessShareLock);
+		table_close(new_rel, NoLock);
+
+		/* Phase 2b: Replay loop until convergence */
+		for (pass = 0; pass < SH_COMPACT_MAX_PASSES; pass++)
+		{
+			int64	replayed;
+
+			new_rel = table_open(new_relid, RowExclusiveLock);
+			replayed = sorted_heap_replay_log(rel, new_rel, log_table_name,
+											  &last_id, pk_tid_map,
+											  pk_attnum, pk_typid,
+											  pk_index_oid);
+			table_close(new_rel, NoLock);
+
+			if (replayed == 0)
+				break;
+
+			ereport(NOTICE,
+					(errmsg("online compact: pass %d replayed %lld changes",
+							pass + 1, (long long) replayed)));
+		}
+
+		/* Release ShareUpdateExclusiveLock before upgrading */
+		table_close(rel, ShareUpdateExclusiveLock);
+
+		/* Phase 3: Final swap under AccessExclusiveLock */
+		rel = table_open(relid, AccessExclusiveLock);
+		new_rel = table_open(new_relid, AccessExclusiveLock);
+
+		/* Final replay: process any last changes */
+		sorted_heap_replay_log(rel, new_rel, log_table_name,
+							   &last_id, pk_tid_map,
+							   pk_attnum, pk_typid, pk_index_oid);
+
+		/* Rebuild zone map on new table */
+		if (info->zm_usable)
+			sorted_heap_rebuild_zonemap_internal(new_rel, pk_typid, pk_attnum);
+
+		table_close(new_rel, NoLock);
+		table_close(rel, NoLock);
+
+		/* Atomic swap of filenodes */
+		finish_heap_swap(relid, new_relid,
+						 false,		/* not system catalog */
+						 false,		/* no toast swap by content */
+						 false,		/* no constraint check */
+						 true,		/* is_internal */
+						 InvalidTransactionId,
+						 InvalidMultiXactId,
+						 RELPERSISTENCE_PERMANENT);
+
+		/* Cleanup: drop trigger and log table */
+		drop_log_infrastructure(relid, log_table_name);
+
+		hash_destroy(pk_tid_map);
+
+		ereport(NOTICE,
+				(errmsg("online compact: completed for \"%s\" (%.0f tuples)",
+						get_rel_name(relid), ntuples)));
+	}
+	PG_CATCH();
+	{
+		/* Best-effort cleanup */
+		if (log_table_name != NULL)
+		{
+			PG_TRY();
+			{
+				drop_log_infrastructure(relid, log_table_name);
+			}
+			PG_CATCH();
+			{
+				/* Ignore cleanup errors */
+			}
+			PG_END_TRY();
+		}
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+	PG_RETURN_VOID();
+}

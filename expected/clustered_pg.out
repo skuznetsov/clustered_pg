@@ -1768,5 +1768,100 @@ SELECT
 (1 row)
 
 DROP TABLE sh6_stats;
+-- ====================================================================
+-- SH7: Online compact (sorted_heap_compact_online)
+-- ====================================================================
+-- Test SH7-1: Basic online compact produces correct row count
+CREATE TABLE sh7_basic(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh7_basic SELECT g, repeat('x', 80) FROM generate_series(1, 500) g;
+-- Scramble order: delete and re-insert some rows
+DELETE FROM sh7_basic WHERE id % 3 = 0;
+INSERT INTO sh7_basic SELECT g, repeat('y', 80) FROM generate_series(501, 700) g;
+SELECT count(*) AS sh7_before_count FROM sh7_basic;
+ sh7_before_count 
+------------------
+              534
+(1 row)
+
+CALL sorted_heap_compact_online('sh7_basic'::regclass);
+NOTICE:  online compact: starting for "sh7_basic"
+HINT:  Concurrent reads and writes are allowed. Brief exclusive lock at the end for swap.
+NOTICE:  online compact: copied 534 tuples
+NOTICE:  online compact: completed for "sh7_basic" (534 tuples)
+SELECT count(*) AS sh7_after_count FROM sh7_basic;
+ sh7_after_count 
+-----------------
+             534
+(1 row)
+
+-- Test SH7-2: Data is sorted after online compact
+SELECT (bool_and(id >= lag_id)) AS sh7_sorted
+FROM (
+    SELECT id, lag(id, 1, 0) OVER (ORDER BY ctid) AS lag_id
+    FROM sh7_basic
+) sub;
+ sh7_sorted 
+------------
+ t
+(1 row)
+
+-- Test SH7-3: Zone map populated after online compact
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh7_basic'::regclass) LIKE 'version=% nentries=% pk_typid=23 flags=2%'
+         THEN 'zonemap_online_ok'
+         ELSE 'zonemap_online_FAIL: ' || sorted_heap_zonemap_stats('sh7_basic'::regclass)
+    END AS sh7_zonemap_result;
+ sh7_zonemap_result 
+--------------------
+ zonemap_online_ok
+(1 row)
+
+-- Test SH7-4: Scan pruning works after online compact
+ANALYZE sh7_basic;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh7_basic WHERE id = 50',
+    'SortedHeapScan') AS sh7_pruning_works;
+ sh7_pruning_works 
+-------------------
+ t
+(1 row)
+
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+-- Test SH7-5: Online compact produces same result as regular compact
+CREATE TABLE sh7_compare(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh7_compare SELECT g, repeat('z', 40) FROM generate_series(1, 300) g;
+DELETE FROM sh7_compare WHERE id % 5 = 0;
+INSERT INTO sh7_compare SELECT g, repeat('w', 40) FROM generate_series(301, 400) g;
+CALL sorted_heap_compact_online('sh7_compare'::regclass);
+NOTICE:  online compact: starting for "sh7_compare"
+HINT:  Concurrent reads and writes are allowed. Brief exclusive lock at the end for swap.
+NOTICE:  online compact: copied 340 tuples
+NOTICE:  online compact: completed for "sh7_compare" (340 tuples)
+SELECT count(*) AS sh7_compare_online_count FROM sh7_compare;
+ sh7_compare_online_count 
+--------------------------
+                      340
+(1 row)
+
+-- Re-compact with regular compact to verify equivalence
+SELECT sorted_heap_compact('sh7_compare'::regclass);
+NOTICE:  sorted_heap_compact acquires AccessExclusiveLock
+HINT:  Schedule during maintenance windows. Concurrent reads and writes are blocked.
+ sorted_heap_compact 
+---------------------
+ 
+(1 row)
+
+SELECT count(*) AS sh7_compare_regular_count FROM sh7_compare;
+ sh7_compare_regular_count 
+---------------------------
+                       340
+(1 row)
+
+DROP TABLE sh7_basic;
+DROP TABLE sh7_compare;
 DROP FUNCTION sh6_plan_contains(text, text);
 DROP EXTENSION clustered_pg;

@@ -260,4 +260,13 @@ RETURNS void
 AS '$libdir/clustered_pg', 'sorted_heap_reset_stats'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION @extschema@.sorted_heap_compact_trigger()
+RETURNS trigger
+AS '$libdir/clustered_pg', 'sorted_heap_compact_trigger'
+LANGUAGE C;
+
+CREATE PROCEDURE @extschema@.sorted_heap_compact_online(regclass)
+AS '$libdir/clustered_pg', 'sorted_heap_compact_online'
+LANGUAGE C;
+
 COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';

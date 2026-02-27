@@ -125,6 +125,10 @@ extern bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
 extern void sorted_heap_scan_init(void);
 extern Datum sorted_heap_scan_stats(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_reset_stats(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_compact_trigger(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_compact_online(PG_FUNCTION_ARGS);
+extern void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
+												 AttrNumber pk_attnum);
 
 /* Shared memory stats (cluster-wide when loaded via shared_preload_libraries) */
 typedef struct SortedHeapSharedStats
