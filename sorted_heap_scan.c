@@ -28,6 +28,9 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
+#include "miscadmin.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -109,11 +112,18 @@ static void sorted_heap_explain_custom_scan(CustomScanState *node,
 /* GUC: allow users to disable scan pruning at runtime */
 bool sorted_heap_enable_scan_pruning = true;
 
-/* Global stats for sorted_heap scans (backend-local, reset on restart) */
-static uint64 sh_total_scans = 0;
-static uint64 sh_total_blocks_pruned = 0;
+/* Shared memory stats (cluster-wide when in shared_preload_libraries) */
+static SortedHeapSharedStats *sh_shared_stats = NULL;
 
+/* Backend-local fallback stats (used when shmem not available) */
+static uint64 sh_local_scans = 0;
+static uint64 sh_local_blocks_scanned = 0;
+static uint64 sh_local_blocks_pruned = 0;
+
+/* Hook chains */
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 static CustomPathMethods sorted_heap_path_methods = {
 	.CustomName = "SortedHeapScan",
@@ -135,6 +145,36 @@ static CustomExecMethods sorted_heap_exec_methods = {
 };
 
 /* ----------------------------------------------------------------
+ *  Shared memory hooks
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+	RequestAddinShmemSpace(MAXALIGN(sizeof(SortedHeapSharedStats)));
+}
+
+static void
+sorted_heap_shmem_startup(void)
+{
+	bool		found;
+
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+	sh_shared_stats = ShmemInitStruct("sorted_heap stats",
+									  sizeof(SortedHeapSharedStats),
+									  &found);
+	if (!found)
+	{
+		pg_atomic_init_u64(&sh_shared_stats->total_scans, 0);
+		pg_atomic_init_u64(&sh_shared_stats->blocks_scanned, 0);
+		pg_atomic_init_u64(&sh_shared_stats->blocks_pruned, 0);
+	}
+}
+
+/* ----------------------------------------------------------------
  *  Initialization — called from _PG_init()
  * ---------------------------------------------------------------- */
 void
@@ -143,6 +183,12 @@ sorted_heap_scan_init(void)
 	prev_set_rel_pathlist_hook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = sorted_heap_set_rel_pathlist;
 	RegisterCustomScanMethods(&sorted_heap_plan_methods);
+
+	/* Shared memory hooks (only effective via shared_preload_libraries) */
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = sorted_heap_shmem_request;
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = sorted_heap_shmem_startup;
 }
 
 /* ----------------------------------------------------------------
@@ -696,9 +742,19 @@ sorted_heap_end_custom_scan(CustomScanState *node)
 {
 	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
 
-	/* Accumulate global stats */
-	sh_total_scans++;
-	sh_total_blocks_pruned += shstate->pruned_blocks;
+	/* Accumulate stats: shared memory if available, local fallback always */
+	sh_local_scans++;
+	sh_local_blocks_scanned += shstate->scanned_blocks;
+	sh_local_blocks_pruned += shstate->pruned_blocks;
+
+	if (sh_shared_stats)
+	{
+		pg_atomic_fetch_add_u64(&sh_shared_stats->total_scans, 1);
+		pg_atomic_fetch_add_u64(&sh_shared_stats->blocks_scanned,
+								shstate->scanned_blocks);
+		pg_atomic_fetch_add_u64(&sh_shared_stats->blocks_pruned,
+								shstate->pruned_blocks);
+	}
 
 	if (shstate->heap_scan)
 	{
@@ -767,9 +823,50 @@ sorted_heap_scan_stats(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "scans=" UINT64_FORMAT
-					 " blocks_pruned=" UINT64_FORMAT,
-					 sh_total_scans, sh_total_blocks_pruned);
+	if (sh_shared_stats)
+	{
+		appendStringInfo(&buf,
+						 "scans=" UINT64_FORMAT
+						 " blocks_scanned=" UINT64_FORMAT
+						 " blocks_pruned=" UINT64_FORMAT
+						 " (shared)",
+						 pg_atomic_read_u64(&sh_shared_stats->total_scans),
+						 pg_atomic_read_u64(&sh_shared_stats->blocks_scanned),
+						 pg_atomic_read_u64(&sh_shared_stats->blocks_pruned));
+	}
+	else
+	{
+		appendStringInfo(&buf,
+						 "scans=" UINT64_FORMAT
+						 " blocks_scanned=" UINT64_FORMAT
+						 " blocks_pruned=" UINT64_FORMAT
+						 " (local)",
+						 sh_local_scans,
+						 sh_local_blocks_scanned,
+						 sh_local_blocks_pruned);
+	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/* ----------------------------------------------------------------
+ *  SQL-callable stats reset function
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(sorted_heap_reset_stats);
+
+Datum
+sorted_heap_reset_stats(PG_FUNCTION_ARGS)
+{
+	if (sh_shared_stats)
+	{
+		pg_atomic_write_u64(&sh_shared_stats->total_scans, 0);
+		pg_atomic_write_u64(&sh_shared_stats->blocks_scanned, 0);
+		pg_atomic_write_u64(&sh_shared_stats->blocks_pruned, 0);
+	}
+
+	sh_local_scans = 0;
+	sh_local_blocks_scanned = 0;
+	sh_local_blocks_pruned = 0;
+
+	PG_RETURN_VOID();
 }

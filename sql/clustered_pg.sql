@@ -1161,12 +1161,24 @@ RESET enable_bitmapscan;
 DROP FUNCTION sh6_explain_has_counters();
 DROP TABLE sh6_explain;
 
--- Test SH6-10: sorted_heap_scan_stats() returns non-empty
+-- Test SH6-10: sorted_heap_scan_stats() with reset
+SELECT sorted_heap_reset_stats();
+-- Create a small table, compact it, run a pruned query to generate stats
+CREATE TABLE sh6_stats(id int PRIMARY KEY, v text) USING sorted_heap;
+INSERT INTO sh6_stats SELECT i, 'x' FROM generate_series(1, 1000) i;
+SELECT sorted_heap_compact('sh6_stats'::regclass);
+ANALYZE sh6_stats;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM sh6_stats WHERE id = 50;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
 SELECT
-    CASE WHEN sorted_heap_scan_stats() LIKE 'scans=%'
+    CASE WHEN sorted_heap_scan_stats() LIKE 'scans=1 blocks_scanned=% blocks_pruned=%'
          THEN 'scan_stats_ok'
-         ELSE 'scan_stats_FAIL'
+         ELSE 'scan_stats_FAIL: ' || sorted_heap_scan_stats()
     END AS sh6_stats_result;
+DROP TABLE sh6_stats;
 
 DROP FUNCTION sh6_plan_contains(text, text);
 

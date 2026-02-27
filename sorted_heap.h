@@ -5,6 +5,7 @@
 #include "fmgr.h"
 #include "access/attnum.h"
 #include "access/tableam.h"
+#include "port/atomics.h"
 #include "storage/block.h"
 
 #define SORTED_HEAP_MAGIC		0x534F5254	/* 'SORT' */
@@ -123,6 +124,15 @@ extern SortedHeapRelInfo *sorted_heap_get_relinfo(Relation rel);
 extern bool sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out);
 extern void sorted_heap_scan_init(void);
 extern Datum sorted_heap_scan_stats(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_reset_stats(PG_FUNCTION_ARGS);
+
+/* Shared memory stats (cluster-wide when loaded via shared_preload_libraries) */
+typedef struct SortedHeapSharedStats
+{
+	pg_atomic_uint64 total_scans;
+	pg_atomic_uint64 blocks_scanned;
+	pg_atomic_uint64 blocks_pruned;
+} SortedHeapSharedStats;
 
 /* GUC variable */
 extern bool sorted_heap_enable_scan_pruning;
