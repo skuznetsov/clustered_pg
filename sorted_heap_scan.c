@@ -207,7 +207,7 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	cpath->path.pathtarget = rel->reltarget;
 	cpath->path.param_info = NULL;
 	cpath->path.parallel_aware = false;
-	cpath->path.parallel_safe = rel->consider_parallel;
+	cpath->path.parallel_safe = false;
 	cpath->path.parallel_workers = 0;
 	cpath->path.pathkeys = NIL;
 

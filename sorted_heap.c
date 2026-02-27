@@ -439,6 +439,11 @@ sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info)
 	metapage = GenericXLogRegisterBuffer(state, metabuf, 0);
 
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+
+	Assert(meta->shm_magic == SORTED_HEAP_MAGIC);
+	Assert(meta->shm_version >= 3);
+	Assert(info->zm_nentries <= SORTED_HEAP_ZONEMAP_MAX);
+
 	meta->shm_zonemap_nentries = info->zm_nentries;
 	meta->shm_zonemap_pk_typid = info->zm_pk_typid;
 	memcpy(meta->shm_zonemap, info->zm_entries,
