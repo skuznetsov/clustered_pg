@@ -36,12 +36,12 @@ Parallel scan (large tables):
 | File | Lines | Purpose |
 |------|------:|---------|
 | `sorted_heap.h` | 162 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
-| `sorted_heap.c` | 2042 | Table AM: sorted multi_insert, zone map persistence, compact, merge |
+| `sorted_heap.c` | 2118 | Table AM: sorted multi_insert, zone map persistence, compact, merge |
 | `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
-| `sorted_heap_online.c` | 1025 | Online compact + online merge: trigger, copy, replay, swap |
+| `sorted_heap_online.c` | 1044 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1594 | Regression tests (SH1–SH12) |
-| `expected/clustered_pg.out` | 2459 | Expected test output |
+| `sql/clustered_pg.sql` | 1728 | Regression tests (SH1–SH13) |
+| `expected/clustered_pg.out` | 2630 | Expected test output |
 
 ## Completed Phases
 
@@ -115,8 +115,11 @@ sort order (sequential I/O vs random index lookups).
 - Zone map capacity: 8,410 pages (~65 MB). 250 in meta page + up to
   32 overflow pages × 255 entries each (v5 format, 32 bytes/entry).
 - Zone map tracks first two PK columns (col1 + col2). Supported types:
-  int2/int4/int8, timestamp, timestamptz, date. Non-trackable col2
-  (text, uuid) degrades gracefully to col1-only pruning.
+  int2/int4/int8, timestamp, timestamptz, date, uuid, text/varchar
+  (text requires `COLLATE "C"`). UUID/text use lossy first-8-byte mapping
+  (conservative pruning for values sharing long prefixes).
+- Online compact/merge (`_online` variants) not supported for UUID/text/varchar
+  PKs due to lossy int64 hash key. Use regular compact/merge instead.
 - Single-row INSERT into a covered page updates zone map in-place
   (preserving scan pruning). INSERT into an uncovered page invalidates
   scan pruning until next compact.
@@ -215,7 +218,23 @@ sort order (sequential I/O vs random index lookups).
   zone map validity, scan pruning, already-sorted, empty table,
   never-compacted fallback
 
+### Phase 12 — Zone Map Support for UUID and Text Types
+- UUID PK: first 8 bytes as big-endian uint64, sign-flipped to int64
+  (lossy but order-preserving; UUIDs sharing first 8 bytes collapse)
+- TEXT/VARCHAR PK: first 8 bytes zero-padded, same uint64→int64 conversion.
+  Requires `COLLATE "C"` (byte order = sort order). Non-C collation
+  degrades gracefully (`zm_usable = false`, no zone map, no scan pruning)
+- Zone map rebuild probe replaced: `Int32GetDatum(0)` probe caused NULL
+  dereference for pointer-based types; now uses direct typid switch
+- Online compact/merge blocked for UUID/text/varchar PKs — the int8
+  log table and PK→TID hash use lossy int64 representation, causing
+  hash collisions and incorrect replay
+- Collation check uses `C_COLLATION_OID` from `pg_collation_d.h`
+  (avoids ICU header dependency from `pg_locale.h`)
+- SH13 test suite: UUID zone map + scan pruning, text/C zone map +
+  scan pruning, online compact/merge blocked, varchar zone map
+
 ## Possible Future Work
 
-- Zone map support for text, uuid types
 - Index-only scan equivalent using zone map
+- Online compact/merge support for UUID/text PKs (requires log format redesign)
