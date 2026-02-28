@@ -45,6 +45,7 @@ Parallel scan (large tables):
 | `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 | `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
+| `scripts/test_alter_table.sh` | 313 | ALTER TABLE on sorted_heap (ADD/DROP/RENAME/ALTER TYPE/PK) |
 
 ## Completed Phases
 
@@ -136,6 +137,12 @@ to physical sort order (sequential I/O vs random index lookups).
   receives "relation already exists" error (implicit guard via log table
   name `_sh_compact_log_<oid>`). First session completes normally;
   re-run succeeds after cleanup. No explicit advisory lock needed.
+- ALTER TABLE: ADD COLUMN, DROP COLUMN (non-PK), RENAME COLUMN (including PK),
+  ALTER TYPE (non-PK, triggers table rewrite) all work correctly. Zone map
+  survives via relcache invalidation callback (`pk_probed=false` triggers
+  re-probe). PostgreSQL preserves attnums on DROP COLUMN. Table rewrite
+  (ALTER TYPE) creates new meta page; compact restores zone map. DROP PK
+  disables pruning; re-ADD PK + compact re-enables it. Tested: 33 checks.
 - `heap_setscanlimits()` only supports contiguous block ranges.
   Non-contiguous pruning handled per-block in ExecCustomScan (still reads
   pages, but skips tuple processing).
@@ -338,6 +345,14 @@ to physical sort order (sequential I/O vs random index lookups).
 - After first session completes and cleans up, re-run succeeds
 - No crashes (SIGSEGV/SIGBUS/SIGABRT) in any scenario
 - 11 checks, all pass
+
+**ALTER TABLE Tests** (`scripts/test_alter_table.sh`)
+- ADD COLUMN (no default + with default), DROP COLUMN (non-PK),
+  RENAME COLUMN (non-PK + PK), ALTER TYPE (non-PK, table rewrite)
+- INSERT, compact, online compact after all DDL — no crashes
+- Secondary index after DDL — consistent with seqscan
+- DROP PK → pruning disabled, DML works; re-ADD PK + compact → pruning restored
+- 33 checks, all pass
 
 ## Possible Future Work
 
