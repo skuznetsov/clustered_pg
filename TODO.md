@@ -35,13 +35,13 @@ Parallel scan (large tables):
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 162 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
-| `sorted_heap.c` | 2118 | Table AM: sorted multi_insert, zone map persistence, compact, merge |
-| `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
+| `sorted_heap.h` | 181 | Meta page layout, zone map structs (v5/v6), SortedHeapRelInfo |
+| `sorted_heap.c` | 2400 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
+| `sorted_heap_scan.c` | 1187 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 1044 | Online compact + online merge: trigger, copy, replay, swap |
-| `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1728 | Regression tests (SH1–SH13) |
-| `expected/clustered_pg.out` | 2630 | Expected test output |
+| `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
+| `sql/clustered_pg.sql` | 1867 | Regression tests (SH1–SH15) |
+| `expected/clustered_pg.out` | 2809 | Expected test output |
 
 ## Completed Phases
 
@@ -112,8 +112,8 @@ sort order (sequential I/O vs random index lookups).
 
 ## Known Limitations
 
-- Zone map capacity: 8,410 pages (~65 MB). 250 in meta page + up to
-  32 overflow pages × 255 entries each (v5 format, 32 bytes/entry).
+- Zone map capacity: unlimited (v6 format). 250 entries in meta page +
+  overflow pages linked via next_block chain (254 entries/page).
 - Zone map tracks first two PK columns (col1 + col2). Supported types:
   int2/int4/int8, timestamp, timestamptz, date, uuid, text/varchar
   (text requires `COLLATE "C"`). UUID/text use lossy first-8-byte mapping
@@ -233,6 +233,42 @@ sort order (sequential I/O vs random index lookups).
   (avoids ICU header dependency from `pg_locale.h`)
 - SH13 test suite: UUID zone map + scan pruning, text/C zone map +
   scan pruning, online compact/merge blocked, varchar zone map
+
+### Phase 13 — Production Hardening: Unlimited Zone Map, Autovacuum Integration
+
+**Phase 13A: Unlimited Zone Map Capacity (v6 format)**
+- Removed 65 MB / 8,410-page zone map capacity limit
+- v6 overflow page format: 16-byte header + 254 entries + `shmo_next_block` pointer
+- Linked list of overflow pages: first 32 referenced from meta page, then
+  chained via `shmo_next_block` (no hard cap on overflow pages)
+- Dynamic `repalloc`-based entry allocation in rebuild (no fixed-size buffer)
+- v5 backward compatibility: `SortedHeapOverflowPageDataV5` struct preserved,
+  version check in `sorted_heap_zonemap_load()` handles both formats
+- `SORTED_HEAP_VERSION` bumped to 6; `zm_overflow_npages` widened to uint32
+- SH14 test suite: 170K wide rows (>9,400 pages), overflow chain verification,
+  scan pruning on high page numbers
+
+**Phase 13B: WAL Audit**
+- All zone map write paths verified crash-safe (GenericXLog or `log_newpage`)
+- No code changes required
+
+**Phase 13C: Autovacuum Zone Map Rebuild**
+- Override `relation_vacuum` in sorted_heap AM routine
+- After heap vacuum completes, check `SHM_FLAG_ZONEMAP_VALID` flag
+- Rebuild zone map automatically when flag is not set
+- GUC `sorted_heap.vacuum_rebuild_zonemap` (default on) for control
+- Safety check: skip rebuild when relation has 0 data pages (post-truncate)
+- SH15 test suite: vacuum rebuild, GUC on/off, scan pruning after rebuild
+
+**CustomScan ExecScan fix (PG 18 compatibility)**
+- PG 18 changed `ExecCustomScan` to call `methods->ExecCustomScan` directly
+  (no longer wraps in `ExecScan`), so projection/qual evaluation must be
+  handled by the extension
+- Restructured to split scan logic: `sorted_heap_scan_next()` (access method
+  with zone map pruning) + `sorted_heap_scan_recheck()` (EPQ), wrapped by
+  `ExecScan()` which handles quals and projection
+- Fixed SEGFAULT with WindowAgg/ModifyTable plans and protocol field count
+  errors with direct Limit→CustomScan plans
 
 ## Possible Future Work
 
