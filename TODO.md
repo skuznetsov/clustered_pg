@@ -35,13 +35,13 @@ Parallel scan (large tables):
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 159 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
+| `sorted_heap.h` | 162 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
 | `sorted_heap.c` | 2042 | Table AM: sorted multi_insert, zone map persistence, compact, merge |
 | `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
-| `sorted_heap_online.c` | 603 | Online compact: trigger, copy, replay, swap |
+| `sorted_heap_online.c` | 1025 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1517 | Regression tests (SH1–SH11) |
-| `expected/clustered_pg.out` | 2335 | Expected test output |
+| `sql/clustered_pg.sql` | 1594 | Regression tests (SH1–SH12) |
+| `expected/clustered_pg.out` | 2459 | Expected test output |
 
 ## Completed Phases
 
@@ -196,8 +196,26 @@ sort order (sequential I/O vs random index lookups).
   scan pruning after merge, re-compact verification, already-sorted,
   never-compacted fallback, empty table
 
+### Phase 11 — Online Merge Compaction
+- `sorted_heap_merge_online(regclass)` — PROCEDURE (use with CALL)
+- Non-blocking variant of merge using trigger-based change capture
+  (same pg_repack-style approach as `sorted_heap_compact_online`)
+- Phase 0b: Detect prefix under ShareUpdateExclusiveLock; early exit
+  for empty/already-sorted tables (no SPI/log table overhead)
+- Phase 1: UNLOGGED log table + AFTER ROW trigger (committed mid-call)
+- Phase 2: Prefix seq scan + tail tuplesort merge → new table under
+  ShareUpdateExclusiveLock (concurrent reads and writes allowed)
+- PK→TID hash populated during merge for O(1) replay lookups
+- Phase 2b: Replay loop (up to 10 convergence passes)
+- Phase 3: AccessExclusiveLock only for brief final replay + swap
+- Re-detect prefix in Phase 2 under lock eliminates TOCTOU race
+- Exported `sorted_heap_detect_sorted_prefix` and `sorted_heap_zonemap_load`
+  from sorted_heap.c for cross-file use
+- SH12 test suite: normal online merge, physical sort verification,
+  zone map validity, scan pruning, already-sorted, empty table,
+  never-compacted fallback
+
 ## Possible Future Work
 
 - Zone map support for text, uuid types
-- Online merge with trigger-based change capture (non-blocking variant)
 - Index-only scan equivalent using zone map
