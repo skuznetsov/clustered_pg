@@ -539,10 +539,10 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 
 		if (version >= 4)
 		{
-			overflow_npages = meta4->shm_overflow_npages;
+			overflow_npages = Min(meta4->shm_overflow_npages,
+								  SORTED_HEAP_OVERFLOW_MAX_PAGES);
 			memcpy(ovfl_blocks, meta4->shm_overflow_blocks,
-				   Min(overflow_npages, SORTED_HEAP_OVERFLOW_MAX_PAGES) *
-				   sizeof(BlockNumber));
+				   overflow_npages * sizeof(BlockNumber));
 		}
 		info->zm_overflow_npages = overflow_npages;
 		info->zm_total_entries = cache_n;
@@ -623,7 +623,8 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 			(SortedHeapMetaPageData *) special;
 		uint16		n = Min(meta->shm_zonemap_nentries,
 							SORTED_HEAP_ZONEMAP_MAX);
-		uint16		overflow_npages = meta->shm_overflow_npages;
+		uint16		overflow_npages = Min(meta->shm_overflow_npages,
+										  SORTED_HEAP_OVERFLOW_MAX_PAGES);
 
 		/* Copy v5 entries directly (already 32 bytes) */
 		info->zm_nentries = n;
@@ -1224,8 +1225,8 @@ sorted_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 			if (blk < 1)
 				continue;		/* skip meta page */
 			zmidx = blk - 1;	/* data block 1 → index 0 */
-			if (zmidx >= SORTED_HEAP_ZONEMAP_CACHE_MAX)
-				continue;		/* beyond cache capacity */
+			if (zmidx >= SORTED_HEAP_ZONEMAP_MAX)
+				continue;		/* beyond meta page capacity */
 
 			val = slot_getattr(slots[i], info->attNums[0], &isnull);
 			if (isnull)

@@ -1391,6 +1391,48 @@ RESET enable_bitmapscan;
 
 DROP TABLE sh9_par;
 
+-- ============================================================
+-- SH10: Zone map overflow boundary correctness
+-- ============================================================
+-- Table with >250 data pages exercises v5 overflow zone map entries.
+-- Verify that INSERT after compact doesn't corrupt scan results
+-- for pages in the overflow range (entries 250+).
+
+CREATE TABLE sh10_ovfl(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh10_ovfl
+  SELECT g, repeat('x', 80)
+  FROM generate_series(1, 50000) g;
+SELECT sorted_heap_compact('sh10_ovfl'::regclass);
+
+-- SH10-1: Serial custom scan returns correct count after compact
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 0;
+
+SELECT count(*) AS sh10_post_compact
+  FROM sh10_ovfl WHERE id BETWEEN 1 AND 50000;
+
+-- SH10-2: INSERT into overflow-range page, then re-count
+-- Zone map becomes stale, pruning disabled — count must still be correct
+INSERT INTO sh10_ovfl VALUES (50001, 'overflow_insert');
+
+SELECT count(*) AS sh10_post_insert
+  FROM sh10_ovfl WHERE id BETWEEN 1 AND 50001;
+
+-- SH10-3: Re-compact, verify overflow entries restored
+SELECT sorted_heap_compact('sh10_ovfl'::regclass);
+
+SELECT count(*) AS sh10_post_recompact
+  FROM sh10_ovfl WHERE id BETWEEN 1 AND 50001;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE sh10_ovfl;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;
