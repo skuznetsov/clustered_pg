@@ -181,11 +181,20 @@ sorted_heap_compact_trigger(PG_FUNCTION_ARGS)
 	else
 		action = 'D';
 
-	/* Get the affected tuple */
-	if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
-		tuple = trigdata->tg_trigtuple;
-	else
+	/*
+	 * Get the affected tuple.
+	 *
+	 * For INSERT: tg_trigtuple = inserted row, tg_newtuple = NULL
+	 * For UPDATE: tg_trigtuple = old row, tg_newtuple = new row
+	 * For DELETE: tg_trigtuple = deleted row, tg_newtuple = NULL
+	 *
+	 * We want the current row version: tg_newtuple for UPDATE,
+	 * tg_trigtuple for INSERT and DELETE.
+	 */
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 		tuple = trigdata->tg_newtuple;
+	else
+		tuple = trigdata->tg_trigtuple;
 
 	/* Extract PK value and convert to int64 */
 	pk_datum = heap_getattr(tuple, pk_attnum,

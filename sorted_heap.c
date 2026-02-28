@@ -569,6 +569,7 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 								 RBM_NORMAL, NULL);
 	LockBuffer(metabuf, BUFFER_LOCK_SHARE);
 	metapage = BufferGetPage(metabuf);
+
 	special = (char *) PageGetSpecialPointer(metapage);
 
 	/* Read magic and version from common header prefix */
@@ -1927,6 +1928,15 @@ sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 			Buffer				metabuf;
 			Page				metapage;
 			SortedHeapMetaPageData *meta;
+			BlockNumber			nblocks;
+
+			nblocks = RelationGetNumberOfBlocks(rel);
+
+			if (nblocks <= SORTED_HEAP_META_BLOCK)
+			{
+				info->zm_scan_valid = false;
+				return; /* table empty or meta-only: nothing to invalidate */
+			}
 
 			metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
 										 SORTED_HEAP_META_BLOCK,
