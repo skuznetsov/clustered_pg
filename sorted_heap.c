@@ -67,7 +67,7 @@ typedef struct SortedHeapMetaPageDataV4
 	Oid			shm_zonemap_pk_typid;
 	/* 24 bytes of header */
 	SortedHeapZoneMapEntryV4 shm_zonemap[SORTED_HEAP_ZONEMAP_MAX_V4];
-	BlockNumber	shm_overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+	BlockNumber	shm_overflow_blocks[SORTED_HEAP_META_OVERFLOW_SLOTS];
 } SortedHeapMetaPageDataV4;
 
 typedef struct SortedHeapOverflowPageDataV4
@@ -134,6 +134,9 @@ static void sorted_heap_index_validate_scan(Relation tableRelation,
 											IndexInfo *indexInfo,
 											Snapshot snapshot,
 											ValidateIndexState *state);
+static void sorted_heap_relation_vacuum(Relation rel,
+										struct VacuumParams *params,
+										BufferAccessStrategy bstrategy);
 
 /* ----------------------------------------------------------------
  *  Static state
@@ -141,6 +144,9 @@ static void sorted_heap_index_validate_scan(Relation tableRelation,
 static bool sorted_heap_am_initialized = false;
 TableAmRoutine sorted_heap_am_routine;
 static HTAB *sorted_heap_relinfo_hash = NULL;
+
+/* GUC: rebuild zone map during VACUUM when invalid */
+bool sorted_heap_vacuum_rebuild_zonemap = true;
 
 /* ----------------------------------------------------------------
  *  Handler + initialization
@@ -183,6 +189,10 @@ sorted_heap_init_routine(void)
 		sorted_heap_index_build_range_scan;
 	sorted_heap_am_routine.index_validate_scan =
 		sorted_heap_index_validate_scan;
+
+	/* Vacuum — rebuild zone map when invalid */
+	sorted_heap_am_routine.relation_vacuum =
+		sorted_heap_relation_vacuum;
 
 	sorted_heap_am_initialized = true;
 }
@@ -586,7 +596,7 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 							 SORTED_HEAP_ZONEMAP_MAX_V4);
 		uint16		cache_n = Min(n4, SORTED_HEAP_ZONEMAP_CACHE_MAX);
 		uint16		overflow_npages = 0;
-		BlockNumber	ovfl_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+		BlockNumber	ovfl_blocks[SORTED_HEAP_META_OVERFLOW_SLOTS];
 		int			i;
 
 		/* Expand 16→32 byte entries into cache */
@@ -604,7 +614,7 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 		if (version >= 4)
 		{
 			overflow_npages = Min(meta4->shm_overflow_npages,
-								  SORTED_HEAP_OVERFLOW_MAX_PAGES);
+								  SORTED_HEAP_META_OVERFLOW_SLOTS);
 			memcpy(ovfl_blocks, meta4->shm_overflow_blocks,
 				   overflow_npages * sizeof(BlockNumber));
 		}
@@ -681,38 +691,44 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 		return;
 	}
 
-	/* v5+ format: 32-byte entries, 32-byte header */
+	/* v5/v6 format: 32-byte entries, 32-byte header */
 	{
 		SortedHeapMetaPageData *meta =
 			(SortedHeapMetaPageData *) special;
 		uint16		n = Min(meta->shm_zonemap_nentries,
 							SORTED_HEAP_ZONEMAP_MAX);
-		uint16		overflow_npages = Min(meta->shm_overflow_npages,
-										  SORTED_HEAP_OVERFLOW_MAX_PAGES);
+		uint16		meta_ovfl_npages = Min(meta->shm_overflow_npages,
+										   SORTED_HEAP_META_OVERFLOW_SLOTS);
 
-		/* Copy v5 entries directly (already 32 bytes) */
+		/* Copy v5/v6 entries directly (already 32 bytes) */
 		info->zm_nentries = n;
 		memcpy(info->zm_entries, meta->shm_zonemap,
 			   n * sizeof(SortedHeapZoneMapEntry));
 		info->zm_scan_valid =
 			(meta->shm_flags & SHM_FLAG_ZONEMAP_VALID) != 0;
 
-		info->zm_overflow_npages = overflow_npages;
+		info->zm_overflow_npages = meta_ovfl_npages;
 		info->zm_total_entries = n;
 
-		/* Read v5 overflow pages if present */
-		if (overflow_npages > 0)
+		/* Read overflow pages if present */
+		if (meta_ovfl_npages > 0)
 		{
-			BlockNumber	ovfl_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+			BlockNumber	ovfl_blocks[SORTED_HEAP_META_OVERFLOW_SLOTS];
 			uint32		total_overflow = 0;
-			uint32		max_overflow;
+			uint32		alloc_overflow;
+			uint32		entries_per_page;
 			int			p;
+			bool		is_v6 = (version >= 6);
 
-			max_overflow = (uint32) overflow_npages *
-				SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+			entries_per_page = is_v6 ?
+				SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE :
+				SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE_V5;
+
+			/* Initial allocation for meta-slot pages */
+			alloc_overflow = (uint32) meta_ovfl_npages * entries_per_page;
 
 			memcpy(ovfl_blocks, meta->shm_overflow_blocks,
-				   overflow_npages * sizeof(BlockNumber));
+				   meta_ovfl_npages * sizeof(BlockNumber));
 
 			UnlockReleaseBuffer(metabuf);
 
@@ -724,14 +740,15 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 
 			info->zm_overflow = (SortedHeapZoneMapEntry *)
 				MemoryContextAllocZero(TopMemoryContext,
-									   max_overflow *
+									   alloc_overflow *
 									   sizeof(SortedHeapZoneMapEntry));
 
-			for (p = 0; p < overflow_npages; p++)
+			/* Phase 1: read overflow pages referenced by meta page */
+			for (p = 0; p < meta_ovfl_npages; p++)
 			{
 				Buffer		ovfl_buf;
 				Page		ovfl_page;
-				SortedHeapOverflowPageData *ovfl;
+				uint16		ne;
 
 				if (ovfl_blocks[p] == InvalidBlockNumber)
 					break;
@@ -741,23 +758,115 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 											  NULL);
 				LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
 				ovfl_page = BufferGetPage(ovfl_buf);
-				ovfl = (SortedHeapOverflowPageData *)
-					PageGetSpecialPointer(ovfl_page);
 
-				if (ovfl->shmo_magic == SORTED_HEAP_MAGIC &&
-					ovfl->shmo_nentries > 0)
+				if (is_v6)
 				{
-					uint16	ne = Min(ovfl->shmo_nentries,
-									 SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE);
+					SortedHeapOverflowPageData *ovfl =
+						(SortedHeapOverflowPageData *)
+						PageGetSpecialPointer(ovfl_page);
 
-					memcpy(&info->zm_overflow[total_overflow],
-						   ovfl->shmo_entries,
-						   ne * sizeof(SortedHeapZoneMapEntry));
+					if (ovfl->shmo_magic == SORTED_HEAP_MAGIC &&
+						ovfl->shmo_nentries > 0)
+					{
+						ne = Min(ovfl->shmo_nentries,
+								 SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE);
+						memcpy(&info->zm_overflow[total_overflow],
+							   ovfl->shmo_entries,
+							   ne * sizeof(SortedHeapZoneMapEntry));
+						total_overflow += ne;
+					}
+				}
+				else
+				{
+					SortedHeapOverflowPageDataV5 *ovfl =
+						(SortedHeapOverflowPageDataV5 *)
+						PageGetSpecialPointer(ovfl_page);
 
-					total_overflow += ne;
+					if (ovfl->shmo_magic == SORTED_HEAP_MAGIC &&
+						ovfl->shmo_nentries > 0)
+					{
+						ne = Min(ovfl->shmo_nentries,
+								 SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE_V5);
+						memcpy(&info->zm_overflow[total_overflow],
+							   ovfl->shmo_entries,
+							   ne * sizeof(SortedHeapZoneMapEntry));
+						total_overflow += ne;
+					}
 				}
 
 				UnlockReleaseBuffer(ovfl_buf);
+			}
+
+			/* Phase 2 (v6 only): follow next_block chain */
+			if (is_v6 && meta_ovfl_npages > 0)
+			{
+				BlockNumber	last_meta_blk =
+					ovfl_blocks[meta_ovfl_npages - 1];
+				BlockNumber	next_blk = InvalidBlockNumber;
+				Buffer		ovfl_buf;
+				Page		ovfl_page;
+				SortedHeapOverflowPageData *ovfl;
+
+				/* Read next_block from last meta-slot page */
+				if (last_meta_blk != InvalidBlockNumber)
+				{
+					ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+												  last_meta_blk,
+												  RBM_NORMAL, NULL);
+					LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
+					ovfl_page = BufferGetPage(ovfl_buf);
+					ovfl = (SortedHeapOverflowPageData *)
+						PageGetSpecialPointer(ovfl_page);
+					next_blk = ovfl->shmo_next_block;
+					UnlockReleaseBuffer(ovfl_buf);
+				}
+
+				while (next_blk != InvalidBlockNumber)
+				{
+					uint16	ne;
+
+					/* Grow allocation if needed */
+					if (total_overflow + entries_per_page > alloc_overflow)
+					{
+						alloc_overflow = alloc_overflow * 2 + entries_per_page;
+						info->zm_overflow = (SortedHeapZoneMapEntry *)
+							repalloc(info->zm_overflow,
+									 alloc_overflow *
+									 sizeof(SortedHeapZoneMapEntry));
+						/* Zero new portion */
+						memset(&info->zm_overflow[total_overflow], 0,
+							   (alloc_overflow - total_overflow) *
+							   sizeof(SortedHeapZoneMapEntry));
+					}
+
+					ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+												  next_blk, RBM_NORMAL,
+												  NULL);
+					LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
+					ovfl_page = BufferGetPage(ovfl_buf);
+					ovfl = (SortedHeapOverflowPageData *)
+						PageGetSpecialPointer(ovfl_page);
+
+					if (ovfl->shmo_magic != SORTED_HEAP_MAGIC)
+					{
+						UnlockReleaseBuffer(ovfl_buf);
+						break;
+					}
+
+					ne = Min(ovfl->shmo_nentries,
+							 SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE);
+					if (ne > 0)
+					{
+						memcpy(&info->zm_overflow[total_overflow],
+							   ovfl->shmo_entries,
+							   ne * sizeof(SortedHeapZoneMapEntry));
+						total_overflow += ne;
+					}
+
+					info->zm_overflow_npages++;
+					next_blk = ovfl->shmo_next_block;
+					UnlockReleaseBuffer(ovfl_buf);
+				}
 			}
 
 			info->zm_overflow_nentries = total_overflow;
@@ -850,6 +959,7 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	SortedHeapZoneMapEntry *entries;
 	uint32			nentries = 0;
 	uint32			max_entries;
+	uint32			alloc_entries;
 	TableScanDesc	scan;
 	TupleTableSlot *slot;
 	Buffer			metabuf;
@@ -857,8 +967,8 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	GenericXLogState *gxlog_state;
 	SortedHeapMetaPageData *meta;
 	uint16			meta_nentries;
-	uint16			overflow_npages = 0;
-	BlockNumber		overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+	uint32			overflow_npages = 0;
+	BlockNumber		overflow_blocks[SORTED_HEAP_META_OVERFLOW_SLOTS];
 	bool			track_col2 = OidIsValid(pk_typid2);
 
 	/* Only supported PK types get zone maps.
@@ -880,10 +990,15 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 			return;		/* not supported */
 	}
 
-	/* Compute max capacity: meta page + max overflow pages */
-	max_entries = SORTED_HEAP_ZONEMAP_MAX +
-		(uint32) SORTED_HEAP_OVERFLOW_MAX_PAGES *
-		SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
+	/*
+	 * Dynamic allocation: start with a reasonable initial size, grow as needed.
+	 * No hard cap — zone map covers all data pages in the relation.
+	 */
+	alloc_entries = Max(SORTED_HEAP_ZONEMAP_MAX +
+						(uint32) SORTED_HEAP_META_OVERFLOW_SLOTS *
+						SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE,
+						1024);
+	max_entries = alloc_entries;
 
 	entries = (SortedHeapZoneMapEntry *)
 		palloc(max_entries * sizeof(SortedHeapZoneMapEntry));
@@ -914,8 +1029,24 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 		if (blk < 1)
 			continue;			/* skip meta page */
 		zmidx = blk - 1;
+
+		/* Grow entries array if needed */
 		if (zmidx >= max_entries)
-			continue;			/* beyond total capacity */
+		{
+			uint32	new_max = Max(max_entries * 2, zmidx + 1);
+
+			entries = (SortedHeapZoneMapEntry *)
+				repalloc(entries, new_max * sizeof(SortedHeapZoneMapEntry));
+
+			for (uint32 i = max_entries; i < new_max; i++)
+			{
+				entries[i].zme_min = PG_INT64_MAX;
+				entries[i].zme_max = PG_INT64_MIN;
+				entries[i].zme_min2 = PG_INT64_MAX;
+				entries[i].zme_max2 = PG_INT64_MIN;
+			}
+			max_entries = new_max;
+		}
 
 		val = slot_getattr(slot, pk_attnum, &isnull);
 		if (isnull)
@@ -974,25 +1105,28 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	meta_nentries = Min(nentries, SORTED_HEAP_ZONEMAP_MAX);
 
 	/* Initialize overflow block numbers */
-	for (int i = 0; i < SORTED_HEAP_OVERFLOW_MAX_PAGES; i++)
+	for (int i = 0; i < SORTED_HEAP_META_OVERFLOW_SLOTS; i++)
 		overflow_blocks[i] = InvalidBlockNumber;
 
-	/* Create overflow pages if needed */
+	/* Create overflow pages if needed (v6: linked list, no hard cap) */
 	if (nentries > SORTED_HEAP_ZONEMAP_MAX)
 	{
 		uint32		overflow_entries = nentries - SORTED_HEAP_ZONEMAP_MAX;
 		SMgrRelation srel = RelationGetSmgr(rel);
 		BlockNumber	next_blk = smgrnblocks(srel, MAIN_FORKNUM);
 		RelFileLocator rlocator = rel->rd_locator;
+		BlockNumber *all_ovfl_blocks;
 
 		overflow_npages =
 			(overflow_entries + SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE - 1) /
 			SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE;
 
-		if (overflow_npages > SORTED_HEAP_OVERFLOW_MAX_PAGES)
-			overflow_npages = SORTED_HEAP_OVERFLOW_MAX_PAGES;
+		/* No hard cap — allocate block number tracking for all pages */
+		all_ovfl_blocks = (BlockNumber *)
+			palloc(overflow_npages * sizeof(BlockNumber));
 
-		for (int p = 0; p < overflow_npages; p++)
+		/* Pass 1: allocate and write all overflow pages */
+		for (uint32 p = 0; p < overflow_npages; p++)
 		{
 			PGAlignedBlock	aligned_buf;
 			Page			ovfl_page;
@@ -1015,6 +1149,8 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 			ovfl->shmo_magic = SORTED_HEAP_MAGIC;
 			ovfl->shmo_nentries = count;
 			ovfl->shmo_page_index = p;
+			ovfl->shmo_next_block = InvalidBlockNumber;	/* set in pass 2 */
+			ovfl->shmo_padding = 0;
 			memcpy(ovfl->shmo_entries, &entries[start],
 				   count * sizeof(SortedHeapZoneMapEntry));
 
@@ -1025,9 +1161,54 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 			smgrextend(srel, MAIN_FORKNUM, next_blk,
 					   aligned_buf.data, false);
 
-			overflow_blocks[p] = next_blk;
+			all_ovfl_blocks[p] = next_blk;
 			next_blk++;
 		}
+
+		/*
+		 * Pass 2: set next_block pointers for pages beyond meta slots.
+		 * Pages 0..min(overflow_npages,32)-1 are referenced from meta page.
+		 * If overflow_npages > 32, page 31's next_block → page 32,
+		 * page 32's next_block → page 33, etc.
+		 */
+		if (overflow_npages > SORTED_HEAP_META_OVERFLOW_SLOTS)
+		{
+			uint32	chain_start = SORTED_HEAP_META_OVERFLOW_SLOTS - 1;
+
+			for (uint32 p = chain_start; p < overflow_npages; p++)
+			{
+				Buffer		ovfl_buf;
+				Page		ovfl_page;
+				GenericXLogState *ovfl_state;
+				SortedHeapOverflowPageData *ovfl;
+
+				ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+											  all_ovfl_blocks[p],
+											  RBM_NORMAL, NULL);
+				LockBuffer(ovfl_buf, BUFFER_LOCK_EXCLUSIVE);
+
+				ovfl_state = GenericXLogStart(rel);
+				ovfl_page = GenericXLogRegisterBuffer(ovfl_state,
+													  ovfl_buf, 0);
+				ovfl = (SortedHeapOverflowPageData *)
+					PageGetSpecialPointer(ovfl_page);
+
+				if (p + 1 < overflow_npages)
+					ovfl->shmo_next_block = all_ovfl_blocks[p + 1];
+				else
+					ovfl->shmo_next_block = InvalidBlockNumber;
+
+				GenericXLogFinish(ovfl_state);
+				UnlockReleaseBuffer(ovfl_buf);
+			}
+		}
+
+		/* Copy first 32 (or fewer) block numbers to meta page array */
+		for (uint32 p = 0; p < Min(overflow_npages,
+								   SORTED_HEAP_META_OVERFLOW_SLOTS); p++)
+			overflow_blocks[p] = all_ovfl_blocks[p];
+
+		pfree(all_ovfl_blocks);
 	}
 
 	/* Write zone map to meta page */
@@ -1045,8 +1226,9 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	memcpy(meta->shm_zonemap, entries,
 		   meta_nentries * sizeof(SortedHeapZoneMapEntry));
 
-	/* Write overflow metadata */
-	meta->shm_overflow_npages = overflow_npages;
+	/* Write overflow metadata (meta page stores up to 32 block numbers) */
+	meta->shm_overflow_npages = Min(overflow_npages,
+									SORTED_HEAP_META_OVERFLOW_SLOTS);
 	memcpy(meta->shm_overflow_blocks, overflow_blocks,
 		   sizeof(overflow_blocks));
 
@@ -1106,7 +1288,7 @@ sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 	}
 
 	/* Initialize overflow block pointers */
-	for (int i = 0; i < SORTED_HEAP_OVERFLOW_MAX_PAGES; i++)
+	for (int i = 0; i < SORTED_HEAP_META_OVERFLOW_SLOTS; i++)
 		meta->shm_overflow_blocks[i] = InvalidBlockNumber;
 
 	/* WAL-log first (sets LSN on page), then checksum, then write */
@@ -1160,6 +1342,53 @@ sorted_heap_relation_copy_data(Relation rel,
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
 
 	heap->relation_copy_data(rel, newrlocator);
+}
+
+/* ----------------------------------------------------------------
+ *  Vacuum callback — delegate to heap, then rebuild zone map if invalid
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_relation_vacuum(Relation rel, struct VacuumParams *params,
+							BufferAccessStrategy bstrategy)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+
+	/* Step 1: delegate to heap vacuum (actual tuple cleanup) */
+	heap->relation_vacuum(rel, params, bstrategy);
+
+	/* Step 2: rebuild zone map if invalid and GUC enabled */
+	if (sorted_heap_vacuum_rebuild_zonemap &&
+		RelationGetNumberOfBlocks(rel) > SORTED_HEAP_META_BLOCK)
+	{
+		Buffer		metabuf;
+		Page		metapage;
+		SortedHeapMetaPageData *meta;
+		bool		need_rebuild = false;
+
+		metabuf = ReadBufferExtended(rel, MAIN_FORKNUM,
+									 SORTED_HEAP_META_BLOCK, RBM_NORMAL,
+									 NULL);
+		LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+		metapage = BufferGetPage(metabuf);
+		meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
+
+		if (meta->shm_magic == SORTED_HEAP_MAGIC &&
+			!(meta->shm_flags & SHM_FLAG_ZONEMAP_VALID))
+			need_rebuild = true;
+
+		UnlockReleaseBuffer(metabuf);
+
+		if (need_rebuild)
+		{
+			SortedHeapRelInfo *info = sorted_heap_get_relinfo(rel);
+
+			if (info->zm_usable)
+				sorted_heap_rebuild_zonemap_internal(rel,
+					info->zm_pk_typid, info->attNums[0],
+					info->zm_col2_usable ? info->zm_pk_typid2 : InvalidOid,
+					info->zm_col2_usable ? info->attNums[1] : 0);
+		}
+	}
 }
 
 static void
@@ -1378,6 +1607,12 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 	SortedHeapMetaPageData *meta;
 	StringInfoData buf;
 	int			show;
+	uint32		on_disk_version;
+	uint16		on_disk_nentries;
+	uint16		on_disk_ovfl_npages;
+	SortedHeapZoneMapEntry first_entries[5];
+	int			n_first_entries;
+	BlockNumber	last_meta_ovfl_blk = InvalidBlockNumber;
 
 	rel = table_open(relid, AccessShareLock);
 
@@ -1387,9 +1622,15 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 	metapage = BufferGetPage(metabuf);
 	meta = (SortedHeapMetaPageData *) PageGetSpecialPointer(metapage);
 
+	/* Save values before releasing buffer */
+	on_disk_version = meta->shm_version;
+
 	initStringInfo(&buf);
-	if (meta->shm_version >= 5)
+	if (on_disk_version >= 5)
 	{
+		on_disk_nentries = meta->shm_zonemap_nentries;
+		on_disk_ovfl_npages = meta->shm_overflow_npages;
+
 		appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u"
 						 " pk_typid2=%u flags=%u overflow_pages=%u",
 						 meta->shm_version,
@@ -1398,6 +1639,69 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 						 (unsigned) meta->shm_zonemap_pk_typid2,
 						 meta->shm_flags,
 						 (unsigned) meta->shm_overflow_npages);
+
+		/* Save first entries and last overflow block for after release */
+		n_first_entries = Min(on_disk_nentries, 5);
+		memcpy(first_entries, meta->shm_zonemap,
+			   n_first_entries * sizeof(SortedHeapZoneMapEntry));
+
+		if (on_disk_ovfl_npages > 0)
+			last_meta_ovfl_blk =
+				meta->shm_overflow_blocks[on_disk_ovfl_npages - 1];
+
+		UnlockReleaseBuffer(metabuf);
+
+		/* v6: count chain pages beyond meta slots */
+		if (on_disk_version >= 6 && on_disk_ovfl_npages > 0 &&
+			last_meta_ovfl_blk != InvalidBlockNumber)
+		{
+			uint32		total_overflow = on_disk_ovfl_npages;
+			BlockNumber	next_blk;
+			Buffer		ovfl_buf;
+			Page		ovfl_page;
+			SortedHeapOverflowPageData *ovfl;
+
+			ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+										  last_meta_ovfl_blk,
+										  RBM_NORMAL, NULL);
+			LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
+			ovfl_page = BufferGetPage(ovfl_buf);
+			ovfl = (SortedHeapOverflowPageData *)
+				PageGetSpecialPointer(ovfl_page);
+			next_blk = ovfl->shmo_next_block;
+			UnlockReleaseBuffer(ovfl_buf);
+
+			while (next_blk != InvalidBlockNumber)
+			{
+				total_overflow++;
+				ovfl_buf = ReadBufferExtended(rel, MAIN_FORKNUM,
+											  next_blk, RBM_NORMAL, NULL);
+				LockBuffer(ovfl_buf, BUFFER_LOCK_SHARE);
+				ovfl_page = BufferGetPage(ovfl_buf);
+				ovfl = (SortedHeapOverflowPageData *)
+					PageGetSpecialPointer(ovfl_page);
+				next_blk = ovfl->shmo_next_block;
+				UnlockReleaseBuffer(ovfl_buf);
+			}
+
+			if (total_overflow > on_disk_ovfl_npages)
+				appendStringInfo(&buf, " total_overflow_pages=%u",
+								 total_overflow);
+		}
+
+		/* Show first few entries */
+		for (int i = 0; i < n_first_entries; i++)
+		{
+			appendStringInfo(&buf, " [%d:" INT64_FORMAT ".." INT64_FORMAT,
+							 i + 1,
+							 first_entries[i].zme_min,
+							 first_entries[i].zme_max);
+			if (first_entries[i].zme_min2 != PG_INT64_MAX)
+				appendStringInfo(&buf, " c2:" INT64_FORMAT ".." INT64_FORMAT,
+								 first_entries[i].zme_min2,
+								 first_entries[i].zme_max2);
+			appendStringInfoChar(&buf, ']');
+		}
 	}
 	else
 	{
@@ -1413,29 +1717,6 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 						 meta4->shm_flags,
 						 (meta4->shm_version >= 4) ?
 						 (unsigned) meta4->shm_overflow_npages : 0);
-	}
-
-	/* Show first few entries for debugging */
-	show = Min(meta->shm_zonemap_nentries, 5);
-	if (meta->shm_version >= 5)
-	{
-		for (int i = 0; i < show; i++)
-		{
-			appendStringInfo(&buf, " [%d:" INT64_FORMAT ".." INT64_FORMAT,
-							 i + 1,
-							 meta->shm_zonemap[i].zme_min,
-							 meta->shm_zonemap[i].zme_max);
-			if (meta->shm_zonemap[i].zme_min2 != PG_INT64_MAX)
-				appendStringInfo(&buf, " c2:" INT64_FORMAT ".." INT64_FORMAT,
-								 meta->shm_zonemap[i].zme_min2,
-								 meta->shm_zonemap[i].zme_max2);
-			appendStringInfoChar(&buf, ']');
-		}
-	}
-	else
-	{
-		SortedHeapMetaPageDataV4 *meta4 =
-			(SortedHeapMetaPageDataV4 *) meta;
 
 		show = Min(meta4->shm_zonemap_nentries, 5);
 		for (int i = 0; i < show; i++)
@@ -1445,9 +1726,10 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 							 meta4->shm_zonemap[i].zme_min,
 							 meta4->shm_zonemap[i].zme_max);
 		}
+
+		UnlockReleaseBuffer(metabuf);
 	}
 
-	UnlockReleaseBuffer(metabuf);
 	table_close(rel, AccessShareLock);
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));

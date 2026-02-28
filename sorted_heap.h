@@ -9,16 +9,21 @@
 #include "storage/block.h"
 
 #define SORTED_HEAP_MAGIC		0x534F5254	/* 'SORT' */
-#define SORTED_HEAP_VERSION		5
+#define SORTED_HEAP_VERSION		6
 #define SORTED_HEAP_META_BLOCK	0
 #define SORTED_HEAP_MAX_KEYS	INDEX_MAX_KEYS
-#define SORTED_HEAP_ZONEMAP_MAX	250		/* v5 on-disk meta page entries */
-#define SORTED_HEAP_ZONEMAP_CACHE_MAX 500	/* in-memory cache entries (supports v4 + v5) */
+#define SORTED_HEAP_ZONEMAP_MAX	250		/* v5/v6 on-disk meta page entries */
+#define SORTED_HEAP_ZONEMAP_CACHE_MAX 500	/* in-memory cache entries (supports v4-v6) */
 
-/* Overflow zone map: up to 32 overflow pages, 255 entries each (v5) */
-#define SORTED_HEAP_OVERFLOW_MAX_PAGES		32
-#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE 255
-/* Total capacity: 250 + 32*255 = 8,410 entries (~65 MB at 8 KB/page) */
+/* Meta page overflow slots: block numbers stored directly in meta page */
+#define SORTED_HEAP_META_OVERFLOW_SLOTS		32
+
+/* v6 overflow pages: 254 entries + next_block pointer (linked list) */
+#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE 254
+/* No hard cap on overflow pages — linked list extends beyond meta slots */
+
+/* v5 backward compatibility */
+#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE_V5 255
 
 /* v4 backward compatibility constants */
 #define SORTED_HEAP_ZONEMAP_MAX_V4				500
@@ -63,19 +68,32 @@ typedef struct SortedHeapMetaPageData
 	/* 32 bytes of header above */
 	SortedHeapZoneMapEntry shm_zonemap[SORTED_HEAP_ZONEMAP_MAX];
 	/* overflow page block numbers (128 bytes) */
-	BlockNumber	shm_overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
+	BlockNumber	shm_overflow_blocks[SORTED_HEAP_META_OVERFLOW_SLOTS];
 } SortedHeapMetaPageData;
 
 /*
- * Overflow page data stored in special space of overflow pages.
- * v5: each page holds up to 255 entries (32 bytes each).
- * Total: 8 header + 255 * 32 = 8168 bytes (fits exactly).
+ * v5 overflow page: 8-byte header + 255 × 32-byte entries = 8168 bytes.
+ * Kept for reading pre-v6 tables.
+ */
+typedef struct SortedHeapOverflowPageDataV5
+{
+	uint32		shmo_magic;			/* SORTED_HEAP_MAGIC */
+	uint16		shmo_nentries;		/* entries in this page */
+	uint16		shmo_page_index;	/* 0-based index among overflow pages */
+	SortedHeapZoneMapEntry shmo_entries[SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE_V5];
+} SortedHeapOverflowPageDataV5;
+
+/*
+ * v6 overflow page: 16-byte header + 254 × 32-byte entries = 8144 bytes.
+ * Adds shmo_next_block for linked-list chain beyond meta page slots.
  */
 typedef struct SortedHeapOverflowPageData
 {
 	uint32		shmo_magic;			/* SORTED_HEAP_MAGIC */
 	uint16		shmo_nentries;		/* entries in this page */
 	uint16		shmo_page_index;	/* 0-based index among overflow pages */
+	BlockNumber	shmo_next_block;	/* next overflow page, or InvalidBlockNumber */
+	uint32		shmo_padding;		/* align entries to 8 bytes */
 	SortedHeapZoneMapEntry shmo_entries[SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE];
 } SortedHeapOverflowPageData;
 
@@ -108,7 +126,7 @@ typedef struct SortedHeapRelInfo
 	SortedHeapZoneMapEntry *zm_overflow;	/* palloc'd, or NULL */
 	uint32		zm_overflow_nentries;		/* entries in overflow pages */
 	uint32		zm_total_entries;			/* zm_nentries + zm_overflow_nentries */
-	uint16		zm_overflow_npages;			/* number of overflow pages */
+	uint32		zm_overflow_npages;			/* number of overflow pages */
 } SortedHeapRelInfo;
 
 /*
@@ -156,7 +174,8 @@ typedef struct SortedHeapSharedStats
 	pg_atomic_uint64 blocks_pruned;
 } SortedHeapSharedStats;
 
-/* GUC variable */
+/* GUC variables */
 extern bool sorted_heap_enable_scan_pruning;
+extern bool sorted_heap_vacuum_rebuild_zonemap;
 
 #endif							/* SORTED_HEAP_H */

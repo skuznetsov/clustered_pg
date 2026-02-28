@@ -1520,6 +1520,15 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("sorted_heap.vacuum_rebuild_zonemap",
+							 "Rebuild zone map during VACUUM when invalid.",
+							 NULL,
+							 &sorted_heap_vacuum_rebuild_zonemap,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	MarkGUCPrefixReserved("sorted_heap");
 
 	CacheRegisterRelcacheCallback(clustered_pg_relcache_callback, (Datum) 0);

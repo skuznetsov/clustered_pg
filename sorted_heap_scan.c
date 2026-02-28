@@ -112,6 +112,8 @@ static Plan *sorted_heap_plan_custom_path(PlannerInfo *root,
 static Node *sorted_heap_create_scan_state(CustomScan *cscan);
 static void sorted_heap_begin_custom_scan(CustomScanState *node,
 										  EState *estate, int eflags);
+static TupleTableSlot *sorted_heap_scan_next(ScanState *ss);
+static bool sorted_heap_scan_recheck(ScanState *ss, TupleTableSlot *slot);
 static TupleTableSlot *sorted_heap_exec_custom_scan(CustomScanState *node);
 static void sorted_heap_end_custom_scan(CustomScanState *node);
 static void sorted_heap_rescan_custom_scan(CustomScanState *node);
@@ -910,17 +912,18 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 }
 
 /* ----------------------------------------------------------------
- *  ExecCustomScan — return next matching tuple
+ *  Scan access method — return next zone-map-qualified scan tuple.
+ *
+ *  Called by ExecScan() as the "access method" callback.  Returns raw
+ *  scan tuples from the heap with zone-map block pruning applied.
+ *  Qual evaluation and projection are handled by ExecScan itself.
  * ---------------------------------------------------------------- */
 static TupleTableSlot *
-sorted_heap_exec_custom_scan(CustomScanState *node)
+sorted_heap_scan_next(ScanState *ss)
 {
+	CustomScanState *node = (CustomScanState *) ss;
 	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
-	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-	ExprContext *econtext = node->ss.ps.ps_ExprContext;
-	ExprState  *qual = node->ss.ps.qual;
-
-	ResetExprContext(econtext);
+	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 
 	while (table_scan_getnextslot(shstate->heap_scan,
 								  ForwardScanDirection, slot))
@@ -949,18 +952,34 @@ sorted_heap_exec_custom_scan(CustomScanState *node)
 			}
 		}
 
-		/* Evaluate quals */
-		econtext->ecxt_scantuple = slot;
-		if (qual && !ExecQual(qual, econtext))
-		{
-			ResetExprContext(econtext);
-			continue;
-		}
-
 		return slot;
 	}
 
 	return NULL;
+}
+
+/* ----------------------------------------------------------------
+ *  EPQ recheck — always true (quals are evaluated by ExecScan)
+ * ---------------------------------------------------------------- */
+static bool
+sorted_heap_scan_recheck(ScanState *ss, TupleTableSlot *slot)
+{
+	return true;
+}
+
+/* ----------------------------------------------------------------
+ *  ExecCustomScan — delegates to ExecScan for qual + projection.
+ *
+ *  PG 18 calls methods->ExecCustomScan directly (no ExecScan wrapper),
+ *  so we must invoke ExecScan ourselves to get proper qual evaluation
+ *  and projection from scan tuple to result tuple.
+ * ---------------------------------------------------------------- */
+static TupleTableSlot *
+sorted_heap_exec_custom_scan(CustomScanState *node)
+{
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) sorted_heap_scan_next,
+					(ExecScanRecheckMtd) sorted_heap_scan_recheck);
 }
 
 /* ----------------------------------------------------------------

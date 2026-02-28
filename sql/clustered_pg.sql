@@ -1244,7 +1244,7 @@ INSERT INTO sh8_intint
 SELECT sorted_heap_compact('sh8_intint'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_intint'::regclass)
-              LIKE 'version=5%pk_typid=23 pk_typid2=23%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=23%flags=2%'
          THEN 'sh8_intint_zonemap_ok'
          ELSE 'sh8_intint_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_intint'::regclass)
     END AS sh8_1_result;
@@ -1280,7 +1280,7 @@ INSERT INTO sh8_ts
 SELECT sorted_heap_compact('sh8_ts'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_ts'::regclass)
-              LIKE 'version=5%pk_typid=23 pk_typid2=1114%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=1114%flags=2%'
          THEN 'sh8_ts_zonemap_ok'
          ELSE 'sh8_ts_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_ts'::regclass)
     END AS sh8_4_result;
@@ -1294,7 +1294,7 @@ SELECT sorted_heap_compact('sh8_text'::regclass);
 -- pk_typid2 should be 0 (InvalidOid) — text not supported
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_text'::regclass)
-              LIKE 'version=5%pk_typid=23 pk_typid2=0%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=2%'
          THEN 'sh8_text_degradation_ok'
          ELSE 'sh8_text_degradation_FAIL: ' || sorted_heap_zonemap_stats('sh8_text'::regclass)
     END AS sh8_5_result;
@@ -1307,7 +1307,7 @@ INSERT INTO sh8_single SELECT g, repeat('w', 40) FROM generate_series(1, 300) g;
 SELECT sorted_heap_compact('sh8_single'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_single'::regclass)
-              LIKE 'version=5%pk_typid=23 pk_typid2=0%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=2%'
          THEN 'sh8_single_ok'
          ELSE 'sh8_single_FAIL: ' || sorted_heap_zonemap_stats('sh8_single'::regclass)
     END AS sh8_6_result;
@@ -1722,6 +1722,145 @@ SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_varchar'::regclass)
 DROP TABLE sh13_varchar;
 DROP TABLE sh13_text;
 DROP TABLE sh13_uuid;
+
+-- ================================================================
+-- SH14: Unlimited Zone Map Capacity (v6 linked overflow)
+-- ================================================================
+
+-- SH14-1: Create wide-row table exceeding old 32 overflow page limit
+-- Each row ~430 bytes → ~18 rows/page → 170K rows ≈ 9,444 pages
+-- Old limit was 8,410 pages (250 + 32*255). This exceeds it.
+CREATE TABLE sh14_big(
+    id int PRIMARY KEY,
+    padding text
+) USING sorted_heap;
+
+INSERT INTO sh14_big
+  SELECT g, repeat('x', 400)
+  FROM generate_series(1, 170000) g;
+
+SELECT sorted_heap_compact('sh14_big'::regclass);
+
+-- SH14-2: Zone map stats should show full meta page + overflow with chain
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh14_big'::regclass)
+                 LIKE '%nentries=250%flags=2%total_overflow_pages=%'
+         THEN 'sh14_overflow_chain_ok'
+         ELSE 'sh14_overflow_chain_FAIL: ' ||
+              sorted_heap_zonemap_stats('sh14_big'::regclass)
+    END AS sh14_2_result;
+
+-- SH14-3: Scan pruning on high page numbers (data in overflow range)
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+SELECT sh6_plan_contains(
+    'SELECT id FROM sh14_big WHERE id = 169000',
+    'SortedHeapScan') AS sh14_3_plan;
+
+SELECT id FROM sh14_big WHERE id = 169000;
+
+-- SH14-4: Range query in overflow zone
+SELECT count(*) FROM sh14_big WHERE id BETWEEN 168000 AND 170000;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+DROP TABLE sh14_big;
+
+-- ================================================================
+-- SH15: VACUUM Zone Map Rebuild
+-- ================================================================
+
+-- SH15-1: Create table, compact → zone map valid (flags=2)
+CREATE TABLE sh15_vac(
+    id int PRIMARY KEY,
+    val int
+) USING sorted_heap;
+
+INSERT INTO sh15_vac SELECT g, g FROM generate_series(1, 5000) g;
+SELECT sorted_heap_compact('sh15_vac'::regclass);
+
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh15_zm_valid_after_compact'
+         ELSE 'sh15_zm_FAIL'
+    END AS sh15_1_result;
+
+-- SH15-2: Single-row INSERTs to overflow onto new page → invalidate zone map
+-- After compact, zm_nentries covers all pages. We need INSERTs that spill
+-- to a new page (zmidx >= zm_nentries).
+DO $$
+BEGIN
+    FOR i IN 5001..5500 LOOP
+        INSERT INTO sh15_vac VALUES (i, i);
+    END LOOP;
+END;
+$$;
+
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
+                 NOT LIKE '%flags=2%'
+         THEN 'sh15_zm_invalidated_ok'
+         ELSE 'sh15_zm_still_valid_FAIL'
+    END AS sh15_2_result;
+
+-- SH15-3: VACUUM should rebuild zone map (zone map becomes valid again)
+VACUUM sh15_vac;
+
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh15_vacuum_rebuilt_zm_ok'
+         ELSE 'sh15_vacuum_rebuild_FAIL: ' ||
+              sorted_heap_zonemap_stats('sh15_vac'::regclass)
+    END AS sh15_3_result;
+
+-- SH15-4: Scan pruning works after vacuum rebuild
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+SELECT sh6_plan_contains(
+    'SELECT id FROM sh15_vac WHERE id = 100',
+    'SortedHeapScan') AS sh15_4_plan;
+
+SELECT id FROM sh15_vac WHERE id = 100;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+-- SH15-5: GUC off → VACUUM does NOT rebuild zone map
+-- First invalidate again
+DO $$
+BEGIN
+    FOR i IN 5501..6000 LOOP
+        INSERT INTO sh15_vac VALUES (i, i);
+    END LOOP;
+END;
+$$;
+
+SET sorted_heap.vacuum_rebuild_zonemap = off;
+VACUUM sh15_vac;
+
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
+                 NOT LIKE '%flags=2%'
+         THEN 'sh15_guc_off_no_rebuild_ok'
+         ELSE 'sh15_guc_off_FAIL'
+    END AS sh15_5_result;
+
+-- SH15-6: Reset GUC, VACUUM → rebuilt
+RESET sorted_heap.vacuum_rebuild_zonemap;
+VACUUM sh15_vac;
+
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh15_guc_on_rebuild_ok'
+         ELSE 'sh15_guc_on_FAIL: ' ||
+              sorted_heap_zonemap_stats('sh15_vac'::regclass)
+    END AS sh15_6_result;
+
+DROP TABLE sh15_vac;
 
 DROP FUNCTION sh6_plan_contains(text, text);
 
