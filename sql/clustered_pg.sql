@@ -1862,6 +1862,97 @@ SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
 
 DROP TABLE sh15_vac;
 
+-- ============================================================
+-- SH16: Secondary index preservation across all rewrite paths
+-- ============================================================
+
+-- SH16-1: Create table with secondary indexes
+CREATE TABLE sh16_idx(
+    id int PRIMARY KEY,
+    category int,
+    name text
+) USING sorted_heap;
+
+CREATE INDEX sh16_idx_category ON sh16_idx(category);
+CREATE INDEX sh16_idx_name ON sh16_idx(name);
+
+INSERT INTO sh16_idx
+  SELECT g, g % 100, 'name_' || lpad(g::text, 6, '0')
+  FROM generate_series(1, 10000) g;
+
+-- SH16-2: Verify secondary indexes work pre-compact
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_pre_compact_cat
+  FROM sh16_idx WHERE category = 42;
+SELECT id AS sh16_pre_compact_name
+  FROM sh16_idx WHERE name = 'name_005000';
+RESET enable_seqscan;
+
+-- SH16-3: Compact → secondary indexes rebuilt by cluster_rel
+SELECT sorted_heap_compact('sh16_idx'::regclass);
+
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_post_compact_cat
+  FROM sh16_idx WHERE category = 42;
+SELECT id AS sh16_post_compact_name
+  FROM sh16_idx WHERE name = 'name_005000';
+RESET enable_seqscan;
+
+-- SH16-4: Merge → finish_heap_swap updates secondary indexes
+INSERT INTO sh16_idx
+  SELECT g, g % 100, 'name_' || lpad(g::text, 6, '0')
+  FROM generate_series(10001, 15000) g;
+
+SELECT sorted_heap_merge('sh16_idx'::regclass);
+
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_post_merge_cat
+  FROM sh16_idx WHERE category = 42;
+SELECT id AS sh16_post_merge_name
+  FROM sh16_idx WHERE name = 'name_012000';
+RESET enable_seqscan;
+
+-- SH16-5: Online compact → finish_heap_swap updates secondary indexes
+INSERT INTO sh16_idx
+  SELECT g, g % 100, 'name_' || lpad(g::text, 6, '0')
+  FROM generate_series(15001, 20000) g;
+
+CALL sorted_heap_compact_online('sh16_idx'::regclass);
+
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_post_online_compact_cat
+  FROM sh16_idx WHERE category = 42;
+SELECT id AS sh16_post_online_compact_name
+  FROM sh16_idx WHERE name = 'name_018000';
+RESET enable_seqscan;
+
+-- SH16-6: Online merge → finish_heap_swap updates secondary indexes
+INSERT INTO sh16_idx
+  SELECT g, g % 100, 'name_' || lpad(g::text, 6, '0')
+  FROM generate_series(20001, 25000) g;
+
+CALL sorted_heap_merge_online('sh16_idx'::regclass);
+
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_post_online_merge_cat
+  FROM sh16_idx WHERE category = 42;
+SELECT id AS sh16_post_online_merge_name
+  FROM sh16_idx WHERE name = 'name_022000';
+RESET enable_seqscan;
+
+-- SH16-7: DML with secondary indexes
+UPDATE sh16_idx SET category = 999 WHERE id = 1;
+DELETE FROM sh16_idx WHERE id = 2;
+
+SET enable_seqscan = off;
+SELECT count(*) AS sh16_dml_cat999
+  FROM sh16_idx WHERE category = 999;
+SELECT count(*) AS sh16_dml_total
+  FROM sh16_idx;
+RESET enable_seqscan;
+
+DROP TABLE sh16_idx;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;

@@ -40,8 +40,8 @@ Parallel scan (large tables):
 | `sorted_heap_scan.c` | 1187 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 1044 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
-| `sql/clustered_pg.sql` | 1867 | Regression tests (SH1–SH15) |
-| `expected/clustered_pg.out` | 2809 | Expected test output |
+| `sql/clustered_pg.sql` | 1958 | Regression tests (SH1–SH16) |
+| `expected/clustered_pg.out` | 2965 | Expected test output |
 
 ## Completed Phases
 
@@ -269,6 +269,14 @@ to physical sort order (sequential I/O vs random index lookups).
   `ExecScan()` which handles quals and projection
 - Fixed SEGFAULT with WindowAgg/ModifyTable plans and protocol field count
   errors with direct Limit→CustomScan plans
+
+**SH16: Secondary Index Preservation**
+- SH16 test suite: secondary indexes (btree on non-PK columns) survive all
+  four rewrite paths: compact, merge, online compact, online merge
+- Index build delegated to heap via `rd_tableam` swap trick
+- Compact uses `cluster_rel()` (rebuilds indexes); merge/online variants
+  use `finish_heap_swap()` (updates index filenodes)
+- DML (UPDATE/DELETE) with secondary indexes verified
 
 ## Possible Future Work
 
