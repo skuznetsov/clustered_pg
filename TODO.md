@@ -23,19 +23,25 @@ SELECT ... WHERE pk_col <op> const
     → CustomPath (SortedHeapScan) with pruned cost
     → heap_setscanlimits(start, nblocks) — physical I/O skip
     → per-block zone map check in ExecCustomScan
+
+Parallel scan (large tables):
+    → add_partial_path with parallel_aware=true
+    → Gather wraps SortedHeapScan
+    → PG parallel table scan API distributes blocks among workers
+    → each worker applies per-block zone map pruning independently
 ```
 
 ## Source Files
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 157 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
-| `sorted_heap.c` | 1678 | Table AM: sorted multi_insert, zone map persistence, compact |
-| `sorted_heap_scan.c` | 1035 | Custom scan provider: planner hook, multi-col pruning, EXPLAIN |
+| `sorted_heap.h` | 158 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
+| `sorted_heap.c` | 1679 | Table AM: sorted multi_insert, zone map persistence, compact |
+| `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 603 | Online compact: trigger, copy, replay, swap |
-| `clustered_pg.c` | 1517 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1323 | Regression tests |
-| `expected/clustered_pg.out` | 2028 | Expected test output |
+| `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
+| `sql/clustered_pg.sql` | 1396 | Regression tests |
+| `expected/clustered_pg.out` | 2126 | Expected test output |
 
 ## Completed Phases
 
@@ -149,9 +155,20 @@ sort order (sequential I/O vs random index lookups).
 - Meta page capacity: 250 entries (v5) vs 500 (v4)
 - Overflow capacity: 255 entries/page (v5) vs 509 (v4)
 
+### Phase 9 — Parallel Custom Scan
+- Parallel-aware SortedHeapScan via PostgreSQL's parallel table scan API
+- Planner adds partial path (`add_partial_path`) when `compute_parallel_worker`
+  returns > 0 workers; Gather node wraps parallel SortedHeapScan
+- DSM callbacks: `EstimateDSM`, `InitializeDSM`, `ReInitializeDSM`,
+  `InitializeWorker` — use `table_parallelscan_initialize` / `table_beginscan_parallel`
+- Workers coordinate block distribution through PG's native mechanism;
+  each worker applies per-block zone map pruning independently
+- Fix: `sorted_heap_get_zm_entry()` used hardcoded `SORTED_HEAP_ZONEMAP_CACHE_MAX`
+  (500) as cache/overflow boundary — incorrect for v5 format (250 entries).
+  Changed to `info->zm_nentries` so overflow lookup adapts to format version.
+
 ## Possible Future Work
 
 - Zone map support for text, uuid types
 - Merge multiple sorted runs without full CLUSTER rewrite
-- Parallel custom scan support
 - Index-only scan equivalent using zone map
