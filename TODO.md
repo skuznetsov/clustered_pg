@@ -126,9 +126,16 @@ to physical sort order (sequential I/O vs random index lookups).
 - Single-row INSERT into a covered page updates zone map in-place
   (preserving scan pruning). INSERT into an uncovered page invalidates
   scan pruning until next compact.
+- TOAST: sorted_heap delegates TOAST storage entirely to heap. Large
+  values (>2KB) survive all rewrite paths (compact, merge, online
+  compact, online merge). Tested with 4KB payloads, 25K rows.
 - `sorted_heap_compact()` acquires AccessExclusiveLock — blocks all
   concurrent reads and writes. Use `sorted_heap_compact_online()` for
   non-blocking compaction.
+- Concurrent online compact/merge on the same table: second session
+  receives "relation already exists" error (implicit guard via log table
+  name `_sh_compact_log_<oid>`). First session completes normally;
+  re-run succeeds after cleanup. No explicit advisory lock needed.
 - `heap_setscanlimits()` only supports contiguous block ranges.
   Non-contiguous pruning handled per-block in ExecCustomScan (still reads
   pages, but skips tuple processing).
