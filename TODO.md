@@ -83,7 +83,7 @@ Basic `sorted_heap` AM that delegates everything to heap.
 
 ## Benchmark Results (500K rows, ~56 MB, warm cache)
 
-PostgreSQL 18.1, Apple M-series, zone map v5 with multi-column support.
+PostgreSQL 18.1, Apple M-series, zone map v6 with ExecScan projection.
 
 ### sorted_heap vs Heap SeqScan (no index)
 
@@ -91,24 +91,24 @@ Primary use case — sorted_heap eliminates the need for a separate index.
 
 | Query | Heap (SeqScan) | sorted_heap (SortedHeapScan) | Speedup |
 |-------|---------------|------------------------------|---------|
-| Point query (1 row) | 10.1ms / 7143 bufs | 0.017ms / 1 buf | 595x |
-| Narrow range (100 rows) | 11.7ms / 7143 bufs | 0.018ms / 2 bufs | 650x |
-| Medium range (5K rows) | 11.3ms / 7143 bufs | 0.512ms / 73 bufs | 22x |
-| Wide range (100K rows) | 21.5ms / 7143 bufs | 7.3ms / 1430 bufs | 3x |
-| Full scan | 14.8ms / 7143 bufs | 15.2ms / 7158 bufs | ~1x |
+| Point query (1 row) | 14.5ms / 7143 bufs | 0.025ms / 1 buf | 580x |
+| Narrow range (100 rows) | 17.0ms / 7143 bufs | 0.042ms / 2 bufs | 405x |
+| Medium range (5K rows) | 18.4ms / 7143 bufs | 0.480ms / 72 bufs | 38x |
+| Wide range (100K rows) | 20.4ms / 7143 bufs | 6.9ms / 1430 bufs | 3x |
+| Full scan | 26.4ms / 7143 bufs | 28.8ms / 7172 bufs | ~1x |
 
 ### sorted_heap vs Heap IndexScan (btree PK)
 
 | Query | Heap (IndexScan) | sorted_heap (SortedHeapScan) | Ratio |
 |-------|-----------------|------------------------------|-------|
-| Point query (1 row) | 0.009ms / 4 bufs | 0.017ms / 1 buf | 0.5x |
-| Narrow range (100 rows) | 0.015ms / 6 bufs | 0.018ms / 2 bufs | ~1x |
-| Medium range (5K rows) | 0.477ms / 89 bufs | 0.512ms / 73 bufs | ~1x |
-| Wide range (100K rows) | 9.0ms / 1706 bufs | 7.3ms / 1430 bufs | 1.2x |
+| Point query (1 row) | 0.026ms / 4 bufs | 0.025ms / 1 buf | ~1x |
+| Narrow range (100 rows) | 0.019ms / 5 bufs | 0.042ms / 2 bufs | 0.5x |
+| Medium range (5K rows) | 0.433ms / 88 bufs | 0.480ms / 72 bufs | ~1x |
+| Wide range (100K rows) | 7.5ms / 1706 bufs | 6.9ms / 1430 bufs | 1.1x |
 
-Zone map granularity is per-page, so point queries are ~2x slower than
-btree. For wide ranges sorted_heap wins on buffer hits due to physical
-sort order (sequential I/O vs random index lookups).
+Zone map granularity is per-page, so narrow queries read slightly more
+tuples than btree. For wide ranges sorted_heap wins on buffer hits due
+to physical sort order (sequential I/O vs random index lookups).
 
 ## Known Limitations
 
