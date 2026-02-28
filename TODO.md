@@ -36,12 +36,14 @@ Parallel scan (large tables):
 | File | Lines | Purpose |
 |------|------:|---------|
 | `sorted_heap.h` | 181 | Meta page layout, zone map structs (v5/v6), SortedHeapRelInfo |
-| `sorted_heap.c` | 2400 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
+| `sorted_heap.c` | 2410 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
 | `sorted_heap_scan.c` | 1187 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning |
-| `sorted_heap_online.c` | 1044 | Online compact + online merge: trigger, copy, replay, swap |
+| `sorted_heap_online.c` | 1053 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
 | `sql/clustered_pg.sql` | 2032 | Regression tests (SH1–SH16) |
 | `expected/clustered_pg.out` | 3066 | Expected test output |
+| `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
+| `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 
 ## Completed Phases
 
@@ -279,6 +281,38 @@ to physical sort order (sequential I/O vs random index lookups).
 - DML (UPDATE/DELETE) with secondary indexes verified
 - UNIQUE constraints on secondary indexes enforced correctly after
   compact, merge, online compact, and online merge
+
+**Bug Fix: NULL tg_newtuple in Online Compact Trigger**
+- `sorted_heap_compact_trigger()` used `tg_newtuple` for INSERT events,
+  but PostgreSQL sets `tg_newtuple = NULL` for INSERT (and DELETE) triggers.
+  Only UPDATE populates `tg_newtuple` with the new row; INSERT and DELETE
+  store the affected row in `tg_trigtuple`.
+- Caused SIGSEGV (signal 11) on every concurrent INSERT during online
+  compact/merge. Also crashed on every INSERT after crash recovery
+  (trigger persists, log table reset from UNLOGGED INIT fork).
+- Fix: use `tg_newtuple` only for UPDATE; use `tg_trigtuple` for INSERT
+  and DELETE.
+- Added defensive `nblocks` check in `sorted_heap_tuple_insert` before
+  reading meta page for zone map invalidation.
+
+**Concurrent Workload Tests** (`scripts/test_concurrent_online_ops.sh`)
+- Ephemeral PG cluster with 50K-row sorted_heap table + secondary index
+- Test A: online compact with 4 background DML workers
+  (INSERT / UPDATE / DELETE / SELECT) running for 15 seconds
+- Test B: online merge with same 4 workers
+- 6 checks: count > 0, no duplicate PKs, secondary index consistency
+  (each verified after compact and after merge)
+- Workers: ~400+ ops each, no crashes, no data corruption
+
+**Crash Recovery Tests** (`scripts/test_crash_recovery.sh`)
+- 4 scenarios, each in its own ephemeral PG cluster:
+  1. Crash during COPY — pre-crash committed data survives, no dup PKs
+  2. Crash after compact — zone map persists via GenericXLog WAL replay,
+     scan pruning works after recovery
+  3. Crash during zone map rebuild — table accessible, re-rebuild succeeds
+  4. Crash during online compact Phase 2 — original table intact, zone map
+     preserved, no orphaned log tables, compact succeeds post-recovery
+- 15 checks, all pass. `checkpoint_timeout = 30s` (PG 18 minimum).
 
 ## Possible Future Work
 
