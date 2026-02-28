@@ -2961,5 +2961,106 @@ SELECT count(*) AS sh16_dml_total
 
 RESET enable_seqscan;
 DROP TABLE sh16_idx;
+-- SH16-8: UNIQUE constraint on secondary index
+CREATE TABLE sh16_uniq(
+    id int PRIMARY KEY,
+    email text,
+    code int
+) USING sorted_heap;
+CREATE UNIQUE INDEX sh16_uniq_email ON sh16_uniq(email);
+CREATE UNIQUE INDEX sh16_uniq_code  ON sh16_uniq(code);
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(1, 5000) g;
+-- Duplicate email must fail
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9999, 'user1@test.com', 99990);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_email"
+DETAIL:  Key (email)=(user1@test.com) already exists.
+\set ON_ERROR_STOP on
+-- Duplicate code must fail
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9998, 'unique@test.com', 10);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_code"
+DETAIL:  Key (code)=(10) already exists.
+\set ON_ERROR_STOP on
+-- SH16-9: UNIQUE constraint survives compact
+SELECT sorted_heap_compact('sh16_uniq'::regclass);
+NOTICE:  sorted_heap_compact acquires AccessExclusiveLock
+HINT:  Schedule during maintenance windows. Concurrent reads and writes are blocked.
+ sorted_heap_compact 
+---------------------
+ 
+(1 row)
+
+SET enable_seqscan = off;
+SELECT id AS sh16_uniq_lookup
+  FROM sh16_uniq WHERE email = 'user2500@test.com';
+ sh16_uniq_lookup 
+------------------
+             2500
+(1 row)
+
+RESET enable_seqscan;
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9997, 'user1@test.com', 99970);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_email"
+DETAIL:  Key (email)=(user1@test.com) already exists.
+\set ON_ERROR_STOP on
+-- SH16-10: UNIQUE constraint survives merge
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(5001, 8000) g;
+SELECT sorted_heap_merge('sh16_uniq'::regclass);
+NOTICE:  sorted_heap_merge acquires AccessExclusiveLock
+HINT:  Schedule during maintenance windows. Concurrent reads and writes are blocked.
+NOTICE:  sorted_heap_merge: 37 prefix pages (sequential scan), 22 tail pages (tuplesort)
+NOTICE:  sorted_heap_merge: completed (8000 tuples, 37 prefix + 22 tail pages)
+ sorted_heap_merge 
+-------------------
+ 
+(1 row)
+
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9996, 'user6000@test.com', 99960);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_email"
+DETAIL:  Key (email)=(user6000@test.com) already exists.
+\set ON_ERROR_STOP on
+-- SH16-11: UNIQUE constraint survives online compact
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(8001, 10000) g;
+CALL sorted_heap_compact_online('sh16_uniq'::regclass);
+NOTICE:  online compact: starting for "sh16_uniq"
+HINT:  Concurrent reads and writes are allowed. Brief exclusive lock at the end for swap.
+NOTICE:  online compact: copied 10000 tuples
+NOTICE:  online compact: completed for "sh16_uniq" (10000 tuples)
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9995, 'user9000@test.com', 99950);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_pkey"
+DETAIL:  Key (id)=(9995) already exists.
+\set ON_ERROR_STOP on
+-- SH16-12: UNIQUE constraint survives online merge
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(10001, 12000) g;
+CALL sorted_heap_merge_online('sh16_uniq'::regclass);
+NOTICE:  online merge: starting for "sh16_uniq"
+HINT:  Concurrent reads and writes are allowed. Brief exclusive lock at the end for swap.
+NOTICE:  online merge: copied 12000 tuples (74 prefix + 15 tail pages)
+NOTICE:  online merge: completed for "sh16_uniq" (12000 tuples)
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9994, 'user11000@test.com', 99940);
+ERROR:  duplicate key value violates unique constraint "sh16_uniq_pkey"
+DETAIL:  Key (id)=(9994) already exists.
+\set ON_ERROR_STOP on
+-- Final count: only the original rows, no duplicates snuck in
+SELECT count(*) AS sh16_uniq_final FROM sh16_uniq;
+ sh16_uniq_final 
+-----------------
+           12000
+(1 row)
+
+DROP TABLE sh16_uniq;
 DROP FUNCTION sh6_plan_contains(text, text);
 DROP EXTENSION clustered_pg;

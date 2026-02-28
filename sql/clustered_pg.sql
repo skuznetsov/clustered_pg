@@ -1953,6 +1953,80 @@ RESET enable_seqscan;
 
 DROP TABLE sh16_idx;
 
+-- SH16-8: UNIQUE constraint on secondary index
+CREATE TABLE sh16_uniq(
+    id int PRIMARY KEY,
+    email text,
+    code int
+) USING sorted_heap;
+
+CREATE UNIQUE INDEX sh16_uniq_email ON sh16_uniq(email);
+CREATE UNIQUE INDEX sh16_uniq_code  ON sh16_uniq(code);
+
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(1, 5000) g;
+
+-- Duplicate email must fail
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9999, 'user1@test.com', 99990);
+\set ON_ERROR_STOP on
+
+-- Duplicate code must fail
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9998, 'unique@test.com', 10);
+\set ON_ERROR_STOP on
+
+-- SH16-9: UNIQUE constraint survives compact
+SELECT sorted_heap_compact('sh16_uniq'::regclass);
+
+SET enable_seqscan = off;
+SELECT id AS sh16_uniq_lookup
+  FROM sh16_uniq WHERE email = 'user2500@test.com';
+RESET enable_seqscan;
+
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9997, 'user1@test.com', 99970);
+\set ON_ERROR_STOP on
+
+-- SH16-10: UNIQUE constraint survives merge
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(5001, 8000) g;
+
+SELECT sorted_heap_merge('sh16_uniq'::regclass);
+
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9996, 'user6000@test.com', 99960);
+\set ON_ERROR_STOP on
+
+-- SH16-11: UNIQUE constraint survives online compact
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(8001, 10000) g;
+
+CALL sorted_heap_compact_online('sh16_uniq'::regclass);
+
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9995, 'user9000@test.com', 99950);
+\set ON_ERROR_STOP on
+
+-- SH16-12: UNIQUE constraint survives online merge
+INSERT INTO sh16_uniq
+  SELECT g, 'user' || g || '@test.com', g * 10
+  FROM generate_series(10001, 12000) g;
+
+CALL sorted_heap_merge_online('sh16_uniq'::regclass);
+
+\set ON_ERROR_STOP off
+INSERT INTO sh16_uniq VALUES (9994, 'user11000@test.com', 99940);
+\set ON_ERROR_STOP on
+
+-- Final count: only the original rows, no duplicates snuck in
+SELECT count(*) AS sh16_uniq_final FROM sh16_uniq;
+
+DROP TABLE sh16_uniq;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;

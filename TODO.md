@@ -40,8 +40,8 @@ Parallel scan (large tables):
 | `sorted_heap_scan.c` | 1187 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 1044 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
-| `sql/clustered_pg.sql` | 1958 | Regression tests (SH1–SH16) |
-| `expected/clustered_pg.out` | 2965 | Expected test output |
+| `sql/clustered_pg.sql` | 2032 | Regression tests (SH1–SH16) |
+| `expected/clustered_pg.out` | 3066 | Expected test output |
 
 ## Completed Phases
 
@@ -277,6 +277,8 @@ to physical sort order (sequential I/O vs random index lookups).
 - Compact uses `cluster_rel()` (rebuilds indexes); merge/online variants
   use `finish_heap_swap()` (updates index filenodes)
 - DML (UPDATE/DELETE) with secondary indexes verified
+- UNIQUE constraints on secondary indexes enforced correctly after
+  compact, merge, online compact, and online merge
 
 ## Possible Future Work
 
