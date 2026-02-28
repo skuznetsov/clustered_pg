@@ -113,14 +113,15 @@ typedef struct SortedHeapRelInfo
 
 /*
  * Inline helper to access zone map entry by global index.
- * Entries 0..499 are in the cache array; 500+ in overflow.
+ * Entries 0..zm_nentries-1 are in the cache array; the rest in overflow.
+ * (v4 stores up to 500 in cache, v5 stores up to 250.)
  */
 static inline SortedHeapZoneMapEntry *
 sorted_heap_get_zm_entry(SortedHeapRelInfo *info, uint32 idx)
 {
-	if (idx < SORTED_HEAP_ZONEMAP_CACHE_MAX)
+	if (idx < info->zm_nentries)
 		return &info->zm_entries[idx];
-	return &info->zm_overflow[idx - SORTED_HEAP_ZONEMAP_CACHE_MAX];
+	return &info->zm_overflow[idx - info->zm_nentries];
 }
 
 extern Datum sorted_heap_tableam_handler(PG_FUNCTION_ARGS);

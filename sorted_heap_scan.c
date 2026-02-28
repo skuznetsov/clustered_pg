@@ -35,6 +35,8 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
+#include "access/parallel.h"
+
 #include "sorted_heap.h"
 
 /* ----------------------------------------------------------------
@@ -73,6 +75,8 @@ typedef struct SortedHeapScanState
 	BlockNumber		scanned_blocks;
 	BlockNumber		pruned_blocks;
 	BlockNumber		last_blk;			/* track block transitions */
+	/* Parallel support: PG's parallel table scan descriptor in DSM */
+	ParallelTableScanDesc pscan;		/* NULL for serial scans */
 } SortedHeapScanState;
 
 /* ----------------------------------------------------------------
@@ -115,6 +119,19 @@ static void sorted_heap_explain_custom_scan(CustomScanState *node,
 											List *ancestors,
 											ExplainState *es);
 
+/* Parallel support */
+static Size sorted_heap_estimate_dsm(CustomScanState *node,
+									 ParallelContext *pcxt);
+static void sorted_heap_initialize_dsm(CustomScanState *node,
+									   ParallelContext *pcxt,
+									   void *coordinate);
+static void sorted_heap_reinitialize_dsm(CustomScanState *node,
+										 ParallelContext *pcxt,
+										 void *coordinate);
+static void sorted_heap_initialize_worker(CustomScanState *node,
+										  shm_toc *toc,
+										  void *coordinate);
+
 /* ----------------------------------------------------------------
  *  Static state
  * ---------------------------------------------------------------- */
@@ -150,6 +167,10 @@ static CustomExecMethods sorted_heap_exec_methods = {
 	.ExecCustomScan = sorted_heap_exec_custom_scan,
 	.EndCustomScan = sorted_heap_end_custom_scan,
 	.ReScanCustomScan = sorted_heap_rescan_custom_scan,
+	.EstimateDSMCustomScan = sorted_heap_estimate_dsm,
+	.InitializeDSMCustomScan = sorted_heap_initialize_dsm,
+	.ReInitializeDSMCustomScan = sorted_heap_reinitialize_dsm,
+	.InitializeWorkerCustomScan = sorted_heap_initialize_worker,
 	.ExplainCustomScan = sorted_heap_explain_custom_scan,
 };
 
@@ -282,7 +303,7 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	cpath->path.pathtarget = rel->reltarget;
 	cpath->path.param_info = NULL;
 	cpath->path.parallel_aware = false;
-	cpath->path.parallel_safe = false;
+	cpath->path.parallel_safe = rel->consider_parallel;
 	cpath->path.parallel_workers = 0;
 	cpath->path.pathkeys = NIL;
 
@@ -339,6 +360,40 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	add_path(rel, &cpath->path);
+
+	/* Also offer a parallel partial path if beneficial */
+	if (rel->consider_parallel && nblocks > 0)
+	{
+		int		pw;
+
+		pw = compute_parallel_worker(rel, (double) nblocks, -1,
+									 max_parallel_workers_per_gather);
+		if (pw > 0)
+		{
+			CustomPath *ppath = makeNode(CustomPath);
+
+			ppath->path.type = T_CustomPath;
+			ppath->path.pathtype = T_CustomScan;
+			ppath->path.parent = rel;
+			ppath->path.pathtarget = rel->reltarget;
+			ppath->path.param_info = NULL;
+			ppath->path.parallel_aware = true;
+			ppath->path.parallel_safe = true;
+			ppath->path.parallel_workers = pw;
+			ppath->path.pathkeys = NIL;
+
+			/* Per-worker cost: divide total among participants */
+			ppath->path.rows = cpath->path.rows;
+			ppath->path.startup_cost = 0;
+			ppath->path.total_cost = cpath->path.total_cost / (pw + 1);
+
+			ppath->flags = 0;
+			ppath->methods = &sorted_heap_path_methods;
+			ppath->custom_private = cpath->custom_private;
+
+			add_partial_path(rel, &ppath->path);
+		}
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -825,22 +880,33 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 	/* Load relinfo for per-block zone map checks */
 	shstate->relinfo = sorted_heap_get_relinfo(rel);
 
-	/* Init per-scan stats */
+	/* Init per-scan stats and parallel state */
 	shstate->scanned_blocks = 0;
 	shstate->pruned_blocks = 0;
 	shstate->last_blk = InvalidBlockNumber;
+	shstate->pscan = NULL;
 
-	/* Open heap scan without syncscan (conflicts with setscanlimits) */
-	shstate->heap_scan = table_beginscan(rel, estate->es_snapshot,
-										 0, NULL);
-
-	/* Restrict scan to pruned block range */
-	if (shstate->scan_nblocks > 0)
-		heap_setscanlimits(shstate->heap_scan,
-						   shstate->scan_start,
-						   shstate->scan_nblocks);
+	/*
+	 * For parallel-aware scans, defer scan creation to the DSM
+	 * callbacks (InitializeDSM / InitializeWorker) which will open a
+	 * coordinated parallel scan.  For serial scans, open the heap scan
+	 * now and restrict it to the pruned block range.
+	 */
+	if (cscan->scan.plan.parallel_aware)
+	{
+		shstate->heap_scan = NULL;
+	}
 	else
-		heap_setscanlimits(shstate->heap_scan, 1, 0);
+	{
+		shstate->heap_scan = table_beginscan(rel, estate->es_snapshot,
+											 0, NULL);
+		if (shstate->scan_nblocks > 0)
+			heap_setscanlimits(shstate->heap_scan,
+							   shstate->scan_start,
+							   shstate->scan_nblocks);
+		else
+			heap_setscanlimits(shstate->heap_scan, 1, 0);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -924,6 +990,73 @@ sorted_heap_end_custom_scan(CustomScanState *node)
 		table_endscan(shstate->heap_scan);
 		shstate->heap_scan = NULL;
 	}
+}
+
+/* ----------------------------------------------------------------
+ *  EstimateDSMCustomScan
+ * ---------------------------------------------------------------- */
+static Size
+sorted_heap_estimate_dsm(CustomScanState *node, ParallelContext *pcxt)
+{
+	return table_parallelscan_estimate(node->ss.ss_currentRelation,
+									   node->ss.ps.state->es_snapshot);
+}
+
+/* ----------------------------------------------------------------
+ *  InitializeDSMCustomScan — leader sets up parallel table scan
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_initialize_dsm(CustomScanState *node, ParallelContext *pcxt,
+							void *coordinate)
+{
+	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
+	Relation	rel = node->ss.ss_currentRelation;
+	ParallelTableScanDesc pscan = (ParallelTableScanDesc) coordinate;
+
+	table_parallelscan_initialize(rel, pscan,
+								  node->ss.ps.state->es_snapshot);
+	shstate->pscan = pscan;
+
+	/* Open leader's parallel scan */
+	shstate->heap_scan = table_beginscan_parallel(rel, pscan);
+}
+
+/* ----------------------------------------------------------------
+ *  ReInitializeDSMCustomScan — reset for rescan
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_reinitialize_dsm(CustomScanState *node, ParallelContext *pcxt,
+							  void *coordinate)
+{
+	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
+	Relation	rel = node->ss.ss_currentRelation;
+	ParallelTableScanDesc pscan = (ParallelTableScanDesc) coordinate;
+
+	table_parallelscan_reinitialize(rel, pscan);
+
+	/* Reopen the leader's scan */
+	if (shstate->heap_scan)
+		table_endscan(shstate->heap_scan);
+	shstate->heap_scan = table_beginscan_parallel(rel, pscan);
+}
+
+/* ----------------------------------------------------------------
+ *  InitializeWorkerCustomScan — worker opens parallel scan
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_initialize_worker(CustomScanState *node, shm_toc *toc,
+							   void *coordinate)
+{
+	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
+	Relation	rel = node->ss.ss_currentRelation;
+	ParallelTableScanDesc pscan = (ParallelTableScanDesc) coordinate;
+
+	shstate->pscan = pscan;
+
+	/* Open this worker's parallel scan */
+	if (shstate->heap_scan)
+		table_endscan(shstate->heap_scan);
+	shstate->heap_scan = table_beginscan_parallel(rel, pscan);
 }
 
 /* ----------------------------------------------------------------

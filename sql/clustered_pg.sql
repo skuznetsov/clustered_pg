@@ -1318,6 +1318,79 @@ DROP TABLE sh8_ts;
 DROP TABLE sh8_text;
 DROP TABLE sh8_single;
 
+-- ============================================================
+-- SH9: Parallel Custom Scan
+-- ============================================================
+
+-- Create a table large enough for parallel to kick in
+CREATE TABLE sh9_par(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh9_par
+  SELECT g, repeat('p', 80)
+  FROM generate_series(1, 50000) g;
+SELECT sorted_heap_compact('sh9_par'::regclass);
+
+-- Test SH9-1: Serial baseline — correct result count
+SELECT count(*) AS sh9_serial_count FROM sh9_par WHERE id BETWEEN 1 AND 50000;
+
+-- Test SH9-2: Force parallel, verify correct results
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 2;
+SET parallel_tuple_cost = 0;
+SET parallel_setup_cost = 0;
+SET min_parallel_table_scan_size = 0;
+
+SELECT count(*) AS sh9_parallel_count FROM sh9_par WHERE id BETWEEN 1 AND 50000;
+
+-- Test SH9-3: EXPLAIN shows Gather + parallel-aware SortedHeapScan
+SELECT
+    CASE WHEN sh6_plan_contains(
+        'SELECT * FROM sh9_par WHERE id BETWEEN 10000 AND 40000',
+        'Gather')
+         THEN 'sh9_gather_ok'
+         ELSE 'sh9_gather_FAIL'
+    END AS sh9_2_result;
+
+SELECT
+    CASE WHEN sh6_plan_contains(
+        'SELECT * FROM sh9_par WHERE id BETWEEN 10000 AND 40000',
+        'SortedHeapScan')
+         THEN 'sh9_scan_ok'
+         ELSE 'sh9_scan_FAIL'
+    END AS sh9_3_result;
+
+-- Test SH9-4: Default parallel GUCs, narrow range stays serial (no Gather)
+-- Keep seqscan/indexscan/bitmapscan off to force SortedHeapScan
+-- but reset parallel GUCs to defaults
+RESET max_parallel_workers_per_gather;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET min_parallel_table_scan_size;
+
+SELECT
+    CASE WHEN sh6_plan_contains(
+        'SELECT * FROM sh9_par WHERE id = 100',
+        'SortedHeapScan')
+         THEN 'sh9_serial_scan_ok'
+         ELSE 'sh9_serial_scan_FAIL'
+    END AS sh9_4a_result;
+
+-- Narrow range should NOT have Gather with default parallel settings
+SELECT
+    CASE WHEN NOT sh6_plan_contains(
+        'SELECT * FROM sh9_par WHERE id = 100',
+        'Gather')
+         THEN 'sh9_no_gather_ok'
+         ELSE 'sh9_no_gather_FAIL'
+    END AS sh9_4b_result;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+DROP TABLE sh9_par;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;

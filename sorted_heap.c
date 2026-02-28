@@ -688,6 +688,7 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 					memcpy(&info->zm_overflow[total_overflow],
 						   ovfl->shmo_entries,
 						   ne * sizeof(SortedHeapZoneMapEntry));
+
 					total_overflow += ne;
 				}
 
