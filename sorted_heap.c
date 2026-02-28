@@ -16,6 +16,7 @@
 
 #include "access/generic_xlog.h"
 #include "access/heapam.h"
+#include "access/multixact.h"
 #include "access/stratnum.h"
 #include "access/tableam.h"
 #include "access/xloginsert.h"
@@ -36,6 +37,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/sortsupport.h"
+#include "utils/tuplesort.h"
 #include "executor/tuptable.h"
 
 #include "sorted_heap.h"
@@ -78,6 +80,7 @@ PG_FUNCTION_INFO_V1(sorted_heap_tableam_handler);
 PG_FUNCTION_INFO_V1(sorted_heap_zonemap_stats);
 PG_FUNCTION_INFO_V1(sorted_heap_compact);
 PG_FUNCTION_INFO_V1(sorted_heap_rebuild_zonemap_sql);
+PG_FUNCTION_INFO_V1(sorted_heap_merge);
 
 /* ----------------------------------------------------------------
  *  Forward declarations
@@ -1676,5 +1679,364 @@ sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS)
 											 info->attNums[1] : 0);
 
 	table_close(rel, AccessShareLock);
+	PG_RETURN_VOID();
+}
+
+/* ----------------------------------------------------------------
+ *  sorted_heap_detect_sorted_prefix
+ *
+ *  Scan zone map entries from the start. The longest initial sequence
+ *  where entry[i+1].min >= entry[i].max (no overlap) is the sorted
+ *  prefix. Zone map must be valid. If invalid, returns 0 (entire
+ *  table goes through tuplesort).
+ *
+ *  Returns the number of data pages in the sorted prefix (0-based
+ *  entry index corresponds to data page = block entry_index + 1).
+ * ---------------------------------------------------------------- */
+static BlockNumber
+sorted_heap_detect_sorted_prefix(SortedHeapRelInfo *info)
+{
+	uint32		i;
+	int64		prev_max;
+	SortedHeapZoneMapEntry *entry;
+
+	/*
+	 * We use zone map entries to detect monotonicity regardless of the
+	 * zm_scan_valid flag. The entries for compacted pages are accurate
+	 * even after subsequent INSERTs clear the flag. If the zone map
+	 * hasn't been populated at all, prefix is 0 (full tuplesort fallback).
+	 */
+	if (info->zm_total_entries == 0)
+		return 0;
+
+	/* First entry is always part of the prefix */
+	entry = sorted_heap_get_zm_entry(info, 0);
+
+	/* Skip sentinel entries (no data tracked) */
+	if (entry->zme_min == PG_INT64_MAX)
+		return 0;
+
+	prev_max = entry->zme_max;
+
+	for (i = 1; i < info->zm_total_entries; i++)
+	{
+		entry = sorted_heap_get_zm_entry(info, i);
+
+		/* Sentinel = empty page, skip */
+		if (entry->zme_min == PG_INT64_MAX)
+			continue;
+
+		/* Overlap detected: this entry's min < previous max */
+		if (entry->zme_min < prev_max)
+			return i;
+
+		prev_max = entry->zme_max;
+	}
+
+	/* All entries are sorted */
+	return info->zm_total_entries;
+}
+
+/* ----------------------------------------------------------------
+ *  sorted_heap_merge(regclass) → void
+ *
+ *  Incremental merge compaction. Detects the sorted prefix from
+ *  zone map monotonicity, sequential-scans it (no index needed),
+ *  tuplesorts only the unsorted tail, two-way merges into a new
+ *  relation.
+ *
+ *  Benefits over full compact: sequential I/O for sorted prefix,
+ *  smaller tuplesort (only unsorted tail), no btree traversal.
+ * ---------------------------------------------------------------- */
+Datum
+sorted_heap_merge(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	Relation		rel;
+	SortedHeapRelInfo *info;
+	Oid				table_am_oid;
+	BlockNumber		total_blocks;
+	BlockNumber		total_data_pages;
+	BlockNumber		prefix_pages;
+	BlockNumber		tail_nblocks;
+	Oid				new_relid;
+	Relation		new_rel;
+	const TableAmRoutine *heap;
+	TableScanDesc	prefix_scan = NULL;
+	TableScanDesc	tail_scan = NULL;
+	TupleTableSlot *prefix_slot;
+	TupleTableSlot *tail_slot;
+	Tuplesortstate *tupstate = NULL;
+	SortSupportData *sortkeys = NULL;
+	double			ntuples = 0;
+	int				nkeys;
+	int				k;
+	bool			prefix_valid;
+	bool			tail_valid;
+
+	/* Open with lightweight lock to validate */
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_tableam != &sorted_heap_am_routine)
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a sorted_heap table",
+						RelationGetRelationName(rel))));
+	}
+
+	if (!rel->rd_indexvalid)
+		RelationGetIndexList(rel);
+	if (!OidIsValid(rel->rd_pkindex))
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("\"%s\" has no primary key",
+						RelationGetRelationName(rel))));
+	}
+
+	table_am_oid = rel->rd_rel->relam;
+	table_close(rel, AccessShareLock);
+
+	ereport(NOTICE,
+			(errmsg("sorted_heap_merge acquires AccessExclusiveLock"),
+			 errhint("Schedule during maintenance windows. "
+					 "Concurrent reads and writes are blocked.")));
+
+	/* Reopen with exclusive lock */
+	rel = table_open(relid, AccessExclusiveLock);
+	info = sorted_heap_get_relinfo(rel);
+
+	/* Force zone map reload under exclusive lock */
+	info->zm_loaded = false;
+	sorted_heap_zonemap_load(rel, info);
+
+	total_blocks = RelationGetNumberOfBlocks(rel);
+
+	/* Empty or single-page table: nothing to merge */
+	if (total_blocks <= 1)
+	{
+		ereport(NOTICE, (errmsg("sorted_heap_merge: table is empty")));
+		table_close(rel, AccessExclusiveLock);
+		PG_RETURN_VOID();
+	}
+
+	total_data_pages = total_blocks - 1;	/* exclude meta page (block 0) */
+	prefix_pages = sorted_heap_detect_sorted_prefix(info);
+
+	/*
+	 * Already fully sorted?  Only early-exit when the prefix covers ALL
+	 * data pages.  If the zone map doesn't cover some trailing pages
+	 * (e.g. after INSERT added pages beyond zone map capacity), those
+	 * uncovered pages must go through the tail path.
+	 */
+	if (prefix_pages >= total_data_pages)
+	{
+		ereport(NOTICE,
+				(errmsg("sorted_heap_merge: table is already sorted (%u pages)",
+						(unsigned) total_data_pages)));
+		table_close(rel, AccessExclusiveLock);
+		PG_RETURN_VOID();
+	}
+
+	tail_nblocks = total_data_pages - prefix_pages;
+
+	ereport(NOTICE,
+			(errmsg("sorted_heap_merge: %u prefix pages (sequential scan), "
+					"%u tail pages (tuplesort)",
+					(unsigned) prefix_pages, (unsigned) tail_nblocks)));
+
+	/* Create new heap relation (same schema) */
+	new_relid = make_new_heap(relid, InvalidOid, table_am_oid,
+							  RELPERSISTENCE_PERMANENT,
+							  AccessExclusiveLock);
+	new_rel = table_open(new_relid, AccessExclusiveLock);
+	heap = GetHeapamTableAmRoutine();
+
+	nkeys = info->nkeys;
+
+	/* Prepare SortSupport keys for merge comparison */
+	sortkeys = palloc0(sizeof(SortSupportData) * nkeys);
+	for (k = 0; k < nkeys; k++)
+	{
+		SortSupport ssup = &sortkeys[k];
+
+		ssup->ssup_cxt = CurrentMemoryContext;
+		ssup->ssup_collation = info->sortCollations[k];
+		ssup->ssup_nulls_first = info->nullsFirst[k];
+		ssup->ssup_attno = info->attNums[k];
+		PrepareSortSupportFromOrderingOp(info->sortOperators[k], ssup);
+	}
+
+	/* Create tuple slots */
+	prefix_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+										   &TTSOpsBufferHeapTuple);
+	tail_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+										 &TTSOpsMinimalTuple);
+
+	/*
+	 * Stream A: sequential scan of sorted prefix (blocks 1..prefix_pages).
+	 * If prefix_pages == 0, we skip this entirely.
+	 */
+	if (prefix_pages > 0)
+	{
+		prefix_scan = table_beginscan(rel, GetTransactionSnapshot(),
+									  0, NULL);
+		heap_setscanlimits(prefix_scan,
+						   1, prefix_pages);
+		prefix_valid = table_scan_getnextslot(prefix_scan,
+											  ForwardScanDirection,
+											  prefix_slot);
+	}
+	else
+	{
+		prefix_valid = false;
+	}
+
+	/*
+	 * Stream B: tuplesort of unsorted tail (blocks prefix_pages+1..end).
+	 * Read tail tuples, feed into tuplesort, then sort.
+	 */
+	{
+		TupleTableSlot *scan_slot;
+		AttrNumber	   *attNums = palloc(sizeof(AttrNumber) * nkeys);
+		Oid			   *sortOps = palloc(sizeof(Oid) * nkeys);
+		Oid			   *sortColls = palloc(sizeof(Oid) * nkeys);
+		bool		   *nullsFirst = palloc(sizeof(bool) * nkeys);
+
+		for (k = 0; k < nkeys; k++)
+		{
+			attNums[k] = info->attNums[k];
+			sortOps[k] = info->sortOperators[k];
+			sortColls[k] = info->sortCollations[k];
+			nullsFirst[k] = info->nullsFirst[k];
+		}
+
+		tupstate = tuplesort_begin_heap(RelationGetDescr(rel),
+										nkeys, attNums, sortOps,
+										sortColls, nullsFirst,
+										maintenance_work_mem,
+										NULL, TUPLESORT_NONE);
+
+		tail_scan = table_beginscan(rel, GetTransactionSnapshot(),
+									0, NULL);
+		heap_setscanlimits(tail_scan,
+						   1 + prefix_pages, tail_nblocks);
+
+		scan_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+											 &TTSOpsBufferHeapTuple);
+
+		while (table_scan_getnextslot(tail_scan, ForwardScanDirection,
+									  scan_slot))
+		{
+			tuplesort_puttupleslot(tupstate, scan_slot);
+		}
+
+		ExecDropSingleTupleTableSlot(scan_slot);
+		table_endscan(tail_scan);
+		tail_scan = NULL;
+
+		tuplesort_performsort(tupstate);
+
+		pfree(attNums);
+		pfree(sortOps);
+		pfree(sortColls);
+		pfree(nullsFirst);
+	}
+
+	/* Get first sorted tail tuple */
+	tail_valid = tuplesort_gettupleslot(tupstate, true, true,
+										tail_slot, NULL);
+
+	/*
+	 * Two-way merge: compare prefix_slot vs tail_slot by PK,
+	 * write winner to new_rel via heap AM (bypasses sorted_heap
+	 * zone map updates).
+	 */
+	while (prefix_valid || tail_valid)
+	{
+		bool		use_prefix;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (!prefix_valid)
+			use_prefix = false;
+		else if (!tail_valid)
+			use_prefix = true;
+		else
+		{
+			/* Compare PK columns */
+			int		cmp = 0;
+
+			for (k = 0; k < nkeys; k++)
+			{
+				Datum	d1, d2;
+				bool	n1, n2;
+
+				d1 = slot_getattr(prefix_slot, info->attNums[k], &n1);
+				d2 = slot_getattr(tail_slot, info->attNums[k], &n2);
+				cmp = ApplySortComparator(d1, n1, d2, n2, &sortkeys[k]);
+				if (cmp != 0)
+					break;
+			}
+			use_prefix = (cmp <= 0);
+		}
+
+		if (use_prefix)
+		{
+			heap->tuple_insert(new_rel, prefix_slot,
+							   GetCurrentCommandId(true), 0, NULL);
+			ntuples++;
+			prefix_valid = table_scan_getnextslot(prefix_scan,
+												  ForwardScanDirection,
+												  prefix_slot);
+		}
+		else
+		{
+			heap->tuple_insert(new_rel, tail_slot,
+							   GetCurrentCommandId(true), 0, NULL);
+			ntuples++;
+			tail_valid = tuplesort_gettupleslot(tupstate, true, true,
+												tail_slot, NULL);
+		}
+	}
+
+	/* Cleanup */
+	if (prefix_scan)
+		table_endscan(prefix_scan);
+	tuplesort_end(tupstate);
+	ExecDropSingleTupleTableSlot(prefix_slot);
+	ExecDropSingleTupleTableSlot(tail_slot);
+	pfree(sortkeys);
+
+	/* Rebuild zone map on new table */
+	if (info->zm_usable)
+		sorted_heap_rebuild_zonemap_internal(new_rel, info->zm_pk_typid,
+											 info->attNums[0],
+											 info->zm_pk_typid2,
+											 info->zm_col2_usable ?
+											 info->attNums[1] : 0);
+
+	table_close(new_rel, NoLock);
+	table_close(rel, NoLock);
+
+	/* Atomic swap of filenodes */
+	finish_heap_swap(relid, new_relid,
+					 false,		/* not system catalog */
+					 false,		/* no toast swap by content */
+					 false,		/* no constraint check */
+					 true,		/* is_internal */
+					 InvalidTransactionId,
+					 InvalidMultiXactId,
+					 RELPERSISTENCE_PERMANENT);
+
+	ereport(NOTICE,
+			(errmsg("sorted_heap_merge: completed (%.0f tuples, "
+					"%u prefix + %u tail pages)",
+					ntuples, (unsigned) prefix_pages,
+					(unsigned) tail_nblocks)));
+
 	PG_RETURN_VOID();
 }

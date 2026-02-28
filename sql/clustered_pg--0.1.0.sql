@@ -269,4 +269,9 @@ CREATE PROCEDURE @extschema@.sorted_heap_compact_online(regclass)
 AS '$libdir/clustered_pg', 'sorted_heap_compact_online'
 LANGUAGE C;
 
+CREATE FUNCTION @extschema@.sorted_heap_merge(regclass)
+RETURNS void
+AS '$libdir/clustered_pg', 'sorted_heap_merge'
+LANGUAGE C STRICT;
+
 COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';

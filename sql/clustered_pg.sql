@@ -1433,6 +1433,85 @@ RESET max_parallel_workers_per_gather;
 
 DROP TABLE sh10_ovfl;
 
+-- ============================================================
+-- SH11: Incremental merge compaction (sorted_heap_merge)
+-- ============================================================
+
+-- SH11-1: Create 50K-row table, compact to establish sorted prefix
+CREATE TABLE sh11_merge(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh11_merge
+  SELECT g, 'row-' || g
+  FROM generate_series(1, 50000) g;
+SELECT sorted_heap_compact('sh11_merge'::regclass);
+
+-- SH11-2: INSERT rows with keys that overlap existing range.
+-- Keys -5000..-1 sort before 1..50000, creating zone map overlap
+-- at the boundary between compacted prefix and new tail pages.
+INSERT INTO sh11_merge
+  SELECT g, 'new-' || g
+  FROM generate_series(-5000, -1) g;
+
+-- SH11-3: Merge (prefix sequential scan + tail tuplesort)
+SELECT sorted_heap_merge('sh11_merge'::regclass);
+
+-- SH11-4: Verify correct count (55000) after merge
+SELECT count(*) AS sh11_count_after_merge FROM sh11_merge;
+
+-- SH11-5: Verify zone map valid (flags=2 means ZONEMAP_VALID)
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh11_merge'::regclass) LIKE '%flags=2%'
+         THEN 'sh11_zonemap_valid_ok'
+         ELSE 'sh11_zonemap_valid_FAIL: ' ||
+              sorted_heap_zonemap_stats('sh11_merge'::regclass)
+    END AS sh11_5_result;
+
+-- SH11-6: Verify scan pruning works after merge
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 0;
+
+SELECT count(*) AS sh11_pruned_count
+  FROM sh11_merge WHERE id BETWEEN 100 AND 200;
+
+-- Check that EXPLAIN shows zone map pruning
+SELECT
+    CASE WHEN sh6_plan_contains(
+        'SELECT * FROM sh11_merge WHERE id BETWEEN 100 AND 200',
+        'Zone Map')
+         THEN 'sh11_zonemap_pruning_ok'
+         ELSE 'sh11_zonemap_pruning_FAIL'
+    END AS sh11_6_result;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET max_parallel_workers_per_gather;
+
+-- SH11-7: Re-compact, verify same count (merge didn't lose data)
+SELECT sorted_heap_compact('sh11_merge'::regclass);
+SELECT count(*) AS sh11_count_after_recompact FROM sh11_merge;
+
+-- SH11-8: Merge on already-sorted table → early exit or minimal work
+SELECT sorted_heap_merge('sh11_merge'::regclass);
+SELECT count(*) AS sh11_count_after_merge2 FROM sh11_merge;
+
+-- SH11-9: Merge on never-compacted table → full tuplesort fallback
+CREATE TABLE sh11_unsorted(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh11_unsorted
+  SELECT g, 'row-' || g
+  FROM generate_series(1, 1000) g;
+SELECT sorted_heap_merge('sh11_unsorted'::regclass);
+SELECT count(*) AS sh11_unsorted_count FROM sh11_unsorted;
+DROP TABLE sh11_unsorted;
+
+-- SH11-10: Merge on empty table → no-op
+CREATE TABLE sh11_empty(id int PRIMARY KEY) USING sorted_heap;
+SELECT sorted_heap_merge('sh11_empty'::regclass);
+DROP TABLE sh11_empty;
+
+DROP TABLE sh11_merge;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;
