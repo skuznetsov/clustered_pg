@@ -44,6 +44,7 @@ Parallel scan (large tables):
 | `expected/clustered_pg.out` | 3066 | Expected test output |
 | `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
+| `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
 
 ## Completed Phases
 
@@ -313,6 +314,23 @@ to physical sort order (sequential I/O vs random index lookups).
   4. Crash during online compact Phase 2 — original table intact, zone map
      preserved, no orphaned log tables, compact succeeds post-recovery
 - 15 checks, all pass. `checkpoint_timeout = 30s` (PG 18 minimum).
+
+**TOAST Data Integrity Tests** (`scripts/test_toast_and_concurrent_compact.sh`, Area 1)
+- 4KB payload (`repeat('x', 4000)`) forces TOAST storage (>2KB threshold)
+- sorted_heap delegates TOAST entirely to heap via `heap->multi_insert`
+- Verified through all 5 rewrite paths: COPY, compact, online compact,
+  merge, online merge — payload length preserved, no data corruption
+- TOAST table existence confirmed via `pg_class.reltoastrelid`
+- 15 checks, all pass
+
+**Concurrent Online Compact Guard** (`scripts/test_toast_and_concurrent_compact.sh`, Area 2)
+- Log table name uses only relid (`_sh_compact_log_%u`), so a second
+  concurrent online operation on the same table hits "already exists"
+  error from `CREATE TABLE` — implicit but effective guard
+- Tested: compact x2, merge x2, compact vs merge (cross-operation)
+- After first session completes and cleans up, re-run succeeds
+- No crashes (SIGSEGV/SIGBUS/SIGABRT) in any scenario
+- 11 checks, all pass
 
 ## Possible Future Work
 
