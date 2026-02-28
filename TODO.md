@@ -29,13 +29,13 @@ SELECT ... WHERE pk_col <op> const
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 144 | Meta page layout, zone map structs, SortedHeapRelInfo |
-| `sorted_heap.c` | 1084 | Table AM: sorted multi_insert, zone map persistence, compact |
-| `sorted_heap_scan.c` | 702 | Custom scan provider: planner hook, block pruning, EXPLAIN |
-| `sorted_heap_online.c` | 595 | Online compact: trigger, copy, replay, swap |
+| `sorted_heap.h` | 157 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
+| `sorted_heap.c` | 1678 | Table AM: sorted multi_insert, zone map persistence, compact |
+| `sorted_heap_scan.c` | 1035 | Custom scan provider: planner hook, multi-col pruning, EXPLAIN |
+| `sorted_heap_online.c` | 603 | Online compact: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1517 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1230 | Regression tests |
-| `expected/clustered_pg.out` | 1867 | Expected test output |
+| `sql/clustered_pg.sql` | 1323 | Regression tests |
+| `expected/clustered_pg.out` | 2028 | Expected test output |
 
 ## Completed Phases
 
@@ -77,7 +77,7 @@ Basic `sorted_heap` AM that delegates everything to heap.
 
 ## Benchmark Results (500K rows, ~56 MB, warm cache)
 
-PostgreSQL 18.1, Apple M-series, zone map v4 with overflow pages.
+PostgreSQL 18.1, Apple M-series, zone map v5 with multi-column support.
 
 ### sorted_heap vs Heap SeqScan (no index)
 
@@ -106,11 +106,11 @@ sort order (sequential I/O vs random index lookups).
 
 ## Known Limitations
 
-- Zone map capacity: 16,788 pages (~131 MB). 500 in meta page + up to
-  32 overflow pages × 509 entries each.
-- Zone map tracks first PK column only. Supported: int2/int4/int8,
-  timestamp, timestamptz, date. Composite PK `(a, b)` prunes on `a`;
-  standard qual evaluation handles `b`.
+- Zone map capacity: 8,410 pages (~65 MB). 250 in meta page + up to
+  32 overflow pages × 255 entries each (v5 format, 32 bytes/entry).
+- Zone map tracks first two PK columns (col1 + col2). Supported types:
+  int2/int4/int8, timestamp, timestamptz, date. Non-trackable col2
+  (text, uuid) degrades gracefully to col1-only pruning.
 - Single-row INSERT into a covered page updates zone map in-place
   (preserving scan pruning). INSERT into an uncovered page invalidates
   scan pruning until next compact.
@@ -139,9 +139,18 @@ sort order (sequential I/O vs random index lookups).
 - PK→TID hash table for O(1) replay lookups
 - Zone map rebuilt on new table before swap
 
+### Phase 8 — Multi-Column Zone Map
+- Zone map v5: 32-byte entries (col1 + col2 min/max per page)
+- Composite PK `(a, b)` prunes on both columns (AND semantics)
+- v4 backward compatibility: load expands 16→32 byte entries,
+  flush writes v4 format, compact/rebuild upgrades to v5
+- Supported col2 types: int2/int4/int8, timestamp, timestamptz, date
+- Non-trackable col2 degrades gracefully (col1-only pruning)
+- Meta page capacity: 250 entries (v5) vs 500 (v4)
+- Overflow capacity: 255 entries/page (v5) vs 509 (v4)
+
 ## Possible Future Work
 
-- Multi-column zone map for composite PK pruning
 - Zone map support for text, uuid types
 - Merge multiple sorted runs without full CLUSTER rewrite
 - Parallel custom scan support
