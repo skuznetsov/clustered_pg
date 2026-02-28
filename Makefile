@@ -29,6 +29,8 @@ LIGHTWEIGHT_SELFTEST_RUN_LABEL ?=
 LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN ?= off
 LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S ?= 0
 TMP_CLEAN_ROOT ?= /private/tmp
+TEST_CONCURRENT_PORT ?= 65490
+TEST_CRASH_PORT ?= 65491
 TMP_CLEAN_MIN_AGE_S ?= 0
 PLANNER_PROBE_ROWS ?= 1000,10000,50000
 PLANNER_PROBE_PORT ?= 65496
@@ -410,6 +412,12 @@ lightweight-workflow-script-coverage-selftest:
 selftest-script-baseline:
 	./scripts/selftest_selftest_script_baseline.sh
 
+test-concurrent:
+	./scripts/test_concurrent_online_ops.sh $(TMP_SELFTEST_ROOT) $(TEST_CONCURRENT_PORT)
+
+test-crash-recovery:
+	./scripts/test_crash_recovery.sh $(TMP_SELFTEST_ROOT) $(TEST_CRASH_PORT)
+
 policy-lint:
 	./scripts/lint_comparator_policy.sh
 
@@ -479,6 +487,8 @@ help:
 	@echo "  make lightweight-workflow-script-coverage-selftest"
 	@echo "  make selftest-script-baseline"
 	@echo "  make policy-lint"
+	@echo "  make test-concurrent TEST_CONCURRENT_PORT=<port>"
+	@echo "  make test-crash-recovery TEST_CRASH_PORT=<base_port>"
 	@echo "  make policy-lint-strict"
 	@echo "  make policy-safety-selftest UNNEST_AB_SELFTEST_TMP_ROOT=<abs_tmp_dir> UNNEST_GATE_SELFTEST_TMP_ROOT=<abs_tmp_dir>"
 	@echo ""
