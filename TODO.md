@@ -102,10 +102,19 @@ True query performance without pgbench overhead. Average of 5 runs.
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.045ms / 1 buf | 0.053ms / 7 bufs | 15.6ms / 6,370 bufs |
-| Narrow (100) | 0.047ms / 2 bufs | 0.078ms / 8 bufs | 17.5ms / 6,370 bufs |
-| Medium (5K) | 0.482ms / 33 bufs | 0.558ms / 52 bufs | 23.2ms / 6,370 bufs |
-| Wide (100K) | 7.8ms / 638 bufs | 9.1ms / 917 bufs | 18.5ms / 6,370 bufs |
+| Point (1 row) | 0.045ms / 1 buf | 0.050ms / 7 bufs | 17.4ms / 6,370 bufs |
+| Narrow (100) | 0.044ms / 2 bufs | 0.066ms / 8 bufs | 17.4ms / 6,370 bufs |
+| Medium (5K) | 0.454ms / 33 bufs | 0.552ms / 52 bufs | 17.5ms / 6,370 bufs |
+| Wide (100K) | 7.7ms / 638 bufs | 9.2ms / 917 bufs | 18.3ms / 6,370 bufs |
+
+**10M rows**
+
+| Query | sorted_heap | heap+btree | heap seqscan |
+|-------|------------|-----------|-------------|
+| Point (1 row) | 0.037ms / 1 buf | 0.056ms / 7 bufs | 119.7ms / 63,695 bufs |
+| Narrow (100) | 0.046ms / 1 buf | 0.071ms / 7 bufs | 137.5ms / 63,695 bufs |
+| Medium (5K) | 0.452ms / 32 bufs | 0.548ms / 51 bufs | 133.0ms / 63,695 bufs |
+| Wide (100K) | 7.6ms / 638 bufs | 9.0ms / 917 bufs | 139.1ms / 63,695 bufs |
 
 sorted_heap reads fewer blocks than btree for all query types. Zone map
 prunes to exact block range; btree traverses 3-4 index pages per lookup.
@@ -114,9 +123,8 @@ prunes to exact block range; btree traverses 3-4 index pages per lookup.
 
 | Scale | sorted_heap | heap+btree | heap (no idx) | compact |
 |------:|------------:|-----------:|--------------:|--------:|
-| 1M | 952K | 836K | ~1M | 0.3s |
-| 10M | 790K | 818K | ~1M | 3.5s |
-| 100M | 661K | 803K | ~1M | 78s |
+| 1M | 803K | 928K | 1.56M | 0.3s |
+| 10M | 868K | 893K | 1.47M | 3.4s |
 
 ### Table Size
 
@@ -131,26 +139,24 @@ prunes to exact block range; btree traverses 3-4 index pages per lookup.
 Includes pgbench overhead (connection, planning). Useful for comparing
 relative throughput under sustained load, not absolute query latency.
 
-| Query | 1M sh / heap | 10M sh / heap | 100M sh / heap |
-|-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 23.6K / 41K | 8.7K / 40.8K | 803 / 2,112 |
-| Narrow (100) | 18.7K / 26.6K | 7.9K / 25.1K | 669 / 4,155 |
-| Medium (5K) | 3.2K / 3.5K | 2.5K / 4.5K | 309 / 558 |
-| Wide (100K) | 190 / 282 | 193 / 276 | **95 / 89** |
+| Query | 1M sh / heap | 10M sh / heap |
+|-------|-------------:|--------------:|
+| Point (1 row) | 23.2K / 38.1K | 8.8K / 39.5K |
+| Narrow (100) | 18.3K / 25.5K | 7.9K / 27.3K |
+| Medium (5K) | 3.1K / 3.8K | 2.5K / 4.6K |
+| Wide (100K) | 199 / 284 | 193 / 282 |
 
 ### Observations
 
 - **EXPLAIN ANALYZE** shows sorted_heap reads fewer blocks than btree
-  at every selectivity level. At 1M rows: point query reads 1 block
-  (vs 7 for btree, 6,370 for seqscan).
+  at every selectivity level. At 10M rows: point query reads 1 block
+  (vs 7 for btree, 63,695 for seqscan). Wide range reads 638 blocks
+  (vs 917 for btree). Zone map prunes to exact contiguous block range.
 - **pgbench throughput** — btree shows higher TPS because pgbench overhead
   (connection + planning per query) dominates when execution time is
-  sub-millisecond. The TPS gap reflects planning overhead, not I/O.
-- **Wide range at 100M** — sorted_heap wins (95 vs 89 tps). Sequential I/O
-  from physical sorting beats random btree index lookups when data exceeds
-  shared_buffers.
-- **INSERT** — comparable; sorted_heap slightly slower at 100M due to
-  batch sorting overhead. No btree index maintenance overhead.
+  sub-millisecond. The TPS gap reflects custom scan planning cost, not I/O.
+- **INSERT** — comparable at scale; heap without index is fastest (~1.5M/s)
+  since there is no index maintenance or batch sorting overhead.
 - **Storage** — nearly identical (sorted_heap trades btree index for
   meta+overflow pages). Heap without index is smallest (no index overhead).
 
