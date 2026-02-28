@@ -36,12 +36,12 @@ Parallel scan (large tables):
 | File | Lines | Purpose |
 |------|------:|---------|
 | `sorted_heap.h` | 158 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
-| `sorted_heap.c` | 1679 | Table AM: sorted multi_insert, zone map persistence, compact |
+| `sorted_heap.c` | 1680 | Table AM: sorted multi_insert, zone map persistence, compact |
 | `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 603 | Online compact: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1396 | Regression tests |
-| `expected/clustered_pg.out` | 2126 | Expected test output |
+| `sql/clustered_pg.sql` | 1438 | Regression tests (SH1–SH10) |
+| `expected/clustered_pg.out` | 2187 | Expected test output |
 
 ## Completed Phases
 
@@ -166,6 +166,16 @@ sort order (sequential I/O vs random index lookups).
 - Fix: `sorted_heap_get_zm_entry()` used hardcoded `SORTED_HEAP_ZONEMAP_CACHE_MAX`
   (500) as cache/overflow boundary — incorrect for v5 format (250 entries).
   Changed to `info->zm_nentries` so overflow lookup adapts to format version.
+
+### Production Hardening (post-Phase 9)
+- multi_insert zone map boundary: capped at `SORTED_HEAP_ZONEMAP_MAX` (250)
+  to match flush capacity and read path. Previously used `SORTED_HEAP_ZONEMAP_CACHE_MAX`
+  (500), causing writes to entries that were never flushed to disk.
+- Overflow page bounds check: `overflow_npages` clamped to
+  `SORTED_HEAP_OVERFLOW_MAX_PAGES` (32) on both v4 and v5 read paths,
+  preventing OOM from corrupted on-disk metadata.
+- SH10 test suite: zone map overflow boundary correctness (INSERT into
+  overflow range, re-compact verification).
 
 ## Possible Future Work
 
