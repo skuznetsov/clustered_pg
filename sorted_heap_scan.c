@@ -48,6 +48,13 @@ typedef struct SortedHeapScanBounds
 	bool		hi_inclusive;
 	int64		lo;
 	int64		hi;
+	/* Column 2 bounds (composite PK) */
+	bool		has_lo2;
+	bool		has_hi2;
+	bool		lo2_inclusive;
+	bool		hi2_inclusive;
+	int64		lo2;
+	int64		hi2;
 } SortedHeapScanBounds;
 
 /* ----------------------------------------------------------------
@@ -78,6 +85,8 @@ static void sorted_heap_set_rel_pathlist(PlannerInfo *root,
 static bool sorted_heap_extract_bounds(RelOptInfo *rel,
 									   AttrNumber pk_attno,
 									   Oid pk_typid,
+									   AttrNumber pk_attno2,
+									   Oid pk_typid2,
 									   SortedHeapScanBounds *bounds);
 static void sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 											SortedHeapScanBounds *bounds,
@@ -245,7 +254,11 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Extract PK bounds from baserestrictinfo */
 	if (!sorted_heap_extract_bounds(rel, info->attNums[0],
-									info->zm_pk_typid, &bounds))
+									info->zm_pk_typid,
+									info->zm_col2_usable ?
+									info->attNums[1] : 0,
+									info->zm_pk_typid2,
+									&bounds))
 	{
 		table_close(table_rel, NoLock);
 		return;
@@ -308,6 +321,20 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		bounds_list = lappend_int(bounds_list,
 								 (int32) (bounds.hi & 0xFFFFFFFF));
 
+		/* Column 2 bounds (indices 8-15) */
+		bounds_list = lappend_int(bounds_list, bounds.has_lo2 ? 1 : 0);
+		bounds_list = lappend_int(bounds_list, bounds.has_hi2 ? 1 : 0);
+		bounds_list = lappend_int(bounds_list, bounds.lo2_inclusive ? 1 : 0);
+		bounds_list = lappend_int(bounds_list, bounds.hi2_inclusive ? 1 : 0);
+		bounds_list = lappend_int(bounds_list,
+								 (int32) (bounds.lo2 >> 32));
+		bounds_list = lappend_int(bounds_list,
+								 (int32) (bounds.lo2 & 0xFFFFFFFF));
+		bounds_list = lappend_int(bounds_list,
+								 (int32) (bounds.hi2 >> 32));
+		bounds_list = lappend_int(bounds_list,
+								 (int32) (bounds.hi2 & 0xFFFFFFFF));
+
 		cpath->custom_private = list_make2(range_list, bounds_list);
 	}
 
@@ -319,21 +346,33 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
  * ---------------------------------------------------------------- */
 static bool
 sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
-						   Oid pk_typid, SortedHeapScanBounds *bounds)
+						   Oid pk_typid, AttrNumber pk_attno2,
+						   Oid pk_typid2,
+						   SortedHeapScanBounds *bounds)
 {
 	ListCell   *lc;
 	Oid			opfamily;
 	Oid			opcid;
+	Oid			opfamily2 = InvalidOid;
 
 	memset(bounds, 0, sizeof(SortedHeapScanBounds));
 
-	/* Get btree opfamily for this type */
+	/* Get btree opfamily for column 1 */
 	opcid = GetDefaultOpClass(pk_typid, BTREE_AM_OID);
 	if (!OidIsValid(opcid))
 		return false;
 	opfamily = get_opclass_family(opcid);
 	if (!OidIsValid(opfamily))
 		return false;
+
+	/* Get btree opfamily for column 2 (if available) */
+	if (OidIsValid(pk_typid2) && pk_attno2 != 0)
+	{
+		Oid		opcid2 = GetDefaultOpClass(pk_typid2, BTREE_AM_OID);
+
+		if (OidIsValid(opcid2))
+			opfamily2 = get_opclass_family(opcid2);
+	}
 
 	foreach(lc, rel->baserestrictinfo)
 	{
@@ -344,6 +383,8 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		int			strategy;
 		bool		varonleft;
 		int64		val;
+		bool		is_col2 = false;
+		Oid			match_typid;
 
 		if (!IsA(rinfo->clause, OpExpr))
 			continue;
@@ -370,14 +411,27 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		else
 			continue;
 
-		/* Must be our PK column */
-		if (var->varattno != pk_attno)
+		/* Match to PK column 1 or column 2 */
+		if (var->varattno == pk_attno)
+		{
+			is_col2 = false;
+			match_typid = pk_typid;
+		}
+		else if (pk_attno2 != 0 && var->varattno == pk_attno2 &&
+				 OidIsValid(opfamily2))
+		{
+			is_col2 = true;
+			match_typid = pk_typid2;
+		}
+		else
 			continue;
+
 		if (cnst->constisnull)
 			continue;
 
 		/* Determine btree strategy */
-		strategy = get_op_opfamily_strategy(opexpr->opno, opfamily);
+		strategy = get_op_opfamily_strategy(opexpr->opno,
+											is_col2 ? opfamily2 : opfamily);
 		if (strategy == 0)
 			continue;
 
@@ -402,60 +456,115 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		}
 
 		/* Convert constant to int64 */
-		if (!sorted_heap_key_to_int64(cnst->constvalue, pk_typid, &val))
+		if (!sorted_heap_key_to_int64(cnst->constvalue, match_typid, &val))
 			continue;
 
-		/* Update bounds */
-		switch (strategy)
+		/* Update bounds for column 1 or column 2 */
+		if (!is_col2)
 		{
-			case BTEqualStrategyNumber:
-				bounds->has_lo = true;
-				bounds->lo = val;
-				bounds->lo_inclusive = true;
-				bounds->has_hi = true;
-				bounds->hi = val;
-				bounds->hi_inclusive = true;
-				break;
-			case BTLessStrategyNumber:		/* col < val */
-				if (!bounds->has_hi || val < bounds->hi ||
-					(val == bounds->hi && bounds->hi_inclusive))
-				{
-					bounds->has_hi = true;
-					bounds->hi = val;
-					bounds->hi_inclusive = false;
-				}
-				break;
-			case BTLessEqualStrategyNumber:	/* col <= val */
-				if (!bounds->has_hi || val < bounds->hi)
-				{
-					bounds->has_hi = true;
-					bounds->hi = val;
-					bounds->hi_inclusive = true;
-				}
-				break;
-			case BTGreaterStrategyNumber:	/* col > val */
-				if (!bounds->has_lo || val > bounds->lo ||
-					(val == bounds->lo && bounds->lo_inclusive))
-				{
-					bounds->has_lo = true;
-					bounds->lo = val;
-					bounds->lo_inclusive = false;
-				}
-				break;
-			case BTGreaterEqualStrategyNumber:	/* col >= val */
-				if (!bounds->has_lo || val > bounds->lo)
-				{
+			switch (strategy)
+			{
+				case BTEqualStrategyNumber:
 					bounds->has_lo = true;
 					bounds->lo = val;
 					bounds->lo_inclusive = true;
-				}
-				break;
-			default:
-				break;
+					bounds->has_hi = true;
+					bounds->hi = val;
+					bounds->hi_inclusive = true;
+					break;
+				case BTLessStrategyNumber:
+					if (!bounds->has_hi || val < bounds->hi ||
+						(val == bounds->hi && bounds->hi_inclusive))
+					{
+						bounds->has_hi = true;
+						bounds->hi = val;
+						bounds->hi_inclusive = false;
+					}
+					break;
+				case BTLessEqualStrategyNumber:
+					if (!bounds->has_hi || val < bounds->hi)
+					{
+						bounds->has_hi = true;
+						bounds->hi = val;
+						bounds->hi_inclusive = true;
+					}
+					break;
+				case BTGreaterStrategyNumber:
+					if (!bounds->has_lo || val > bounds->lo ||
+						(val == bounds->lo && bounds->lo_inclusive))
+					{
+						bounds->has_lo = true;
+						bounds->lo = val;
+						bounds->lo_inclusive = false;
+					}
+					break;
+				case BTGreaterEqualStrategyNumber:
+					if (!bounds->has_lo || val > bounds->lo)
+					{
+						bounds->has_lo = true;
+						bounds->lo = val;
+						bounds->lo_inclusive = true;
+					}
+					break;
+				default:
+					break;
+			}
+		}
+		else
+		{
+			/* Column 2 bounds */
+			switch (strategy)
+			{
+				case BTEqualStrategyNumber:
+					bounds->has_lo2 = true;
+					bounds->lo2 = val;
+					bounds->lo2_inclusive = true;
+					bounds->has_hi2 = true;
+					bounds->hi2 = val;
+					bounds->hi2_inclusive = true;
+					break;
+				case BTLessStrategyNumber:
+					if (!bounds->has_hi2 || val < bounds->hi2 ||
+						(val == bounds->hi2 && bounds->hi2_inclusive))
+					{
+						bounds->has_hi2 = true;
+						bounds->hi2 = val;
+						bounds->hi2_inclusive = false;
+					}
+					break;
+				case BTLessEqualStrategyNumber:
+					if (!bounds->has_hi2 || val < bounds->hi2)
+					{
+						bounds->has_hi2 = true;
+						bounds->hi2 = val;
+						bounds->hi2_inclusive = true;
+					}
+					break;
+				case BTGreaterStrategyNumber:
+					if (!bounds->has_lo2 || val > bounds->lo2 ||
+						(val == bounds->lo2 && bounds->lo2_inclusive))
+					{
+						bounds->has_lo2 = true;
+						bounds->lo2 = val;
+						bounds->lo2_inclusive = false;
+					}
+					break;
+				case BTGreaterEqualStrategyNumber:
+					if (!bounds->has_lo2 || val > bounds->lo2)
+					{
+						bounds->has_lo2 = true;
+						bounds->lo2 = val;
+						bounds->lo2_inclusive = true;
+					}
+					break;
+				default:
+					break;
+			}
 		}
 	}
 
-	return bounds->has_lo || bounds->has_hi;
+	return bounds->has_lo || bounds->has_hi ||
+		   bounds->has_lo2 || bounds->has_hi2;
 }
 
 /* ----------------------------------------------------------------
@@ -558,7 +667,7 @@ sorted_heap_zone_overlaps(SortedHeapZoneMapEntry *e,
 	if (e->zme_min == PG_INT64_MAX)
 		return false;
 
-	/* Check lower bound: skip if entire page is below lo */
+	/* Check column 1 lower bound: skip if entire page is below lo */
 	if (bounds->has_lo)
 	{
 		if (bounds->lo_inclusive)
@@ -573,7 +682,7 @@ sorted_heap_zone_overlaps(SortedHeapZoneMapEntry *e,
 		}
 	}
 
-	/* Check upper bound: skip if entire page is above hi */
+	/* Check column 1 upper bound: skip if entire page is above hi */
 	if (bounds->has_hi)
 	{
 		if (bounds->hi_inclusive)
@@ -585,6 +694,42 @@ sorted_heap_zone_overlaps(SortedHeapZoneMapEntry *e,
 		{
 			if (e->zme_min >= bounds->hi)
 				return false;
+		}
+	}
+
+	/*
+	 * Check column 2 bounds (AND semantics).
+	 * Skip page if col2 data is tracked and proves no overlap.
+	 * If col2 not tracked (sentinel), skip this check.
+	 */
+	if (e->zme_min2 != PG_INT64_MAX)
+	{
+		if (bounds->has_lo2)
+		{
+			if (bounds->lo2_inclusive)
+			{
+				if (e->zme_max2 < bounds->lo2)
+					return false;
+			}
+			else
+			{
+				if (e->zme_max2 <= bounds->lo2)
+					return false;
+			}
+		}
+
+		if (bounds->has_hi2)
+		{
+			if (bounds->hi2_inclusive)
+			{
+				if (e->zme_min2 > bounds->hi2)
+					return false;
+			}
+			else
+			{
+				if (e->zme_min2 >= bounds->hi2)
+					return false;
+			}
 		}
 	}
 
@@ -658,6 +803,24 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 		((int64) (uint32) list_nth_int(bounds_list, 5));
 	shstate->bounds.hi = ((int64) list_nth_int(bounds_list, 6) << 32) |
 		((int64) (uint32) list_nth_int(bounds_list, 7));
+
+	/* Column 2 bounds (indices 8-15) */
+	if (list_length(bounds_list) >= 16)
+	{
+		shstate->bounds.has_lo2 = list_nth_int(bounds_list, 8) != 0;
+		shstate->bounds.has_hi2 = list_nth_int(bounds_list, 9) != 0;
+		shstate->bounds.lo2_inclusive = list_nth_int(bounds_list, 10) != 0;
+		shstate->bounds.hi2_inclusive = list_nth_int(bounds_list, 11) != 0;
+		shstate->bounds.lo2 = ((int64) list_nth_int(bounds_list, 12) << 32) |
+			((int64) (uint32) list_nth_int(bounds_list, 13));
+		shstate->bounds.hi2 = ((int64) list_nth_int(bounds_list, 14) << 32) |
+			((int64) (uint32) list_nth_int(bounds_list, 15));
+	}
+	else
+	{
+		shstate->bounds.has_lo2 = false;
+		shstate->bounds.has_hi2 = false;
+	}
 
 	/* Load relinfo for per-block zone map checks */
 	shstate->relinfo = sorted_heap_get_relinfo(rel);

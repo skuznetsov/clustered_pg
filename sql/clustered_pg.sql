@@ -756,7 +756,7 @@ COPY sh3_src5 TO '/tmp/sh3_ranges.csv' CSV;
 COPY sh3_ranges FROM '/tmp/sh3_ranges.csv' CSV;
 -- Zone map should contain entries; first entry's min should be >= 1
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh3_ranges'::regclass) LIKE 'version=% nentries=% pk_typid=23 flags=0 [1:%'
+    CASE WHEN sorted_heap_zonemap_stats('sh3_ranges'::regclass) LIKE 'version=% nentries=% pk_typid=23%flags=0 [1:%'
          THEN 'zonemap_ranges_ok'
          ELSE 'zonemap_ranges_FAIL'
     END AS sh3_ranges_result;
@@ -1203,7 +1203,7 @@ FROM (
 
 -- Test SH7-3: Zone map populated after online compact
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh7_basic'::regclass) LIKE 'version=% nentries=% pk_typid=23 flags=2%'
+    CASE WHEN sorted_heap_zonemap_stats('sh7_basic'::regclass) LIKE 'version=% nentries=% pk_typid=23%flags=2%'
          THEN 'zonemap_online_ok'
          ELSE 'zonemap_online_FAIL: ' || sorted_heap_zonemap_stats('sh7_basic'::regclass)
     END AS sh7_zonemap_result;
@@ -1231,6 +1231,92 @@ SELECT count(*) AS sh7_compare_regular_count FROM sh7_compare;
 
 DROP TABLE sh7_basic;
 DROP TABLE sh7_compare;
+
+-- ============================================================
+-- SH8: Multi-column zone map for composite PK
+-- ============================================================
+
+-- Test SH8-1: Composite PK (int, int) — zone map has pk_typid2
+CREATE TABLE sh8_intint(a int, b int, val text, PRIMARY KEY(a, b)) USING sorted_heap;
+INSERT INTO sh8_intint
+  SELECT (g / 100) + 1, g % 100, repeat('x', 40)
+  FROM generate_series(1, 500) g;
+SELECT sorted_heap_compact('sh8_intint'::regclass);
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh8_intint'::regclass)
+              LIKE 'version=5%pk_typid=23 pk_typid2=23%flags=2%'
+         THEN 'sh8_intint_zonemap_ok'
+         ELSE 'sh8_intint_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_intint'::regclass)
+    END AS sh8_1_result;
+
+-- Test SH8-2: Query on both columns — correct results
+SELECT count(*) AS sh8_both_count FROM sh8_intint WHERE a = 3 AND b >= 50;
+SELECT count(*) AS sh8_a_only FROM sh8_intint WHERE a BETWEEN 2 AND 4;
+SELECT count(*) AS sh8_total FROM sh8_intint;
+
+-- Test SH8-3: Pruning on both columns via EXPLAIN
+ANALYZE sh8_intint;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+-- Query on col1 only should prune
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh8_intint WHERE a = 3',
+    'SortedHeapScan') AS sh8_col1_pruning;
+-- Query on col2 only should also trigger scan (bounds extracted)
+SELECT sh6_plan_contains(
+    'SELECT * FROM sh8_intint WHERE b = 50',
+    'SortedHeapScan') AS sh8_col2_pruning;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+-- Test SH8-4: Composite PK (int, timestamp) — col2 tracked
+CREATE TABLE sh8_ts(user_id int, ts timestamp, val text,
+    PRIMARY KEY(user_id, ts)) USING sorted_heap;
+INSERT INTO sh8_ts
+  SELECT (g / 100) + 1,
+         '2024-01-01'::timestamp + (g || ' hours')::interval,
+         repeat('y', 30)
+  FROM generate_series(1, 400) g;
+SELECT sorted_heap_compact('sh8_ts'::regclass);
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh8_ts'::regclass)
+              LIKE 'version=5%pk_typid=23 pk_typid2=1114%flags=2%'
+         THEN 'sh8_ts_zonemap_ok'
+         ELSE 'sh8_ts_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_ts'::regclass)
+    END AS sh8_4_result;
+
+-- Test SH8-5: Non-trackable second column — graceful degradation
+CREATE TABLE sh8_text(a int, b text, val text, PRIMARY KEY(a, b)) USING sorted_heap;
+INSERT INTO sh8_text
+  SELECT g, 'key' || g, repeat('z', 40)
+  FROM generate_series(1, 200) g;
+SELECT sorted_heap_compact('sh8_text'::regclass);
+-- pk_typid2 should be 0 (InvalidOid) — text not supported
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh8_text'::regclass)
+              LIKE 'version=5%pk_typid=23 pk_typid2=0%flags=2%'
+         THEN 'sh8_text_degradation_ok'
+         ELSE 'sh8_text_degradation_FAIL: ' || sorted_heap_zonemap_stats('sh8_text'::regclass)
+    END AS sh8_5_result;
+-- Queries still work (col1 pruning only)
+SELECT count(*) AS sh8_text_count FROM sh8_text WHERE a = 100;
+
+-- Test SH8-6: Single-column PK — unchanged behavior
+CREATE TABLE sh8_single(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh8_single SELECT g, repeat('w', 40) FROM generate_series(1, 300) g;
+SELECT sorted_heap_compact('sh8_single'::regclass);
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh8_single'::regclass)
+              LIKE 'version=5%pk_typid=23 pk_typid2=0%flags=2%'
+         THEN 'sh8_single_ok'
+         ELSE 'sh8_single_FAIL: ' || sorted_heap_zonemap_stats('sh8_single'::regclass)
+    END AS sh8_6_result;
+SELECT count(*) AS sh8_single_count FROM sh8_single WHERE id BETWEEN 100 AND 200;
+
+DROP TABLE sh8_intint;
+DROP TABLE sh8_ts;
+DROP TABLE sh8_text;
+DROP TABLE sh8_single;
 
 DROP FUNCTION sh6_plan_contains(text, text);
 

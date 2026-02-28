@@ -551,7 +551,10 @@ sorted_heap_compact_online(PG_FUNCTION_ARGS)
 
 		/* Rebuild zone map on new table */
 		if (info->zm_usable)
-			sorted_heap_rebuild_zonemap_internal(new_rel, pk_typid, pk_attnum);
+			sorted_heap_rebuild_zonemap_internal(new_rel, pk_typid, pk_attnum,
+												 info->zm_pk_typid2,
+												 info->zm_col2_usable ?
+												 info->attNums[1] : 0);
 
 		table_close(new_rel, NoLock);
 		table_close(rel, NoLock);

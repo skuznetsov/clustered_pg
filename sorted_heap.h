@@ -9,38 +9,45 @@
 #include "storage/block.h"
 
 #define SORTED_HEAP_MAGIC		0x534F5254	/* 'SORT' */
-#define SORTED_HEAP_VERSION		4
+#define SORTED_HEAP_VERSION		5
 #define SORTED_HEAP_META_BLOCK	0
 #define SORTED_HEAP_MAX_KEYS	INDEX_MAX_KEYS
-#define SORTED_HEAP_ZONEMAP_MAX	500		/* max zone map entries in meta page */
+#define SORTED_HEAP_ZONEMAP_MAX	250		/* v5 on-disk meta page entries */
+#define SORTED_HEAP_ZONEMAP_CACHE_MAX 500	/* in-memory cache entries (supports v4 + v5) */
 
-/* Overflow zone map: up to 32 overflow pages, 509 entries each */
+/* Overflow zone map: up to 32 overflow pages, 255 entries each (v5) */
 #define SORTED_HEAP_OVERFLOW_MAX_PAGES		32
-#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE 509
-/* Total capacity: 500 + 32*509 = 16,788 entries (~131 MB at 8 KB/page) */
+#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE 255
+/* Total capacity: 250 + 32*255 = 8,410 entries (~65 MB at 8 KB/page) */
+
+/* v4 backward compatibility constants */
+#define SORTED_HEAP_ZONEMAP_MAX_V4				500
+#define SORTED_HEAP_OVERFLOW_ENTRIES_PER_PAGE_V4 509
 
 /* Flag bits for shm_flags */
 #define SORTED_HEAP_FLAG_ZONEMAP_STALE	0x0001
 #define SHM_FLAG_ZONEMAP_VALID			0x0002	/* zone map safe for scan pruning */
 
 /*
- * Per-page zone map entry: min/max of first PK column as int64.
- * Maintained for integer and timestamp/date PK types.
+ * Per-page zone map entry: min/max of PK columns as int64.
+ * Column 1 always tracked. Column 2 tracked when composite PK is usable.
  * Sentinel: zme_min == PG_INT64_MAX means "no data tracked".
+ * For column 2: zme_min2 == PG_INT64_MAX means "column 2 not tracked".
  */
 typedef struct SortedHeapZoneMapEntry
 {
-	int64		zme_min;
-	int64		zme_max;
-} SortedHeapZoneMapEntry;	/* 16 bytes */
+	int64		zme_min;	/* column 1 min */
+	int64		zme_max;	/* column 1 max */
+	int64		zme_min2;	/* column 2 min (PG_INT64_MAX = not tracked) */
+	int64		zme_max2;	/* column 2 max */
+} SortedHeapZoneMapEntry;	/* 32 bytes */
 
 /*
  * Meta page data stored in the special space of page 0.
  * Data pages (>= 1) use standard heap page format with no special space.
  *
- * v3 size: 24 header + 500 * 16 entries = 8024 bytes.
- * v4 size: 8024 + 128 overflow block pointers = 8152 bytes.
- * Both fit within max special space of 8168 bytes.
+ * v5 size: 32 header + 250 * 32 entries + 128 overflow = 8160 bytes.
+ * Fits within max special space of 8168 bytes.
  */
 typedef struct SortedHeapMetaPageData
 {
@@ -49,18 +56,20 @@ typedef struct SortedHeapMetaPageData
 	uint32		shm_flags;
 	Oid			shm_pk_index_oid;		/* cached PK index OID */
 	uint16		shm_zonemap_nentries;	/* valid zone map entry count (in meta page) */
-	uint16		shm_overflow_npages;	/* number of overflow pages (v4+) */
+	uint16		shm_overflow_npages;	/* number of overflow pages */
 	Oid			shm_zonemap_pk_typid;	/* type of first PK column */
-	/* 24 bytes of header above */
+	Oid			shm_zonemap_pk_typid2;	/* type of second PK column (v5+) */
+	uint32		shm_padding;			/* align entries to 8 bytes */
+	/* 32 bytes of header above */
 	SortedHeapZoneMapEntry shm_zonemap[SORTED_HEAP_ZONEMAP_MAX];
-	/* v4 extension: overflow page block numbers (128 bytes) */
+	/* overflow page block numbers (128 bytes) */
 	BlockNumber	shm_overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
 } SortedHeapMetaPageData;
 
 /*
  * Overflow page data stored in special space of overflow pages.
- * Each overflow page holds up to 509 zone map entries.
- * Total: 8 header + 509 * 16 = 8152 bytes (fits in 8168).
+ * v5: each page holds up to 255 entries (32 bytes each).
+ * Total: 8 header + 255 * 32 = 8168 bytes (fits exactly).
  */
 typedef struct SortedHeapOverflowPageData
 {
@@ -90,8 +99,10 @@ typedef struct SortedHeapRelInfo
 	bool		zm_loaded;			/* zone map read from meta page */
 	bool		zm_scan_valid;		/* zone map valid for scan pruning */
 	Oid			zm_pk_typid;		/* type of first PK column */
-	uint16		zm_nentries;		/* entries in meta page (max 500) */
-	SortedHeapZoneMapEntry zm_entries[SORTED_HEAP_ZONEMAP_MAX];
+	bool		zm_col2_usable;		/* second PK col is int2/4/8/timestamp/date */
+	Oid			zm_pk_typid2;		/* type of second PK column */
+	uint16		zm_nentries;		/* entries in cache (max CACHE_MAX) */
+	SortedHeapZoneMapEntry zm_entries[SORTED_HEAP_ZONEMAP_CACHE_MAX];
 
 	/* Overflow zone map (for tables > 500 data pages) */
 	SortedHeapZoneMapEntry *zm_overflow;	/* palloc'd, or NULL */
@@ -102,14 +113,14 @@ typedef struct SortedHeapRelInfo
 
 /*
  * Inline helper to access zone map entry by global index.
- * Entries 0..499 are in the meta page array; 500+ in overflow.
+ * Entries 0..499 are in the cache array; 500+ in overflow.
  */
 static inline SortedHeapZoneMapEntry *
 sorted_heap_get_zm_entry(SortedHeapRelInfo *info, uint32 idx)
 {
-	if (idx < SORTED_HEAP_ZONEMAP_MAX)
+	if (idx < SORTED_HEAP_ZONEMAP_CACHE_MAX)
 		return &info->zm_entries[idx];
-	return &info->zm_overflow[idx - SORTED_HEAP_ZONEMAP_MAX];
+	return &info->zm_overflow[idx - SORTED_HEAP_ZONEMAP_CACHE_MAX];
 }
 
 extern Datum sorted_heap_tableam_handler(PG_FUNCTION_ARGS);
@@ -128,7 +139,9 @@ extern Datum sorted_heap_reset_stats(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_compact_trigger(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_compact_online(PG_FUNCTION_ARGS);
 extern void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
-												 AttrNumber pk_attnum);
+												 AttrNumber pk_attnum,
+												 Oid pk_typid2,
+												 AttrNumber pk_attnum2);
 
 /* Shared memory stats (cluster-wide when loaded via shared_preload_libraries) */
 typedef struct SortedHeapSharedStats
