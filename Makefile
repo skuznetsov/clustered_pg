@@ -32,6 +32,7 @@ TMP_CLEAN_ROOT ?= /private/tmp
 TEST_CONCURRENT_PORT ?= 65490
 TEST_CRASH_PORT ?= 65491
 TEST_TOAST_PORT ?= 65492
+TEST_ALTER_PORT ?= 65493
 TMP_CLEAN_MIN_AGE_S ?= 0
 PLANNER_PROBE_ROWS ?= 1000,10000,50000
 PLANNER_PROBE_PORT ?= 65496
@@ -422,6 +423,9 @@ test-crash-recovery:
 test-toast:
 	./scripts/test_toast_and_concurrent_compact.sh $(TMP_SELFTEST_ROOT) $(TEST_TOAST_PORT)
 
+test-alter-table:
+	./scripts/test_alter_table.sh $(TMP_SELFTEST_ROOT) $(TEST_ALTER_PORT)
+
 policy-lint:
 	./scripts/lint_comparator_policy.sh
 
@@ -494,6 +498,7 @@ help:
 	@echo "  make test-concurrent TEST_CONCURRENT_PORT=<port>"
 	@echo "  make test-crash-recovery TEST_CRASH_PORT=<base_port>"
 	@echo "  make test-toast TEST_TOAST_PORT=<port>"
+	@echo "  make test-alter-table TEST_ALTER_PORT=<port>"
 	@echo "  make policy-lint-strict"
 	@echo "  make policy-safety-selftest UNNEST_AB_SELFTEST_TMP_ROOT=<abs_tmp_dir> UNNEST_GATE_SELFTEST_TMP_ROOT=<abs_tmp_dir>"
 	@echo ""
