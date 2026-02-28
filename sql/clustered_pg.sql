@@ -1512,6 +1512,83 @@ DROP TABLE sh11_empty;
 
 DROP TABLE sh11_merge;
 
+-- ============================================================
+-- SH12: Online merge compaction (sorted_heap_merge_online)
+-- ============================================================
+
+-- SH12-1: Create table, compact, add overlapping rows, online merge
+CREATE TABLE sh12_merge(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh12_merge
+  SELECT g, 'row-' || g
+  FROM generate_series(1, 50000) g;
+SELECT sorted_heap_compact('sh12_merge'::regclass);
+
+INSERT INTO sh12_merge
+  SELECT g, 'new-' || g
+  FROM generate_series(-5000, -1) g;
+
+SELECT count(*) AS sh12_before FROM sh12_merge;
+
+CALL sorted_heap_merge_online('sh12_merge'::regclass);
+
+-- SH12-2: Verify correct count after online merge
+SELECT count(*) AS sh12_after FROM sh12_merge;
+
+-- SH12-3: Verify data is physically sorted (ctid order = PK order)
+SELECT (bool_and(id >= lag_id)) AS sh12_sorted
+FROM (
+    SELECT id, lag(id, 1, -999999) OVER (ORDER BY ctid) AS lag_id
+    FROM sh12_merge
+) sub;
+
+-- SH12-4: Verify zone map valid (flags=2)
+SELECT
+    CASE WHEN sorted_heap_zonemap_stats('sh12_merge'::regclass) LIKE '%flags=2%'
+         THEN 'sh12_zonemap_ok'
+         ELSE 'sh12_zonemap_FAIL: ' ||
+              sorted_heap_zonemap_stats('sh12_merge'::regclass)
+    END AS sh12_4_result;
+
+-- SH12-5: Verify scan pruning works after online merge
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 0;
+
+SELECT
+    CASE WHEN sh6_plan_contains(
+        'SELECT * FROM sh12_merge WHERE id BETWEEN 100 AND 200',
+        'Zone Map')
+         THEN 'sh12_pruning_ok'
+         ELSE 'sh12_pruning_FAIL'
+    END AS sh12_5_result;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET max_parallel_workers_per_gather;
+
+-- SH12-6: Online merge on already-sorted table → early exit
+SELECT sorted_heap_compact('sh12_merge'::regclass);
+CALL sorted_heap_merge_online('sh12_merge'::regclass);
+SELECT count(*) AS sh12_already_sorted_count FROM sh12_merge;
+
+-- SH12-7: Online merge on empty table → no-op
+CREATE TABLE sh12_empty(id int PRIMARY KEY) USING sorted_heap;
+CALL sorted_heap_merge_online('sh12_empty'::regclass);
+DROP TABLE sh12_empty;
+
+-- SH12-8: Online merge on never-compacted table → full tuplesort fallback
+CREATE TABLE sh12_unsorted(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh12_unsorted
+  SELECT g, 'row-' || g
+  FROM generate_series(1, 1000) g;
+CALL sorted_heap_merge_online('sh12_unsorted'::regclass);
+SELECT count(*) AS sh12_unsorted_count FROM sh12_unsorted;
+DROP TABLE sh12_unsorted;
+
+DROP TABLE sh12_merge;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;

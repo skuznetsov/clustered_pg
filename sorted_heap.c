@@ -88,7 +88,7 @@ PG_FUNCTION_INFO_V1(sorted_heap_merge);
 static void sorted_heap_init_meta_page_smgr(const RelFileLocator *rlocator,
 											ProcNumber backend, bool need_wal);
 static void sorted_heap_relinfo_invalidate(Oid relid);
-static void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
+/* sorted_heap_zonemap_load is declared in sorted_heap.h (non-static) */
 static void sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info);
 /* sorted_heap_rebuild_zonemap_internal is declared in sorted_heap.h (non-static) */
 
@@ -485,7 +485,7 @@ sorted_heap_relinfo_invalidate(Oid relid)
  * Handles v2/v3 meta pages gracefully, and v4 backward compatibility
  * (16-byte entries expanded to 32-byte v5 format).
  */
-static void
+void
 sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 {
 	Buffer		metabuf;
@@ -1693,7 +1693,7 @@ sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS)
  *  Returns the number of data pages in the sorted prefix (0-based
  *  entry index corresponds to data page = block entry_index + 1).
  * ---------------------------------------------------------------- */
-static BlockNumber
+BlockNumber
 sorted_heap_detect_sorted_prefix(SortedHeapRelInfo *info)
 {
 	uint32		i;

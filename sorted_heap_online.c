@@ -32,6 +32,8 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/sortsupport.h"
+#include "utils/tuplesort.h"
 
 #include "sorted_heap.h"
 
@@ -576,6 +578,426 @@ sorted_heap_compact_online(PG_FUNCTION_ARGS)
 
 		ereport(NOTICE,
 				(errmsg("online compact: completed for \"%s\" (%.0f tuples)",
+						get_rel_name(relid), ntuples)));
+	}
+	PG_CATCH();
+	{
+		/* Best-effort cleanup */
+		if (log_table_name != NULL)
+		{
+			PG_TRY();
+			{
+				drop_log_infrastructure(relid, log_table_name);
+			}
+			PG_CATCH();
+			{
+				/* Ignore cleanup errors */
+			}
+			PG_END_TRY();
+		}
+		SPI_finish();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	SPI_finish();
+	PG_RETURN_VOID();
+}
+
+/* ----------------------------------------------------------------
+ *  Online merge: copy phase helper
+ *
+ *  Prefix sequential scan + tail tuplesort, two-way merge into
+ *  new_rel.  Populates pk_tid_map for replay phase.
+ * ---------------------------------------------------------------- */
+static double
+sorted_heap_copy_merged(Relation old_rel, Relation new_rel,
+						Snapshot snapshot, HTAB *pk_tid_map,
+						SortedHeapRelInfo *info,
+						BlockNumber prefix_pages,
+						BlockNumber tail_nblocks)
+{
+	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
+	int				nkeys = info->nkeys;
+	AttrNumber		pk_attnum = info->attNums[0];
+	Oid				pk_typid = info->zm_pk_typid;
+	double			ntuples = 0;
+	SortSupportData *sortkeys;
+	TupleTableSlot *prefix_slot;
+	TupleTableSlot *tail_slot;
+	TableScanDesc	prefix_scan = NULL;
+	Tuplesortstate *tupstate;
+	bool			prefix_valid = false;
+	bool			tail_valid;
+	int				k;
+
+	/* Prepare SortSupport keys for merge comparison */
+	sortkeys = palloc0(sizeof(SortSupportData) * nkeys);
+	for (k = 0; k < nkeys; k++)
+	{
+		SortSupport ssup = &sortkeys[k];
+
+		ssup->ssup_cxt = CurrentMemoryContext;
+		ssup->ssup_collation = info->sortCollations[k];
+		ssup->ssup_nulls_first = info->nullsFirst[k];
+		ssup->ssup_attno = info->attNums[k];
+		PrepareSortSupportFromOrderingOp(info->sortOperators[k], ssup);
+	}
+
+	/* Create tuple slots */
+	prefix_slot = MakeSingleTupleTableSlot(RelationGetDescr(old_rel),
+										   &TTSOpsBufferHeapTuple);
+	tail_slot = MakeSingleTupleTableSlot(RelationGetDescr(old_rel),
+										 &TTSOpsMinimalTuple);
+
+	/* Stream A: sequential scan of sorted prefix */
+	if (prefix_pages > 0)
+	{
+		prefix_scan = table_beginscan(old_rel, snapshot, 0, NULL);
+		heap_setscanlimits(prefix_scan, 1, prefix_pages);
+		prefix_valid = table_scan_getnextslot(prefix_scan,
+											  ForwardScanDirection,
+											  prefix_slot);
+	}
+
+	/* Stream B: tuplesort of unsorted tail */
+	{
+		TupleTableSlot *scan_slot;
+		TableScanDesc	tail_scan;
+		AttrNumber	   *attNums = palloc(sizeof(AttrNumber) * nkeys);
+		Oid			   *sortOps = palloc(sizeof(Oid) * nkeys);
+		Oid			   *sortColls = palloc(sizeof(Oid) * nkeys);
+		bool		   *nullsFirst = palloc(sizeof(bool) * nkeys);
+
+		for (k = 0; k < nkeys; k++)
+		{
+			attNums[k] = info->attNums[k];
+			sortOps[k] = info->sortOperators[k];
+			sortColls[k] = info->sortCollations[k];
+			nullsFirst[k] = info->nullsFirst[k];
+		}
+
+		tupstate = tuplesort_begin_heap(RelationGetDescr(old_rel),
+										nkeys, attNums, sortOps,
+										sortColls, nullsFirst,
+										maintenance_work_mem,
+										NULL, TUPLESORT_NONE);
+
+		tail_scan = table_beginscan(old_rel, snapshot, 0, NULL);
+		heap_setscanlimits(tail_scan, 1 + prefix_pages, tail_nblocks);
+
+		scan_slot = MakeSingleTupleTableSlot(RelationGetDescr(old_rel),
+											 &TTSOpsBufferHeapTuple);
+
+		while (table_scan_getnextslot(tail_scan, ForwardScanDirection,
+									  scan_slot))
+		{
+			tuplesort_puttupleslot(tupstate, scan_slot);
+		}
+
+		ExecDropSingleTupleTableSlot(scan_slot);
+		table_endscan(tail_scan);
+		tuplesort_performsort(tupstate);
+
+		pfree(attNums);
+		pfree(sortOps);
+		pfree(sortColls);
+		pfree(nullsFirst);
+	}
+
+	/* Get first sorted tail tuple */
+	tail_valid = tuplesort_gettupleslot(tupstate, true, true,
+										tail_slot, NULL);
+
+	/* Two-way merge with PK→TID tracking */
+	while (prefix_valid || tail_valid)
+	{
+		TupleTableSlot *winner;
+		bool			use_prefix;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (!prefix_valid)
+			use_prefix = false;
+		else if (!tail_valid)
+			use_prefix = true;
+		else
+		{
+			int		cmp = 0;
+
+			for (k = 0; k < nkeys; k++)
+			{
+				Datum	d1, d2;
+				bool	n1, n2;
+
+				d1 = slot_getattr(prefix_slot, info->attNums[k], &n1);
+				d2 = slot_getattr(tail_slot, info->attNums[k], &n2);
+				cmp = ApplySortComparator(d1, n1, d2, n2, &sortkeys[k]);
+				if (cmp != 0)
+					break;
+			}
+			use_prefix = (cmp <= 0);
+		}
+
+		winner = use_prefix ? prefix_slot : tail_slot;
+		heap->tuple_insert(new_rel, winner,
+						   GetCurrentCommandId(true), 0, NULL);
+
+		/* Track PK → TID for replay */
+		{
+			Datum	val;
+			bool	isnull;
+			int64	key;
+
+			slot_getallattrs(winner);
+			val = slot_getattr(winner, pk_attnum, &isnull);
+			if (!isnull && sorted_heap_key_to_int64(val, pk_typid, &key))
+			{
+				PKTidEntry *entry;
+				bool		found;
+
+				entry = hash_search(pk_tid_map, &key, HASH_ENTER, &found);
+				entry->pk_val = key;
+				ItemPointerCopy(&winner->tts_tid, &entry->tid);
+			}
+		}
+		ntuples++;
+
+		/* Advance winner stream */
+		if (use_prefix)
+			prefix_valid = table_scan_getnextslot(prefix_scan,
+												  ForwardScanDirection,
+												  prefix_slot);
+		else
+			tail_valid = tuplesort_gettupleslot(tupstate, true, true,
+												tail_slot, NULL);
+	}
+
+	/* Cleanup */
+	if (prefix_scan)
+		table_endscan(prefix_scan);
+	tuplesort_end(tupstate);
+	ExecDropSingleTupleTableSlot(prefix_slot);
+	ExecDropSingleTupleTableSlot(tail_slot);
+	pfree(sortkeys);
+
+	return ntuples;
+}
+
+/* ----------------------------------------------------------------
+ *  sorted_heap_merge_online(regclass) → void
+ *
+ *  Non-blocking incremental merge compaction.  Uses trigger-based
+ *  change capture (same as compact_online) with the merge strategy
+ *  (prefix seq scan + tail tuplesort) from sorted_heap_merge.
+ *
+ *  ShareUpdateExclusiveLock during copy allows concurrent DML.
+ *  AccessExclusiveLock only for brief final swap.
+ * ---------------------------------------------------------------- */
+PG_FUNCTION_INFO_V1(sorted_heap_merge_online);
+
+Datum
+sorted_heap_merge_online(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	Relation		rel;
+	SortedHeapRelInfo *info;
+	AttrNumber		pk_attnum;
+	Oid				pk_typid;
+	Oid				pk_index_oid;
+	Oid				table_am_oid;
+	BlockNumber		total_blocks;
+	BlockNumber		total_data_pages;
+	BlockNumber		prefix_pages;
+	BlockNumber		tail_nblocks;
+	char		   *log_table_name = NULL;
+	Oid				new_relid = InvalidOid;
+	HASHCTL			hashctl;
+	HTAB		   *pk_tid_map;
+	int64			last_id = 0;
+	double			ntuples;
+	int				pass;
+
+	/* Phase 0: Validate */
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_tableam != &sorted_heap_am_routine)
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a sorted_heap table",
+						RelationGetRelationName(rel))));
+	}
+
+	if (!rel->rd_indexvalid)
+		RelationGetIndexList(rel);
+	pk_index_oid = rel->rd_pkindex;
+
+	if (!OidIsValid(pk_index_oid))
+	{
+		table_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("\"%s\" has no primary key",
+						RelationGetRelationName(rel))));
+	}
+
+	info = sorted_heap_get_relinfo(rel);
+	pk_attnum = info->attNums[0];
+	pk_typid = info->zm_pk_typid;
+	table_am_oid = rel->rd_rel->relam;
+	table_close(rel, AccessShareLock);
+
+	/* Phase 0b: Detect prefix (early exit before SPI setup) */
+	rel = table_open(relid, ShareUpdateExclusiveLock);
+	info = sorted_heap_get_relinfo(rel);
+	info->zm_loaded = false;
+	sorted_heap_zonemap_load(rel, info);
+
+	total_blocks = RelationGetNumberOfBlocks(rel);
+
+	if (total_blocks <= 1)
+	{
+		ereport(NOTICE,
+				(errmsg("online merge: table is empty")));
+		table_close(rel, ShareUpdateExclusiveLock);
+		PG_RETURN_VOID();
+	}
+
+	total_data_pages = total_blocks - 1;
+	prefix_pages = sorted_heap_detect_sorted_prefix(info);
+
+	if (prefix_pages >= total_data_pages)
+	{
+		ereport(NOTICE,
+				(errmsg("online merge: table is already sorted (%u pages)",
+						(unsigned) total_data_pages)));
+		table_close(rel, ShareUpdateExclusiveLock);
+		PG_RETURN_VOID();
+	}
+
+	table_close(rel, ShareUpdateExclusiveLock);
+
+	ereport(NOTICE,
+			(errmsg("online merge: starting for \"%s\"",
+					get_rel_name(relid)),
+			 errhint("Concurrent reads and writes are allowed. "
+					 "Brief exclusive lock at the end for swap.")));
+
+	/* Phase 1: SPI + log infrastructure */
+	SPI_connect_ext(SPI_OPT_NONATOMIC);
+
+	PG_TRY();
+	{
+		Relation	new_rel;
+		Snapshot	snapshot;
+
+		/* Phase 1b: Create log infrastructure (commits to make visible) */
+		log_table_name = create_log_infrastructure(relid,
+												   get_rel_name(relid),
+												   pk_attnum);
+
+		/* Phase 1c: Create new heap */
+		new_relid = make_new_heap(relid, InvalidOid, table_am_oid,
+								  RELPERSISTENCE_PERMANENT,
+								  AccessShareLock);
+
+		/* Initialize PK → TID hash table */
+		memset(&hashctl, 0, sizeof(hashctl));
+		hashctl.keysize = sizeof(int64);
+		hashctl.entrysize = sizeof(PKTidEntry);
+		hashctl.hcxt = CurrentMemoryContext;
+		pk_tid_map = hash_create("pk_tid_map", 1024, &hashctl,
+								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		/* Phase 2: Merge copy under ShareUpdateExclusiveLock */
+		rel = table_open(relid, ShareUpdateExclusiveLock);
+		new_rel = table_open(new_relid, AccessExclusiveLock);
+
+		/* Re-detect prefix under lock (handles TOCTOU race) */
+		info = sorted_heap_get_relinfo(rel);
+		info->zm_loaded = false;
+		sorted_heap_zonemap_load(rel, info);
+
+		total_blocks = RelationGetNumberOfBlocks(rel);
+		total_data_pages = total_blocks - 1;
+		prefix_pages = sorted_heap_detect_sorted_prefix(info);
+		tail_nblocks = total_data_pages - prefix_pages;
+
+		snapshot = GetTransactionSnapshot();
+
+		ntuples = sorted_heap_copy_merged(rel, new_rel, snapshot,
+										  pk_tid_map, info,
+										  prefix_pages, tail_nblocks);
+
+		ereport(NOTICE,
+				(errmsg("online merge: copied %.0f tuples "
+						"(%u prefix + %u tail pages)",
+						ntuples, (unsigned) prefix_pages,
+						(unsigned) tail_nblocks)));
+
+		table_close(new_rel, NoLock);
+
+		/* Phase 2b: Replay loop until convergence */
+		for (pass = 0; pass < SH_COMPACT_MAX_PASSES; pass++)
+		{
+			int64	replayed;
+
+			new_rel = table_open(new_relid, RowExclusiveLock);
+			replayed = sorted_heap_replay_log(rel, new_rel, log_table_name,
+											  &last_id, pk_tid_map,
+											  pk_attnum, pk_typid,
+											  pk_index_oid);
+			table_close(new_rel, NoLock);
+
+			if (replayed == 0)
+				break;
+
+			ereport(NOTICE,
+					(errmsg("online merge: pass %d replayed %lld changes",
+							pass + 1, (long long) replayed)));
+		}
+
+		/* Phase 2c: Release ShareUpdateExclusiveLock before upgrading */
+		table_close(rel, ShareUpdateExclusiveLock);
+
+		/* Phase 3: Final swap under AccessExclusiveLock */
+		rel = table_open(relid, AccessExclusiveLock);
+		new_rel = table_open(new_relid, AccessExclusiveLock);
+
+		/* Final replay: process any last changes */
+		sorted_heap_replay_log(rel, new_rel, log_table_name,
+							   &last_id, pk_tid_map,
+							   pk_attnum, pk_typid, pk_index_oid);
+
+		/* Rebuild zone map on new table */
+		if (info->zm_usable)
+			sorted_heap_rebuild_zonemap_internal(new_rel, pk_typid, pk_attnum,
+												 info->zm_pk_typid2,
+												 info->zm_col2_usable ?
+												 info->attNums[1] : 0);
+
+		table_close(new_rel, NoLock);
+		table_close(rel, NoLock);
+
+		/* Atomic swap of filenodes */
+		finish_heap_swap(relid, new_relid,
+						 false,		/* not system catalog */
+						 false,		/* no toast swap by content */
+						 false,		/* no constraint check */
+						 true,		/* is_internal */
+						 InvalidTransactionId,
+						 InvalidMultiXactId,
+						 RELPERSISTENCE_PERMANENT);
+
+		/* Cleanup: drop trigger and log table */
+		drop_log_infrastructure(relid, log_table_name);
+
+		hash_destroy(pk_tid_map);
+
+		ereport(NOTICE,
+				(errmsg("online merge: completed for \"%s\" (%.0f tuples)",
 						get_rel_name(relid), ntuples)));
 	}
 	PG_CATCH();

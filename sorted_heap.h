@@ -140,6 +140,9 @@ extern Datum sorted_heap_reset_stats(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_compact_trigger(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_compact_online(PG_FUNCTION_ARGS);
 extern Datum sorted_heap_merge(PG_FUNCTION_ARGS);
+extern Datum sorted_heap_merge_online(PG_FUNCTION_ARGS);
+extern BlockNumber sorted_heap_detect_sorted_prefix(SortedHeapRelInfo *info);
+extern void sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info);
 extern void sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 												 AttrNumber pk_attnum,
 												 Oid pk_typid2,
