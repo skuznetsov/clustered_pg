@@ -35,13 +35,13 @@ Parallel scan (large tables):
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `sorted_heap.h` | 158 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
-| `sorted_heap.c` | 1680 | Table AM: sorted multi_insert, zone map persistence, compact |
+| `sorted_heap.h` | 159 | Meta page layout, zone map structs (v5), SortedHeapRelInfo |
+| `sorted_heap.c` | 2042 | Table AM: sorted multi_insert, zone map persistence, compact, merge |
 | `sorted_heap_scan.c` | 1168 | Custom scan provider: planner hook, parallel scan, multi-col pruning |
 | `sorted_heap_online.c` | 603 | Online compact: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1528 | Extension entry point, legacy clustered index AM |
-| `sql/clustered_pg.sql` | 1438 | Regression tests (SH1–SH10) |
-| `expected/clustered_pg.out` | 2187 | Expected test output |
+| `sql/clustered_pg.sql` | 1517 | Regression tests (SH1–SH11) |
+| `expected/clustered_pg.out` | 2335 | Expected test output |
 
 ## Completed Phases
 
@@ -177,8 +177,27 @@ sort order (sequential I/O vs random index lookups).
 - SH10 test suite: zone map overflow boundary correctness (INSERT into
   overflow range, re-compact verification).
 
+### Phase 10 — Incremental Merge Compaction
+- `sorted_heap_merge(regclass)` — two-way merge avoiding full CLUSTER rewrite
+- Sorted prefix detection: scan zone map entries for monotonicity
+  (`entry[i+1].min >= entry[i].max`); works regardless of `SHM_FLAG_ZONEMAP_VALID`
+  since compacted entries remain accurate after subsequent INSERTs
+- Stream A: sequential heap scan of sorted prefix (no index needed)
+- Stream B: tuplesort of unsorted tail via PG's tuplesort API
+- Merge loop: compare PK columns via SortSupport, write winner to new
+  relation via `heap->tuple_insert` (bypasses sorted_heap AM sorting)
+- Zone map rebuilt on new table via `sorted_heap_rebuild_zonemap_internal`
+- Atomic filenode swap via `finish_heap_swap`
+- AccessExclusiveLock for entire operation (same as compact)
+- Edge cases: empty table → early return; already sorted → early return;
+  never compacted (no valid prefix) → full tuplesort fallback;
+  zone map doesn't cover trailing pages → uncovered pages go to tail
+- SH11 test suite: normal merge with overlapping data, zone map validity,
+  scan pruning after merge, re-compact verification, already-sorted,
+  never-compacted fallback, empty table
+
 ## Possible Future Work
 
 - Zone map support for text, uuid types
-- Merge multiple sorted runs without full CLUSTER rewrite
+- Online merge with trigger-based change capture (non-blocking variant)
 - Index-only scan equivalent using zone map
