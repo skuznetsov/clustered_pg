@@ -32,6 +32,7 @@
 /* Flag bits for shm_flags */
 #define SORTED_HEAP_FLAG_ZONEMAP_STALE	0x0001
 #define SHM_FLAG_ZONEMAP_VALID			0x0002	/* zone map safe for scan pruning */
+#define SHM_FLAG_ZM_SORTED				0x0004	/* zone map entries monotonic (binary search ok) */
 
 /*
  * Per-page zone map entry: min/max of PK columns as int64.
@@ -116,6 +117,7 @@ typedef struct SortedHeapRelInfo
 	bool		zm_usable;			/* first PK col is int2/4/8/timestamp/date */
 	bool		zm_loaded;			/* zone map read from meta page */
 	bool		zm_scan_valid;		/* zone map valid for scan pruning */
+	bool		zm_sorted;			/* zone map entries monotonically sorted */
 	Oid			zm_pk_typid;		/* type of first PK column */
 	bool		zm_col2_usable;		/* second PK col is int2/4/8/timestamp/date */
 	Oid			zm_pk_typid2;		/* type of second PK column */

@@ -307,6 +307,7 @@ sorted_heap_get_relinfo(Relation rel)
 		info->nkeys = 0;
 		info->zm_usable = false;
 		info->zm_loaded = false;
+		info->zm_sorted = false;
 		info->zm_pk_typid = InvalidOid;
 		info->zm_nentries = 0;
 		info->zm_overflow = NULL;
@@ -611,6 +612,7 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 		info->zm_nentries = cache_n;
 		info->zm_scan_valid =
 			(meta4->shm_flags & SHM_FLAG_ZONEMAP_VALID) != 0;
+		info->zm_sorted = false;	/* v3/v4 format predates sorted flag */
 
 		if (version >= 4)
 		{
@@ -707,6 +709,8 @@ sorted_heap_zonemap_load(Relation rel, SortedHeapRelInfo *info)
 			   n * sizeof(SortedHeapZoneMapEntry));
 		info->zm_scan_valid =
 			(meta->shm_flags & SHM_FLAG_ZONEMAP_VALID) != 0;
+		info->zm_sorted =
+			(meta->shm_flags & SHM_FLAG_ZM_SORTED) != 0;
 
 		info->zm_overflow_npages = meta_ovfl_npages;
 		info->zm_total_entries = n;
@@ -917,6 +921,7 @@ sorted_heap_zonemap_flush(Relation rel, SortedHeapRelInfo *info)
 		meta->shm_zonemap_nentries = n;
 		meta->shm_zonemap_pk_typid = info->zm_pk_typid;
 		meta->shm_zonemap_pk_typid2 = info->zm_pk_typid2;
+		meta->shm_flags &= ~SHM_FLAG_ZM_SORTED;	/* INSERT may break monotonicity */
 		memcpy(meta->shm_zonemap, info->zm_entries,
 			   n * sizeof(SortedHeapZoneMapEntry));
 	}
@@ -1224,6 +1229,26 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	meta->shm_zonemap_pk_typid = pk_typid;
 	meta->shm_zonemap_pk_typid2 = pk_typid2;
 	meta->shm_flags |= SHM_FLAG_ZONEMAP_VALID;
+
+	/* Check if entries are monotonically sorted (enables binary search) */
+	{
+		bool	is_sorted = true;
+		int64	prev_max = PG_INT64_MIN;
+
+		for (uint32 j = 0; j < nentries && is_sorted; j++)
+		{
+			if (entries[j].zme_min == PG_INT64_MAX)
+				continue;			/* skip empty pages */
+			if (entries[j].zme_min < prev_max)
+				is_sorted = false;
+			prev_max = entries[j].zme_max;
+		}
+		if (is_sorted)
+			meta->shm_flags |= SHM_FLAG_ZM_SORTED;
+		else
+			meta->shm_flags &= ~SHM_FLAG_ZM_SORTED;
+	}
+
 	memcpy(meta->shm_zonemap, entries,
 		   meta_nentries * sizeof(SortedHeapZoneMapEntry));
 
@@ -1632,14 +1657,30 @@ sorted_heap_zonemap_stats(PG_FUNCTION_ARGS)
 		on_disk_nentries = meta->shm_zonemap_nentries;
 		on_disk_ovfl_npages = meta->shm_overflow_npages;
 
-		appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u"
-						 " pk_typid2=%u flags=%u overflow_pages=%u",
-						 meta->shm_version,
-						 (unsigned) meta->shm_zonemap_nentries,
-						 (unsigned) meta->shm_zonemap_pk_typid,
-						 (unsigned) meta->shm_zonemap_pk_typid2,
-						 meta->shm_flags,
-						 (unsigned) meta->shm_overflow_npages);
+		{
+			const char *flags_str;
+			uint32		f = meta->shm_flags;
+			bool		fv = (f & SHM_FLAG_ZONEMAP_VALID) != 0;
+			bool		fs = (f & SHM_FLAG_ZM_SORTED) != 0;
+
+			if (fv && fs)
+				flags_str = "valid,sorted";
+			else if (fv)
+				flags_str = "valid";
+			else if (fs)
+				flags_str = "sorted";
+			else
+				flags_str = "0";
+
+			appendStringInfo(&buf, "version=%u nentries=%u pk_typid=%u"
+							 " pk_typid2=%u flags=%s overflow_pages=%u",
+							 meta->shm_version,
+							 (unsigned) meta->shm_zonemap_nentries,
+							 (unsigned) meta->shm_zonemap_pk_typid,
+							 (unsigned) meta->shm_zonemap_pk_typid2,
+							 flags_str,
+							 (unsigned) meta->shm_overflow_npages);
+		}
 
 		/* Save first entries and last overflow block for after release */
 		n_first_entries = Min(on_disk_nentries, 5);
@@ -1915,6 +1956,7 @@ sorted_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 				{
 					/* Flush updated entry via version-aware flush */
 					sorted_heap_zonemap_flush(rel, info);
+					info->zm_sorted = false;
 				}
 			}
 			/* Zone map stays valid — pruning preserved */

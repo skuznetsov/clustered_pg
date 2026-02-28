@@ -625,6 +625,64 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 }
 
 /* ----------------------------------------------------------------
+ *  Binary search helpers for monotonic zone maps.
+ *
+ *  After compact, zone map entries have non-decreasing zme_min and
+ *  zme_max values (data is physically sorted).  This enables O(log N)
+ *  block range computation instead of O(N) linear scan.
+ * ---------------------------------------------------------------- */
+
+/*
+ * Find first entry index where zme_max >= lo (or > lo if !inclusive).
+ * Returns count if no such entry exists.
+ */
+static uint32
+zm_bsearch_first(SortedHeapRelInfo *info, int64 lo, bool inclusive,
+				 uint32 count)
+{
+	uint32	low = 0, high = count;
+
+	while (low < high)
+	{
+		uint32	mid = low + (high - low) / 2;
+		SortedHeapZoneMapEntry *e = sorted_heap_get_zm_entry(info, mid);
+		bool	below;
+
+		below = inclusive ? (e->zme_max < lo) : (e->zme_max <= lo);
+		if (below)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	return low;
+}
+
+/*
+ * Find one-past-last entry index where zme_min <= hi (or < hi if !inclusive).
+ * Returns 0 if no such entry exists.
+ */
+static uint32
+zm_bsearch_last(SortedHeapRelInfo *info, int64 hi, bool inclusive,
+				uint32 count)
+{
+	uint32	low = 0, high = count;
+
+	while (low < high)
+	{
+		uint32	mid = low + (high - low) / 2;
+		SortedHeapZoneMapEntry *e = sorted_heap_get_zm_entry(info, mid);
+		bool	above;
+
+		above = inclusive ? (e->zme_min > hi) : (e->zme_min >= hi);
+		if (above)
+			high = mid;
+		else
+			low = mid + 1;
+	}
+	return low;		/* one-past-last matching index */
+}
+
+/* ----------------------------------------------------------------
  *  Compute block range from zone map
  * ---------------------------------------------------------------- */
 static void
@@ -647,19 +705,48 @@ sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 	data_blocks = (total_blocks > 1 + info->zm_overflow_npages) ?
 		total_blocks - 1 - info->zm_overflow_npages : 0;
 
-	for (i = 0; i < zm_entries_count; i++)
+	if (info->zm_sorted)
 	{
-		SortedHeapZoneMapEntry *e = sorted_heap_get_zm_entry(info, i);
+		/*
+		 * Binary search: O(log N) for monotonic zone map.
+		 * Column 2 pruning is not applied here; the executor handles
+		 * per-block column 2 checks during scan.
+		 */
+		uint32	first_idx = 0;
+		uint32	last_idx_excl = zm_entries_count;
 
-		if (e->zme_min == PG_INT64_MAX)
-			continue;			/* empty page */
+		if (bounds->has_lo)
+			first_idx = zm_bsearch_first(info, bounds->lo,
+										 bounds->lo_inclusive,
+										 zm_entries_count);
+		if (bounds->has_hi)
+			last_idx_excl = zm_bsearch_last(info, bounds->hi,
+											bounds->hi_inclusive,
+											zm_entries_count);
 
-		if (!sorted_heap_zone_overlaps(e, bounds))
-			continue;			/* zone map says no match */
+		if (first_idx < last_idx_excl)
+		{
+			first_match = first_idx + 1;	/* +1 for meta page */
+			last_match = last_idx_excl;		/* one-past = last block */
+		}
+	}
+	else
+	{
+		/* Linear scan: O(N) fallback for non-monotonic zone map */
+		for (i = 0; i < zm_entries_count; i++)
+		{
+			SortedHeapZoneMapEntry *e = sorted_heap_get_zm_entry(info, i);
 
-		if ((BlockNumber)(i + 1) < first_match)
-			first_match = i + 1;	/* +1 for meta page */
-		last_match = i + 1;
+			if (e->zme_min == PG_INT64_MAX)
+				continue;			/* empty page */
+
+			if (!sorted_heap_zone_overlaps(e, bounds))
+				continue;			/* zone map says no match */
+
+			if ((BlockNumber)(i + 1) < first_match)
+				first_match = i + 1;	/* +1 for meta page */
+			last_match = i + 1;
+		}
 	}
 
 	/*

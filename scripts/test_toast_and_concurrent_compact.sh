@@ -123,7 +123,7 @@ intact=$(PSQL -c "SELECT count(*) FROM toast_test WHERE length(payload) = 4000")
 check "toast_compact_payload_intact" "10000" "$intact"
 
 zm_valid=$(PSQL -c "
-SELECT CASE WHEN sorted_heap_zonemap_stats('toast_test'::regclass) LIKE '%flags=2%'
+SELECT CASE WHEN sorted_heap_zonemap_stats('toast_test'::regclass) LIKE '%flags=valid%'
             THEN '1' ELSE '0' END
 ")
 check "toast_compact_zm_valid" "1" "$zm_valid"
@@ -168,7 +168,7 @@ intact=$(PSQL -c "SELECT count(*) FROM toast_test WHERE length(payload) = 4000")
 check "toast_merge_payload_intact" "20000" "$intact"
 
 zm_valid=$(PSQL -c "
-SELECT CASE WHEN sorted_heap_zonemap_stats('toast_test'::regclass) LIKE '%flags=2%'
+SELECT CASE WHEN sorted_heap_zonemap_stats('toast_test'::regclass) LIKE '%flags=valid%'
             THEN '1' ELSE '0' END
 ")
 check "toast_merge_zm_valid" "1" "$zm_valid"

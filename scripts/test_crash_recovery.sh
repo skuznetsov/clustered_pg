@@ -168,7 +168,7 @@ scenario_crash_after_compact() {
   local zm_before valid_before
   zm_before=$(PSQL_CMD "$dir" "$port" -c \
     "SELECT sorted_heap_zonemap_stats('crash_compact'::regclass)")
-  valid_before=$(echo "$zm_before" | grep -c 'flags=2' || true)
+  valid_before=$(echo "$zm_before" | grep -c 'flags=valid' || true)
   check "compact_zm_valid_before_crash" "1" "$valid_before"
 
   crash_cluster "$dir"
@@ -178,7 +178,7 @@ scenario_crash_after_compact() {
   local zm_after valid_after
   zm_after=$(PSQL_CMD "$dir" "$port" -c \
     "SELECT sorted_heap_zonemap_stats('crash_compact'::regclass)")
-  valid_after=$(echo "$zm_after" | grep -c 'flags=2' || true)
+  valid_after=$(echo "$zm_after" | grep -c 'flags=valid' || true)
   check "compact_zm_valid_after_crash" "1" "$valid_after"
 
   local count
@@ -291,7 +291,7 @@ scenario_crash_during_online_compact() {
   local zm_after valid_after
   zm_after=$(PSQL_CMD "$dir" "$port" -c \
     "SELECT sorted_heap_zonemap_stats('crash_online'::regclass)")
-  valid_after=$(echo "$zm_after" | grep -c 'flags=2' || true)
+  valid_after=$(echo "$zm_after" | grep -c 'flags=valid' || true)
   check "online_compact_crash_zm_preserved" "1" "$valid_after"
 
   # No orphaned log tables (UNLOGGED → lost on crash)

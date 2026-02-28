@@ -1203,7 +1203,7 @@ FROM (
 
 -- Test SH7-3: Zone map populated after online compact
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh7_basic'::regclass) LIKE 'version=% nentries=% pk_typid=23%flags=2%'
+    CASE WHEN sorted_heap_zonemap_stats('sh7_basic'::regclass) LIKE 'version=% nentries=% pk_typid=23%flags=valid%'
          THEN 'zonemap_online_ok'
          ELSE 'zonemap_online_FAIL: ' || sorted_heap_zonemap_stats('sh7_basic'::regclass)
     END AS sh7_zonemap_result;
@@ -1244,7 +1244,7 @@ INSERT INTO sh8_intint
 SELECT sorted_heap_compact('sh8_intint'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_intint'::regclass)
-              LIKE 'version=6%pk_typid=23 pk_typid2=23%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=23%flags=valid%'
          THEN 'sh8_intint_zonemap_ok'
          ELSE 'sh8_intint_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_intint'::regclass)
     END AS sh8_1_result;
@@ -1280,7 +1280,7 @@ INSERT INTO sh8_ts
 SELECT sorted_heap_compact('sh8_ts'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_ts'::regclass)
-              LIKE 'version=6%pk_typid=23 pk_typid2=1114%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=1114%flags=valid%'
          THEN 'sh8_ts_zonemap_ok'
          ELSE 'sh8_ts_zonemap_FAIL: ' || sorted_heap_zonemap_stats('sh8_ts'::regclass)
     END AS sh8_4_result;
@@ -1294,7 +1294,7 @@ SELECT sorted_heap_compact('sh8_text'::regclass);
 -- pk_typid2 should be 0 (InvalidOid) — text not supported
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_text'::regclass)
-              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=valid%'
          THEN 'sh8_text_degradation_ok'
          ELSE 'sh8_text_degradation_FAIL: ' || sorted_heap_zonemap_stats('sh8_text'::regclass)
     END AS sh8_5_result;
@@ -1307,7 +1307,7 @@ INSERT INTO sh8_single SELECT g, repeat('w', 40) FROM generate_series(1, 300) g;
 SELECT sorted_heap_compact('sh8_single'::regclass);
 SELECT
     CASE WHEN sorted_heap_zonemap_stats('sh8_single'::regclass)
-              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=2%'
+              LIKE 'version=6%pk_typid=23 pk_typid2=0%flags=valid%'
          THEN 'sh8_single_ok'
          ELSE 'sh8_single_FAIL: ' || sorted_heap_zonemap_stats('sh8_single'::regclass)
     END AS sh8_6_result;
@@ -1457,9 +1457,9 @@ SELECT sorted_heap_merge('sh11_merge'::regclass);
 -- SH11-4: Verify correct count (55000) after merge
 SELECT count(*) AS sh11_count_after_merge FROM sh11_merge;
 
--- SH11-5: Verify zone map valid (flags=2 means ZONEMAP_VALID)
+-- SH11-5: Verify zone map valid (flags=valid means ZONEMAP_VALID)
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh11_merge'::regclass) LIKE '%flags=2%'
+    CASE WHEN sorted_heap_zonemap_stats('sh11_merge'::regclass) LIKE '%flags=valid%'
          THEN 'sh11_zonemap_valid_ok'
          ELSE 'sh11_zonemap_valid_FAIL: ' ||
               sorted_heap_zonemap_stats('sh11_merge'::regclass)
@@ -1541,9 +1541,9 @@ FROM (
     FROM sh12_merge
 ) sub;
 
--- SH12-4: Verify zone map valid (flags=2)
+-- SH12-4: Verify zone map valid (flags=valid)
 SELECT
-    CASE WHEN sorted_heap_zonemap_stats('sh12_merge'::regclass) LIKE '%flags=2%'
+    CASE WHEN sorted_heap_zonemap_stats('sh12_merge'::regclass) LIKE '%flags=valid%'
          THEN 'sh12_zonemap_ok'
          ELSE 'sh12_zonemap_FAIL: ' ||
               sorted_heap_zonemap_stats('sh12_merge'::regclass)
@@ -1606,7 +1606,7 @@ INSERT INTO sh13_uuid
 
 SELECT sorted_heap_compact('sh13_uuid'::regclass);
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_uuid'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh13_uuid_zm_valid'
          ELSE 'sh13_uuid_zm_FAIL'
     END AS sh13_1_result;
@@ -1650,7 +1650,7 @@ INSERT INTO sh13_text
 
 SELECT sorted_heap_compact('sh13_text'::regclass);
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_text'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh13_text_zm_valid'
          ELSE 'sh13_text_zm_FAIL'
     END AS sh13_3_result;
@@ -1714,7 +1714,7 @@ INSERT INTO sh13_varchar
 
 SELECT sorted_heap_compact('sh13_varchar'::regclass);
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_varchar'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh13_varchar_zm_valid'
          ELSE 'sh13_varchar_zm_FAIL'
     END AS sh13_7_result;
@@ -1743,7 +1743,7 @@ SELECT sorted_heap_compact('sh14_big'::regclass);
 
 -- SH14-2: Zone map stats should show full meta page + overflow with chain
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh14_big'::regclass)
-                 LIKE '%nentries=250%flags=2%total_overflow_pages=%'
+                 LIKE '%nentries=250%flags=valid%total_overflow_pages=%'
          THEN 'sh14_overflow_chain_ok'
          ELSE 'sh14_overflow_chain_FAIL: ' ||
               sorted_heap_zonemap_stats('sh14_big'::regclass)
@@ -1773,7 +1773,7 @@ DROP TABLE sh14_big;
 -- SH15: VACUUM Zone Map Rebuild
 -- ================================================================
 
--- SH15-1: Create table, compact → zone map valid (flags=2)
+-- SH15-1: Create table, compact → zone map valid (flags=valid)
 CREATE TABLE sh15_vac(
     id int PRIMARY KEY,
     val int
@@ -1783,7 +1783,7 @@ INSERT INTO sh15_vac SELECT g, g FROM generate_series(1, 5000) g;
 SELECT sorted_heap_compact('sh15_vac'::regclass);
 
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh15_zm_valid_after_compact'
          ELSE 'sh15_zm_FAIL'
     END AS sh15_1_result;
@@ -1800,7 +1800,7 @@ END;
 $$;
 
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
-                 NOT LIKE '%flags=2%'
+                 NOT LIKE '%flags=valid%'
          THEN 'sh15_zm_invalidated_ok'
          ELSE 'sh15_zm_still_valid_FAIL'
     END AS sh15_2_result;
@@ -1809,7 +1809,7 @@ SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
 VACUUM sh15_vac;
 
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh15_vacuum_rebuilt_zm_ok'
          ELSE 'sh15_vacuum_rebuild_FAIL: ' ||
               sorted_heap_zonemap_stats('sh15_vac'::regclass)
@@ -1844,7 +1844,7 @@ SET sorted_heap.vacuum_rebuild_zonemap = off;
 VACUUM sh15_vac;
 
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
-                 NOT LIKE '%flags=2%'
+                 NOT LIKE '%flags=valid%'
          THEN 'sh15_guc_off_no_rebuild_ok'
          ELSE 'sh15_guc_off_FAIL'
     END AS sh15_5_result;
@@ -1854,7 +1854,7 @@ RESET sorted_heap.vacuum_rebuild_zonemap;
 VACUUM sh15_vac;
 
 SELECT CASE WHEN sorted_heap_zonemap_stats('sh15_vac'::regclass)
-                 LIKE '%flags=2%'
+                 LIKE '%flags=valid%'
          THEN 'sh15_guc_on_rebuild_ok'
          ELSE 'sh15_guc_on_FAIL: ' ||
               sorted_heap_zonemap_stats('sh15_vac'::regclass)

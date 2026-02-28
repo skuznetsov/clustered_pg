@@ -85,10 +85,10 @@ SQL
 
 echo "Setup: 10000 rows, compacted, zone map valid"
 
-# Helper: check zone map valid (flags=2)
+# Helper: check zone map valid (flags contain 'valid')
 zm_valid() {
   PSQL -c "
-    SELECT CASE WHEN sorted_heap_zonemap_stats('alter_test'::regclass) LIKE '%flags=2%'
+    SELECT CASE WHEN sorted_heap_zonemap_stats('alter_test'::regclass) LIKE '%flags=valid%'
                 THEN '1' ELSE '0' END
   "
 }
