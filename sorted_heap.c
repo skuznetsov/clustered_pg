@@ -38,6 +38,8 @@
 #include "utils/snapmgr.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplesort.h"
+#include "utils/uuid.h"
+#include "catalog/pg_collation_d.h"
 #include "executor/tuptable.h"
 
 #include "sorted_heap.h"
@@ -216,6 +218,39 @@ sorted_heap_key_to_int64(Datum value, Oid typid, int64 *out)
 		case DATEOID:
 			*out = (int64) DatumGetInt32(value);	/* DateADT is int32 */
 			return true;
+		case UUIDOID:
+		{
+			pg_uuid_t  *uuid = DatumGetUUIDP(value);
+			unsigned char *d = uuid->data;
+			uint64		hi;
+
+			/* First 8 bytes as big-endian uint64, sign-flipped for ordering */
+			hi = ((uint64) d[0] << 56) | ((uint64) d[1] << 48) |
+				 ((uint64) d[2] << 40) | ((uint64) d[3] << 32) |
+				 ((uint64) d[4] << 24) | ((uint64) d[5] << 16) |
+				 ((uint64) d[6] << 8)  | (uint64) d[7];
+			*out = (int64) (hi ^ ((uint64) 1 << 63));
+			return true;
+		}
+		case TEXTOID:
+		case VARCHAROID:
+		{
+			text	   *txt = DatumGetTextPP(value);
+			int			len = VARSIZE_ANY_EXHDR(txt);
+			char	   *data = VARDATA_ANY(txt);
+			unsigned char buf[8];
+			uint64		val64;
+
+			/* First 8 bytes zero-padded, as big-endian uint64, sign-flipped */
+			memset(buf, 0, 8);
+			memcpy(buf, data, Min(len, 8));
+			val64 = ((uint64) buf[0] << 56) | ((uint64) buf[1] << 48) |
+					((uint64) buf[2] << 40) | ((uint64) buf[3] << 32) |
+					((uint64) buf[4] << 24) | ((uint64) buf[5] << 16) |
+					((uint64) buf[6] << 8)  | (uint64) buf[7];
+			*out = (int64) (val64 ^ ((uint64) 1 << 63));
+			return true;
+		}
 		default:
 			return false;
 	}
@@ -344,7 +379,20 @@ sorted_heap_get_relinfo(Relation rel)
 								   first_col_typid == INT8OID ||
 								   first_col_typid == TIMESTAMPOID ||
 								   first_col_typid == TIMESTAMPTZOID ||
-								   first_col_typid == DATEOID);
+								   first_col_typid == DATEOID ||
+								   first_col_typid == UUIDOID);
+
+				/* TEXT/VARCHAR: usable only with C/POSIX collation */
+				if (!info->zm_usable &&
+					(first_col_typid == TEXTOID ||
+					 first_col_typid == VARCHAROID))
+				{
+					Oid		collation = TupleDescAttr(RelationGetDescr(rel),
+													  info->attNums[0] - 1)->attcollation;
+
+					if (collation == C_COLLATION_OID)
+						info->zm_usable = true;
+				}
 
 				/* Detect column 2 usability for composite PK */
 				info->zm_col2_usable = false;
@@ -360,10 +408,23 @@ sorted_heap_get_relinfo(Relation rel)
 						second_col_typid == INT8OID ||
 						second_col_typid == TIMESTAMPOID ||
 						second_col_typid == TIMESTAMPTZOID ||
-						second_col_typid == DATEOID)
+						second_col_typid == DATEOID ||
+						second_col_typid == UUIDOID)
 					{
 						info->zm_col2_usable = true;
 						info->zm_pk_typid2 = second_col_typid;
+					}
+					else if (second_col_typid == TEXTOID ||
+							 second_col_typid == VARCHAROID)
+					{
+						Oid		coll2 = TupleDescAttr(RelationGetDescr(rel),
+													  info->attNums[1] - 1)->attcollation;
+
+						if (coll2 == C_COLLATION_OID)
+						{
+							info->zm_col2_usable = true;
+							info->zm_pk_typid2 = second_col_typid;
+						}
 					}
 				}
 			}
@@ -800,9 +861,24 @@ sorted_heap_rebuild_zonemap_internal(Relation rel, Oid pk_typid,
 	BlockNumber		overflow_blocks[SORTED_HEAP_OVERFLOW_MAX_PAGES];
 	bool			track_col2 = OidIsValid(pk_typid2);
 
-	/* Only supported PK types get zone maps */
-	if (!sorted_heap_key_to_int64(Int32GetDatum(0), pk_typid, &(int64){0}))
-		return;
+	/* Only supported PK types get zone maps.
+	 * Cannot probe with sorted_heap_key_to_int64(Int32GetDatum(0), ...)
+	 * because pointer-based types (UUID, text) would dereference NULL. */
+	switch (pk_typid)
+	{
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+		case DATEOID:
+		case UUIDOID:
+		case TEXTOID:
+		case VARCHAROID:
+			break;		/* supported */
+		default:
+			return;		/* not supported */
+	}
 
 	/* Compute max capacity: meta page + max overflow pages */
 	max_entries = SORTED_HEAP_ZONEMAP_MAX +

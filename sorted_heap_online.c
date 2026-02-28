@@ -34,6 +34,7 @@
 #include "utils/snapmgr.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplesort.h"
+#include "utils/uuid.h"
 
 #include "sorted_heap.h"
 
@@ -471,6 +472,15 @@ sorted_heap_compact_online(PG_FUNCTION_ARGS)
 	table_am_oid = rel->rd_rel->relam;
 	table_close(rel, AccessShareLock);
 
+	/* Block online compact for lossy PK types (UUID, text) —
+	 * the int8 log table and PK→TID hash cause collisions */
+	if (pk_typid == UUIDOID || pk_typid == TEXTOID || pk_typid == VARCHAROID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("online compact is not supported for %s primary keys",
+						format_type_be(pk_typid)),
+				 errhint("Use sorted_heap_compact() instead.")));
+
 	ereport(NOTICE,
 			(errmsg("online compact: starting for \"%s\"",
 					get_rel_name(relid)),
@@ -848,6 +858,15 @@ sorted_heap_merge_online(PG_FUNCTION_ARGS)
 	pk_typid = info->zm_pk_typid;
 	table_am_oid = rel->rd_rel->relam;
 	table_close(rel, AccessShareLock);
+
+	/* Block online merge for lossy PK types (UUID, text) —
+	 * the int8 log table and PK→TID hash cause collisions */
+	if (pk_typid == UUIDOID || pk_typid == TEXTOID || pk_typid == VARCHAROID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("online merge is not supported for %s primary keys",
+						format_type_be(pk_typid)),
+				 errhint("Use sorted_heap_merge() instead.")));
 
 	/* Phase 0b: Detect prefix (early exit before SPI setup) */
 	rel = table_open(relid, ShareUpdateExclusiveLock);

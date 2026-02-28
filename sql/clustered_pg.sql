@@ -1589,6 +1589,140 @@ DROP TABLE sh12_unsorted;
 
 DROP TABLE sh12_merge;
 
+-- ============================================================
+-- SH13: Zone map support for UUID and text types
+-- ============================================================
+
+-- SH13-1: UUID PK — zone map populated after compact
+CREATE TABLE sh13_uuid(
+    id uuid PRIMARY KEY,
+    val int
+) USING sorted_heap;
+
+-- Insert 10K rows with UUIDs generated from integers
+INSERT INTO sh13_uuid
+  SELECT (lpad(to_hex(g), 8, '0') || '-0000-0000-0000-000000000000')::uuid, g
+  FROM generate_series(1, 10000) g;
+
+SELECT sorted_heap_compact('sh13_uuid'::regclass);
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_uuid'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh13_uuid_zm_valid'
+         ELSE 'sh13_uuid_zm_FAIL'
+    END AS sh13_1_result;
+
+-- SH13-2: UUID scan pruning
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 0;
+
+SELECT CASE
+    WHEN sh6_plan_contains(
+        'SELECT * FROM sh13_uuid WHERE id = ''00000064-0000-0000-0000-000000000000''::uuid',
+        'Zone Map')
+         THEN 'sh13_uuid_point_pruning_ok'
+         ELSE 'sh13_uuid_point_pruning_FAIL'
+    END AS sh13_2a_result;
+
+SELECT CASE
+    WHEN sh6_plan_contains(
+        'SELECT * FROM sh13_uuid WHERE id >= ''00000001-0000-0000-0000-000000000000''::uuid AND id <= ''00000064-0000-0000-0000-000000000000''::uuid',
+        'Zone Map')
+         THEN 'sh13_uuid_range_pruning_ok'
+         ELSE 'sh13_uuid_range_pruning_FAIL'
+    END AS sh13_2b_result;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET max_parallel_workers_per_gather;
+
+-- SH13-3: TEXT PK with C collation — zone map works
+CREATE TABLE sh13_text(
+    id text COLLATE "C" PRIMARY KEY,
+    val int
+) USING sorted_heap;
+
+INSERT INTO sh13_text
+  SELECT lpad(g::text, 10, '0'), g
+  FROM generate_series(1, 10000) g;
+
+SELECT sorted_heap_compact('sh13_text'::regclass);
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_text'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh13_text_zm_valid'
+         ELSE 'sh13_text_zm_FAIL'
+    END AS sh13_3_result;
+
+-- SH13-4: TEXT scan pruning with C collation
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET max_parallel_workers_per_gather = 0;
+
+SELECT CASE
+    WHEN sh6_plan_contains(
+        'SELECT * FROM sh13_text WHERE id = ''0000000100''',
+        'Zone Map')
+         THEN 'sh13_text_point_pruning_ok'
+         ELSE 'sh13_text_point_pruning_FAIL'
+    END AS sh13_4a_result;
+
+SELECT CASE
+    WHEN sh6_plan_contains(
+        'SELECT * FROM sh13_text WHERE id >= ''0000000001'' AND id <= ''0000000100''',
+        'Zone Map')
+         THEN 'sh13_text_range_pruning_ok'
+         ELSE 'sh13_text_range_pruning_FAIL'
+    END AS sh13_4b_result;
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+RESET max_parallel_workers_per_gather;
+
+-- SH13-5: Online compact on UUID PK → error
+DO $$
+BEGIN
+    CALL sorted_heap_compact_online('sh13_uuid'::regclass);
+    RAISE NOTICE 'sh13_online_compact_uuid_FAIL';
+EXCEPTION WHEN feature_not_supported THEN
+    RAISE NOTICE 'sh13_online_compact_uuid_blocked_ok';
+END;
+$$;
+
+-- SH13-6: Online merge on UUID PK → error
+DO $$
+BEGIN
+    CALL sorted_heap_merge_online('sh13_uuid'::regclass);
+    RAISE NOTICE 'sh13_online_merge_uuid_FAIL';
+EXCEPTION WHEN feature_not_supported THEN
+    RAISE NOTICE 'sh13_online_merge_uuid_blocked_ok';
+END;
+$$;
+
+-- SH13-7: VARCHAR PK with C collation — zone map works
+CREATE TABLE sh13_varchar(
+    id varchar(20) COLLATE "C" PRIMARY KEY,
+    val int
+) USING sorted_heap;
+
+INSERT INTO sh13_varchar
+  SELECT lpad(g::text, 10, '0'), g
+  FROM generate_series(1, 1000) g;
+
+SELECT sorted_heap_compact('sh13_varchar'::regclass);
+SELECT CASE WHEN sorted_heap_zonemap_stats('sh13_varchar'::regclass)
+                 LIKE '%flags=2%'
+         THEN 'sh13_varchar_zm_valid'
+         ELSE 'sh13_varchar_zm_FAIL'
+    END AS sh13_7_result;
+
+DROP TABLE sh13_varchar;
+DROP TABLE sh13_text;
+DROP TABLE sh13_uuid;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;
