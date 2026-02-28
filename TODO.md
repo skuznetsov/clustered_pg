@@ -46,6 +46,7 @@ Parallel scan (large tables):
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 | `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
 | `scripts/test_alter_table.sh` | 313 | ALTER TABLE on sorted_heap (ADD/DROP/RENAME/ALTER TYPE/PK) |
+| `scripts/bench_sorted_heap.sh` | 299 | sorted_heap vs heap+btree comparative benchmark |
 
 ## Completed Phases
 
@@ -85,11 +86,12 @@ Basic `sorted_heap` AM that delegates everything to heap.
   upper bound falls within covered range
 - EXPLAIN output: "Zone Map: N of M blocks (pruned P)"
 
-## Benchmark Results (500K rows, ~56 MB, warm cache)
+## Benchmark Results
 
-PostgreSQL 18.1, Apple M-series, zone map v6 with ExecScan projection.
+PostgreSQL 18, Apple M-series (12 CPU, 64 GB RAM), zone map v6.
+PG config: shared_buffers=4GB, work_mem=256MB, maintenance_work_mem=2GB.
 
-### sorted_heap vs Heap SeqScan (no index)
+### sorted_heap vs Heap SeqScan (no index, 500K rows, warm cache)
 
 Primary use case — sorted_heap eliminates the need for a separate index.
 
@@ -101,18 +103,46 @@ Primary use case — sorted_heap eliminates the need for a separate index.
 | Wide range (100K rows) | 20.4ms / 7143 bufs | 6.9ms / 1430 bufs | 3x |
 | Full scan | 26.4ms / 7143 bufs | 28.8ms / 7172 bufs | ~1x |
 
-### sorted_heap vs Heap IndexScan (btree PK)
+### sorted_heap vs Heap+btree at Scale (pgbench, 1 client, 10s)
 
-| Query | Heap (IndexScan) | sorted_heap (SortedHeapScan) | Ratio |
-|-------|-----------------|------------------------------|-------|
-| Point query (1 row) | 0.026ms / 4 bufs | 0.025ms / 1 buf | ~1x |
-| Narrow range (100 rows) | 0.019ms / 5 bufs | 0.042ms / 2 bufs | 0.5x |
-| Medium range (5K rows) | 0.433ms / 88 bufs | 0.480ms / 72 bufs | ~1x |
-| Wide range (100K rows) | 7.5ms / 1706 bufs | 6.9ms / 1430 bufs | 1.1x |
+`scripts/bench_sorted_heap.sh` — ephemeral cluster, `INSERT...SELECT`,
+pgbench custom scripts for SELECT throughput.
 
-Zone map granularity is per-page, so narrow queries read slightly more
-tuples than btree. For wide ranges sorted_heap wins on buffer hits due
-to physical sort order (sequential I/O vs random index lookups).
+**INSERT (rows/sec)**
+
+| Scale | sorted_heap | heap+btree | compact |
+|------:|------------:|-----------:|--------:|
+| 1M | 952K | 836K | 0.3s |
+| 10M | 790K | 818K | 3.5s |
+| 100M | 661K | 803K | 78s |
+
+**Table size**
+
+| Scale | sorted_heap | heap+btree (table + index) |
+|------:|------------:|---------------------------:|
+| 1M | 71 MB | 71 MB (50 + 21) |
+| 10M | 714 MB | 712 MB (498 + 214) |
+| 100M | 7.8 GB | 7.8 GB (5.7 + 2.1) |
+
+**SELECT (queries/sec)**
+
+| Query | 1M sh / heap | 10M sh / heap | 100M sh / heap |
+|-------|-------------:|--------------:|---------------:|
+| Point (1 row) | 23.6K / 41K | 8.7K / 40.8K | 803 / 2,112 |
+| Narrow (100) | 18.7K / 26.6K | 7.9K / 25.1K | 669 / 4,155 |
+| Medium (5K) | 3.2K / 3.5K | 2.5K / 4.5K | 309 / 558 |
+| Wide (100K) | 190 / 282 | 193 / 276 | **95 / 89** |
+
+**Observations:**
+- Wide range at 100M — sorted_heap wins (95 vs 89 tps). Sequential I/O
+  from physical sorting beats random btree index lookups when data exceeds
+  shared_buffers.
+- Point/narrow — btree consistently wins. B-tree does 3-4 page reads
+  vs zone map block-level pruning.
+- INSERT — comparable; sorted_heap slightly slower at 100M due to
+  batch sorting overhead. No btree index maintenance overhead.
+- Storage — nearly identical (sorted_heap trades btree index for
+  meta+overflow pages).
 
 ## Known Limitations
 
