@@ -1,7 +1,7 @@
 CREATE EXTENSION pg_sorted_heap;
 SELECT public.version();
 SELECT public.pg_sorted_heap_observability() AS observability_bootstrap;
-SELECT (public.pg_sorted_heap_observability() ~ 'pg_sorted_heap=0.1.0') AS observability_probe;
+SELECT (public.pg_sorted_heap_observability() ~ 'pg_sorted_heap=0.9.7') AS observability_probe;
 
 -- ====================================================================
 -- Functional regression tests: multi-type index, JOIN UNNEST rescan,

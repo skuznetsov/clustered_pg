@@ -1,5 +1,5 @@
-comment = 'Clustered storage and clustered index experiment scaffold for PostgreSQL'
-default_version = '0.1.0'
+comment = 'Sorted heap table AM with zone map scan pruning for PostgreSQL'
+default_version = '0.9.7'
 relocatable = false
 superuser = false
 module_pathname = '$libdir/pg_sorted_heap'
