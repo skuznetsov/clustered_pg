@@ -297,6 +297,50 @@ PSQL -c "SELECT sorted_heap_compact('alter_test'::regclass)" >/dev/null
 check "readd_pk_zm_valid" "1" "$(zm_valid)"
 check "readd_pk_pruning" "1" "$(has_pruning pk_id 100 200)"
 
+# ============================================================
+# Test 13: Concurrent DDL + active scan
+# ============================================================
+echo ""
+echo "--- Test 13: Concurrent DDL + active scan ---"
+
+# Background: SELECT count(*) in a loop
+bg_ok=0
+(
+  for i in $(seq 1 10); do
+    "$PG_BINDIR/psql" -h "$TMP_DIR" -p "$PORT" postgres \
+      -v ON_ERROR_STOP=1 -qtAX \
+      -c "SELECT count(*) FROM alter_test" >/dev/null
+  done
+  echo "bg_done"
+) > "$TMP_DIR/bg_result.txt" 2>&1 &
+BG_PID=$!
+
+# Small delay so at least some SELECTs overlap with the DDL
+sleep 0.1
+
+# Foreground: ALTER TABLE ADD COLUMN during active scans
+PSQL -c "ALTER TABLE alter_test ADD COLUMN concurrent_col int DEFAULT 0"
+
+# Wait for background to finish
+if wait $BG_PID; then
+  bg_result=$(cat "$TMP_DIR/bg_result.txt")
+  if [ "$bg_result" = "bg_done" ]; then
+    bg_ok=1
+  fi
+fi
+check "concurrent_ddl_bg_finished" "1" "$bg_ok"
+
+# Verify the new column exists and is accessible
+concurrent_col_exists=$(PSQL -c "
+  SELECT CASE WHEN count(*) = 1 THEN '1' ELSE '0' END
+  FROM information_schema.columns
+  WHERE table_name = 'alter_test' AND column_name = 'concurrent_col'")
+check "concurrent_ddl_column_exists" "1" "$concurrent_col_exists"
+
+# Verify data still intact
+count=$(PSQL -c "SELECT count(*) FROM alter_test")
+check "concurrent_ddl_count" "10201" "$count"
+
 # --- Safety: no crashes ---
 crashes=$(grep -c 'SIGSEGV\|SIGBUS\|SIGABRT\|server process.*was terminated' "$TMP_DIR/postmaster.log" 2>/dev/null || true)
 check "no_crashes" "0" "$crashes"
