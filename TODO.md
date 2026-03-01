@@ -103,28 +103,28 @@ True query performance without pgbench overhead. Average of 5 runs.
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.038ms / 1 buf | 0.045ms / 7 bufs | 15.3ms / 6,370 bufs |
-| Narrow (100) | 0.043ms / 2 bufs | 0.067ms / 8 bufs | 16.7ms / 6,370 bufs |
-| Medium (5K) | 0.438ms / 33 bufs | 0.528ms / 52 bufs | 16.5ms / 6,370 bufs |
-| Wide (100K) | 7.5ms / 638 bufs | 9.1ms / 917 bufs | 17.4ms / 6,370 bufs |
+| Point (1 row) | 0.035ms / 1 buf | 0.046ms / 7 bufs | 15.2ms / 6,370 bufs |
+| Narrow (100) | 0.043ms / 2 bufs | 0.067ms / 8 bufs | 16.2ms / 6,370 bufs |
+| Medium (5K) | 0.434ms / 33 bufs | 0.492ms / 52 bufs | 16.1ms / 6,370 bufs |
+| Wide (100K) | 7.5ms / 638 bufs | 8.9ms / 917 bufs | 17.4ms / 6,370 bufs |
 
 **10M rows**
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.034ms / 1 buf | 0.054ms / 7 bufs | 118.8ms / 63,695 bufs |
-| Narrow (100) | 0.040ms / 1 buf | 0.062ms / 7 bufs | 129.9ms / 63,695 bufs |
-| Medium (5K) | 0.449ms / 32 bufs | 0.594ms / 51 bufs | 121.9ms / 63,695 bufs |
-| Wide (100K) | 7.6ms / 638 bufs | 9.3ms / 917 bufs | 122.7ms / 63,695 bufs |
+| Point (1 row) | 0.034ms / 1 buf | 0.047ms / 7 bufs | 117.9ms / 63,695 bufs |
+| Narrow (100) | 0.037ms / 1 buf | 0.062ms / 7 bufs | 130.9ms / 63,695 bufs |
+| Medium (5K) | 0.435ms / 32 bufs | 0.549ms / 51 bufs | 131.0ms / 63,695 bufs |
+| Wide (100K) | 7.6ms / 638 bufs | 8.8ms / 917 bufs | 131.4ms / 63,695 bufs |
 
 **100M rows**
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.128ms / 1 buf | 1.6ms / 8 bufs | 1,242ms / 519,909 bufs |
-| Narrow (100) | 0.265ms / 2 bufs | 0.183ms / 9 bufs | 1,380ms / 520,778 bufs |
-| Medium (5K) | 0.516ms / 38 bufs | 0.730ms / 58 bufs | 1,350ms / 519,855 bufs |
-| Wide (100K) | 9.0ms / 737 bufs | 10.3ms / 1,017 bufs | 1,347ms / 518,896 bufs |
+| Point (1 row) | 0.045ms / 1 buf | 0.506ms / 8 bufs | 1,190ms / 519,906 bufs |
+| Narrow (100) | 0.166ms / 2 bufs | 0.144ms / 9 bufs | 1,325ms / 520,782 bufs |
+| Medium (5K) | 0.479ms / 38 bufs | 0.812ms / 58 bufs | 1,326ms / 519,857 bufs |
+| Wide (100K) | 7.9ms / 737 bufs | 10.1ms / 1,017 bufs | 1,405ms / 518,896 bufs |
 
 sorted_heap reads fewer blocks than btree for all query types. Zone map
 prunes to exact block range; btree traverses 3-4 index pages per lookup.
@@ -134,9 +134,9 @@ At 100M rows, sorted_heap point query reads 1 buffer vs 8 for btree.
 
 | Scale | sorted_heap | heap+btree | heap (no idx) | compact |
 |------:|------------:|-----------:|--------------:|--------:|
-| 1M | 964K | 1.01M | 1.85M | 0.3s |
-| 10M | 832K | 942K | 1.78M | 3.2s |
-| 100M | 608K | 1.07M | 2.36M | 46.1s |
+| 1M | 923K | 961K | 1.91M | 0.3s |
+| 10M | 908K | 901K | 1.65M | 3.1s |
+| 100M | 840K | 1.22M | 2.22M | 41.3s |
 
 ### Table Size
 
@@ -145,6 +145,8 @@ At 100M rows, sorted_heap point query reads 1 buffer vs 8 for btree.
 | 1M | 71 MB | 71 MB (50 + 21) | 50 MB |
 | 10M | 714 MB | 712 MB (498 + 214) | 498 MB |
 | 100M | 7.8 GB | 7.8 GB (5.7 + 2.1) | 5.7 GB |
+
+Sizes unchanged — same data, same row width.
 
 ### pgbench Throughput (queries/sec, 1 client, 10s)
 
@@ -155,35 +157,36 @@ relative throughput under sustained load, not absolute query latency.
 
 | Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
 |-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 28.7K / 40.9K | 29.2K / 39.4K | 8,148 / 6,711 |
-| Narrow (100) | 22.0K / 26.5K | 20.6K / 27.2K | 4,616 / 3,987 |
-| Medium (5K) | 3.3K / 3.9K | 3.1K / 4.6K | 844 / 1,214 |
-| Wide (100K) | 198 / 289 | 192 / 279 | 143 / 140 |
+| Point (1 row) | 28.4K / 38.0K | 29.1K / 41.4K | 18.7K / 4.6K |
+| Narrow (100) | 19.6K / 24.4K | 21.8K / 27.6K | 7.1K / 5.5K |
+| Medium (5K) | 3.1K / 3.7K | 3.4K / 4.8K | 2.1K / 1.6K |
+| Wide (100K) | 198 / 290 | 200 / 286 | 163 / 144 |
 
 **Prepared mode** (`-M prepared`): query planned once, re-executed with parameters.
 
 | Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
 |-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 46.6K / 61.0K | 44.6K / 55.4K | 16.0K / 30.4K |
-| Narrow (100) | 22.4K / 28.8K | 22.2K / 28.1K | 9.7K / 17.1K |
-| Medium (5K) | 3.3K / 5.0K | 3.2K / 4.7K | 1,583 / 2,095 |
-| Wide (100K) | 287 / 277 | 278 / 278 | 156 / 148 |
+| Point (1 row) | 46.9K / 59.4K | 46.5K / 58.0K | 32.6K / 43.6K |
+| Narrow (100) | 22.3K / 29.1K | 22.5K / 28.8K | 17.9K / 18.1K |
+| Medium (5K) | 3.4K / 5.1K | 3.4K / 4.8K | 2.4K / 2.4K |
+| Wide (100K) | 295 / 289 | 293 / 286 | 168 / 157 |
 
 ### Observations
 
 - **EXPLAIN ANALYZE** shows sorted_heap reads fewer blocks than btree
   at every selectivity level. At 10M rows: point query reads 1 block
   (vs 7 for btree, 63,695 for seqscan). At 100M: 1 block vs 8 for btree,
-  519,909 for seqscan. Zone map prunes to exact contiguous block range.
+  519,906 for seqscan. Zone map prunes to exact contiguous block range.
 - **Prepared mode** — runtime parameter resolution enables generic plans for
-  sorted_heap. Point query TPS at 10M: 44.6K prepared vs 29.2K simple (+53%).
-  At 100M: 16.0K prepared vs 8.1K simple (+97%). Wide (100K row) queries
-  show parity between sorted_heap and btree at all scales since execution
-  cost dominates over planning overhead.
+  sorted_heap. Point query TPS at 10M: 46.5K prepared vs 29.1K simple (+60%).
+  At 100M: 32.6K prepared vs 18.7K simple (+74%). Narrow/medium/wide reach
+  parity with btree at 100M. Wide (100K row) queries show sorted_heap
+  slightly ahead at all scales since execution cost dominates.
 - **Simple mode** — at 1M/10M btree shows higher TPS because per-query
   planning overhead dominates when execution time is sub-millisecond.
-  At 100M sorted_heap wins point (+21%) and narrow (+16%) queries; btree
-  wins medium queries where its deeper tree is offset by wider scan ranges.
+  At 100M sorted_heap wins all query types: point 4x (18.7K vs 4.6K),
+  narrow +29%, medium +28%, wide +13% — btree's 2.1 GB index exceeds
+  shared_buffers, while sorted_heap's zone map lookup is O(1) in memory.
 - **INSERT** — comparable at scale; heap without index is fastest (~2M/s)
   since there is no index maintenance or batch sorting overhead.
 - **Storage** — nearly identical (sorted_heap trades btree index for

@@ -49,32 +49,32 @@ shared_buffers=4GB, work_mem=256MB, maintenance_work_mem=2GB.
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.038ms / 1 buf | 0.045ms / 7 bufs | 15.3ms / 6,370 bufs |
-| Narrow (100) | 0.043ms / 2 bufs | 0.067ms / 8 bufs | 16.7ms / 6,370 bufs |
-| Medium (5K) | 0.438ms / 33 bufs | 0.528ms / 52 bufs | 16.5ms / 6,370 bufs |
-| Wide (100K) | 7.5ms / 638 bufs | 9.1ms / 917 bufs | 17.4ms / 6,370 bufs |
+| Point (1 row) | 0.035ms / 1 buf | 0.046ms / 7 bufs | 15.2ms / 6,370 bufs |
+| Narrow (100) | 0.043ms / 2 bufs | 0.067ms / 8 bufs | 16.2ms / 6,370 bufs |
+| Medium (5K) | 0.434ms / 33 bufs | 0.492ms / 52 bufs | 16.1ms / 6,370 bufs |
+| Wide (100K) | 7.5ms / 638 bufs | 8.9ms / 917 bufs | 17.4ms / 6,370 bufs |
 
 **10M rows** (714 MB sorted_heap, 712 MB heap+btree)
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.034ms / 1 buf | 0.054ms / 7 bufs | 118.8ms / 63,695 bufs |
-| Narrow (100) | 0.040ms / 1 buf | 0.062ms / 7 bufs | 129.9ms / 63,695 bufs |
-| Medium (5K) | 0.449ms / 32 bufs | 0.594ms / 51 bufs | 121.9ms / 63,695 bufs |
-| Wide (100K) | 7.6ms / 638 bufs | 9.3ms / 917 bufs | 122.7ms / 63,695 bufs |
+| Point (1 row) | 0.034ms / 1 buf | 0.047ms / 7 bufs | 117.9ms / 63,695 bufs |
+| Narrow (100) | 0.037ms / 1 buf | 0.062ms / 7 bufs | 130.9ms / 63,695 bufs |
+| Medium (5K) | 0.435ms / 32 bufs | 0.549ms / 51 bufs | 131.0ms / 63,695 bufs |
+| Wide (100K) | 7.6ms / 638 bufs | 8.8ms / 917 bufs | 131.4ms / 63,695 bufs |
 
 **100M rows** (7.8 GB sorted_heap, 7.8 GB heap+btree)
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.128ms / 1 buf | 1.6ms / 8 bufs | 1,242ms / 519,909 bufs |
-| Narrow (100) | 0.265ms / 2 bufs | 0.183ms / 9 bufs | 1,380ms / 520,778 bufs |
-| Medium (5K) | 0.516ms / 38 bufs | 0.730ms / 58 bufs | 1,350ms / 519,855 bufs |
-| Wide (100K) | 9.0ms / 737 bufs | 10.3ms / 1,017 bufs | 1,347ms / 518,896 bufs |
+| Point (1 row) | 0.045ms / 1 buf | 0.506ms / 8 bufs | 1,190ms / 519,906 bufs |
+| Narrow (100) | 0.166ms / 2 bufs | 0.144ms / 9 bufs | 1,325ms / 520,782 bufs |
+| Medium (5K) | 0.479ms / 38 bufs | 0.812ms / 58 bufs | 1,326ms / 519,857 bufs |
+| Wide (100K) | 7.9ms / 737 bufs | 10.1ms / 1,017 bufs | 1,405ms / 518,896 bufs |
 
 sorted_heap reads fewer blocks than btree at all selectivities. Zone map
 prunes to exact block range; btree traverses 3-4 index pages per lookup. At
-100M rows: point query reads 1 buffer vs 8 for btree, 519,909 for seqscan.
+100M rows: point query reads 1 buffer vs 8 for btree, 519,906 for seqscan.
 
 ### pgbench Throughput (10s, 1 client)
 
@@ -82,24 +82,24 @@ prunes to exact block range; btree traverses 3-4 index pages per lookup. At
 
 | Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
 |-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 46.6K / 61.0K | 44.6K / 55.4K | 16.0K / 30.4K |
-| Narrow (100) | 22.4K / 28.8K | 22.2K / 28.1K | 9.7K / 17.1K |
-| Medium (5K) | 3.3K / 5.0K | 3.2K / 4.7K | 1,583 / 2,095 |
-| Wide (100K) | 287 / 277 | 278 / 278 | 156 / 148 |
+| Point (1 row) | 46.9K / 59.4K | 46.5K / 58.0K | 32.6K / 43.6K |
+| Narrow (100) | 22.3K / 29.1K | 22.5K / 28.8K | 17.9K / 18.1K |
+| Medium (5K) | 3.4K / 5.1K | 3.4K / 4.8K | 2.4K / 2.4K |
+| Wide (100K) | 295 / 289 | 293 / 286 | 168 / 157 |
 
 **Simple mode** (`-M simple`): each query parsed, planned, and executed.
 
 | Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
 |-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 28.7K / 40.9K | 29.2K / 39.4K | 8,148 / 6,711 |
-| Narrow (100) | 22.0K / 26.5K | 20.6K / 27.2K | 4,616 / 3,987 |
-| Medium (5K) | 3.3K / 3.9K | 3.1K / 4.6K | 844 / 1,214 |
-| Wide (100K) | 198 / 289 | 192 / 279 | 143 / 140 |
+| Point (1 row) | 28.4K / 38.0K | 29.1K / 41.4K | 18.7K / 4.6K |
+| Narrow (100) | 19.6K / 24.4K | 21.8K / 27.6K | 7.1K / 5.5K |
+| Medium (5K) | 3.1K / 3.7K | 3.4K / 4.8K | 2.1K / 1.6K |
+| Wide (100K) | 198 / 290 | 200 / 286 | 163 / 144 |
 
-In prepared mode, sorted_heap point queries reach 44.6K TPS at 10M rows (+53%
-vs simple mode). At 100M with simple mode, sorted_heap wins point (+21%) and
-narrow (+16%) queries since execution dominates over planning. Wide (100K row)
-queries show parity at all scales.
+In prepared mode, sorted_heap point queries reach 46.5K TPS at 10M rows (+60%
+vs simple mode). At 100M with simple mode, sorted_heap wins all query types:
+point 4x (18.7K vs 4.6K), narrow +29%, medium +28%, wide +13%. Wide (100K row)
+queries show sorted_heap slightly ahead at all scales.
 
 ## Quick start
 
