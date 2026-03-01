@@ -250,8 +250,12 @@ RETURNS void
 AS '$libdir/clustered_pg', 'sorted_heap_rebuild_zonemap_sql'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION @extschema@.sorted_heap_scan_stats()
-RETURNS text
+CREATE FUNCTION @extschema@.sorted_heap_scan_stats(
+  OUT total_scans bigint,
+  OUT blocks_scanned bigint,
+  OUT blocks_pruned bigint,
+  OUT source text
+) RETURNS record
 AS '$libdir/clustered_pg', 'sorted_heap_scan_stats'
 LANGUAGE C STRICT;
 

@@ -31,6 +31,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
+#include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -1491,33 +1492,36 @@ PG_FUNCTION_INFO_V1(sorted_heap_scan_stats);
 Datum
 sorted_heap_scan_stats(PG_FUNCTION_ARGS)
 {
-	StringInfoData buf;
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
 
-	initStringInfo(&buf);
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("function returning record called in context "
+						"that cannot accept type record")));
+
+	tupdesc = BlessTupleDesc(tupdesc);
+
 	if (sh_shared_stats)
 	{
-		appendStringInfo(&buf,
-						 "scans=" UINT64_FORMAT
-						 " blocks_scanned=" UINT64_FORMAT
-						 " blocks_pruned=" UINT64_FORMAT
-						 " (shared)",
-						 pg_atomic_read_u64(&sh_shared_stats->total_scans),
-						 pg_atomic_read_u64(&sh_shared_stats->blocks_scanned),
-						 pg_atomic_read_u64(&sh_shared_stats->blocks_pruned));
+		values[0] = Int64GetDatum((int64) pg_atomic_read_u64(&sh_shared_stats->total_scans));
+		values[1] = Int64GetDatum((int64) pg_atomic_read_u64(&sh_shared_stats->blocks_scanned));
+		values[2] = Int64GetDatum((int64) pg_atomic_read_u64(&sh_shared_stats->blocks_pruned));
+		values[3] = CStringGetTextDatum("shared");
 	}
 	else
 	{
-		appendStringInfo(&buf,
-						 "scans=" UINT64_FORMAT
-						 " blocks_scanned=" UINT64_FORMAT
-						 " blocks_pruned=" UINT64_FORMAT
-						 " (local)",
-						 sh_local_scans,
-						 sh_local_blocks_scanned,
-						 sh_local_blocks_pruned);
+		values[0] = Int64GetDatum((int64) sh_local_scans);
+		values[1] = Int64GetDatum((int64) sh_local_blocks_scanned);
+		values[2] = Int64GetDatum((int64) sh_local_blocks_pruned);
+		values[3] = CStringGetTextDatum("local");
 	}
 
-	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 /* ----------------------------------------------------------------

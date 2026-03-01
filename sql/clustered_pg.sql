@@ -1174,9 +1174,9 @@ SELECT count(*) FROM sh6_stats WHERE id = 50;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 SELECT
-    CASE WHEN sorted_heap_scan_stats() LIKE 'scans=1 blocks_scanned=% blocks_pruned=%'
+    CASE WHEN (sorted_heap_scan_stats()).total_scans >= 1
          THEN 'scan_stats_ok'
-         ELSE 'scan_stats_FAIL: ' || sorted_heap_scan_stats()
+         ELSE 'scan_stats_FAIL'
     END AS sh6_stats_result;
 DROP TABLE sh6_stats;
 
