@@ -29,6 +29,7 @@
 #include "storage/bufpage.h"
 #include "storage/checksum.h"
 #include "storage/smgr.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
@@ -2020,6 +2021,10 @@ sorted_heap_compact(PG_FUNCTION_ARGS)
 	Oid				pk_index_oid;
 	ClusterParams	params;
 
+	/* Verify ownership — only table owner may compact */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
+
 	/* Open with lightweight lock to discover PK index */
 	rel = table_open(relid, AccessShareLock);
 
@@ -2073,6 +2078,10 @@ sorted_heap_rebuild_zonemap_sql(PG_FUNCTION_ARGS)
 	Oid				relid = PG_GETARG_OID(0);
 	Relation		rel;
 	SortedHeapRelInfo *info;
+
+	/* Verify ownership */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	rel = table_open(relid, AccessShareLock);
 
@@ -2188,6 +2197,10 @@ sorted_heap_merge(PG_FUNCTION_ARGS)
 	int				k;
 	bool			prefix_valid;
 	bool			tail_valid;
+
+	/* Verify ownership */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	/* Open with lightweight lock to validate */
 	rel = table_open(relid, AccessShareLock);

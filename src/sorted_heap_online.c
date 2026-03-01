@@ -27,6 +27,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "storage/lmgr.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
@@ -66,9 +67,20 @@ create_log_infrastructure(Oid relid, const char *relname,
 {
 	StringInfoData sql;
 	char	   *log_table_name;
+	const char *quoted_log_table;
+	const char *quoted_relname;
+	char	   *schema_name;
+	const char *quoted_schema;
+	int			ret;
 
-	/* Generate unique log table name in pg_temp to avoid schema issues */
+	/* Generate unique log table name — safe, derived from Oid */
 	log_table_name = psprintf("_sh_compact_log_%u", relid);
+	quoted_log_table = quote_identifier(log_table_name);
+
+	/* Schema-qualify the target table for the trigger */
+	schema_name = get_namespace_name(get_rel_namespace(relid));
+	quoted_schema = quote_identifier(schema_name);
+	quoted_relname = quote_identifier(get_rel_name(relid));
 
 	initStringInfo(&sql);
 
@@ -79,28 +91,36 @@ create_log_infrastructure(Oid relid, const char *relname,
 					 "  action char(1) NOT NULL,"
 					 "  pk_val int8 NOT NULL"
 					 ")",
-					 log_table_name);
-	SPI_execute(sql.data, false, 0);
+					 quoted_log_table);
+	ret = SPI_execute(sql.data, false, 0);
+	if (ret != SPI_OK_UTILITY)
+		elog(ERROR, "sorted_heap: CREATE TABLE for log failed: %d", ret);
 	resetStringInfo(&sql);
 
 	/* Index on id for efficient ordered reads */
 	appendStringInfo(&sql,
 					 "CREATE INDEX ON %s (id)",
-					 log_table_name);
-	SPI_execute(sql.data, false, 0);
+					 quoted_log_table);
+	ret = SPI_execute(sql.data, false, 0);
+	if (ret != SPI_OK_UTILITY)
+		elog(ERROR, "sorted_heap: CREATE INDEX on log table failed: %d", ret);
 	resetStringInfo(&sql);
 
 	/* Install AFTER trigger to capture concurrent DML */
 	appendStringInfo(&sql,
 					 "CREATE TRIGGER _sh_compact_trigger "
-					 "AFTER INSERT OR UPDATE OR DELETE ON %s "
+					 "AFTER INSERT OR UPDATE OR DELETE ON %s.%s "
 					 "FOR EACH ROW EXECUTE FUNCTION "
 					 "sorted_heap_compact_trigger('%s', '%d')",
-					 get_rel_name(relid),
-					 log_table_name,
+					 quoted_schema,
+					 quoted_relname,
+					 log_table_name,	/* trigger arg, not SQL identifier */
 					 pk_attnum);
-	SPI_execute(sql.data, false, 0);
+	ret = SPI_execute(sql.data, false, 0);
+	if (ret != SPI_OK_UTILITY)
+		elog(ERROR, "sorted_heap: CREATE TRIGGER failed: %d", ret);
 	pfree(sql.data);
+	pfree(schema_name);
 
 	/* Commit so trigger is visible to other backends */
 	SPI_commit();
@@ -116,23 +136,28 @@ static void
 drop_log_infrastructure(Oid relid, const char *log_table_name)
 {
 	StringInfoData sql;
+	char	   *schema_name;
+
+	schema_name = get_namespace_name(get_rel_namespace(relid));
 
 	initStringInfo(&sql);
 
 	/* Drop trigger first */
 	appendStringInfo(&sql,
-					 "DROP TRIGGER IF EXISTS _sh_compact_trigger ON %s",
-					 get_rel_name(relid));
+					 "DROP TRIGGER IF EXISTS _sh_compact_trigger ON %s.%s",
+					 quote_identifier(schema_name),
+					 quote_identifier(get_rel_name(relid)));
 	SPI_execute(sql.data, false, 0);
 	resetStringInfo(&sql);
 
 	/* Drop log table */
 	appendStringInfo(&sql,
 					 "DROP TABLE IF EXISTS %s",
-					 log_table_name);
+					 quote_identifier(log_table_name));
 	SPI_execute(sql.data, false, 0);
 
 	pfree(sql.data);
+	pfree(schema_name);
 }
 
 /* ----------------------------------------------------------------
@@ -151,7 +176,6 @@ sorted_heap_compact_trigger(PG_FUNCTION_ARGS)
 	bool		isnull;
 	int64		pk_val;
 	Oid			pk_typid;
-	char		action;
 	StringInfoData sql;
 	Oid			argtypes[2];
 	Datum		values[2];
@@ -173,41 +197,9 @@ sorted_heap_compact_trigger(PG_FUNCTION_ARGS)
 	log_table_name = trigdata->tg_trigger->tgargs[0];
 	pk_attnum = atoi(trigdata->tg_trigger->tgargs[1]);
 
-	/* Determine action */
-	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
-		action = 'I';
-	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-		action = 'U';
-	else
-		action = 'D';
-
-	/*
-	 * Get the affected tuple.
-	 *
-	 * For INSERT: tg_trigtuple = inserted row, tg_newtuple = NULL
-	 * For UPDATE: tg_trigtuple = old row, tg_newtuple = new row
-	 * For DELETE: tg_trigtuple = deleted row, tg_newtuple = NULL
-	 *
-	 * We want the current row version: tg_newtuple for UPDATE,
-	 * tg_trigtuple for INSERT and DELETE.
-	 */
-	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-		tuple = trigdata->tg_newtuple;
-	else
-		tuple = trigdata->tg_trigtuple;
-
-	/* Extract PK value and convert to int64 */
-	pk_datum = heap_getattr(tuple, pk_attnum,
-							trigdata->tg_relation->rd_att, &isnull);
-	if (isnull)
-		elog(ERROR, "sorted_heap_compact_trigger: PK column is NULL");
-
 	/* Get PK type from tuple descriptor */
 	pk_typid = TupleDescAttr(trigdata->tg_relation->rd_att,
 							 pk_attnum - 1)->atttypid;
-	if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &pk_val))
-		elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
-			 pk_typid);
 
 	/* Insert into log table via SPI */
 	SPI_connect();
@@ -219,12 +211,91 @@ sorted_heap_compact_trigger(PG_FUNCTION_ARGS)
 
 	argtypes[0] = CHAROID;
 	argtypes[1] = INT8OID;
-	values[0] = CharGetDatum(action);
-	values[1] = Int64GetDatum(pk_val);
 	nulls[0] = ' ';
 	nulls[1] = ' ';
 
-	SPI_execute_with_args(sql.data, 2, argtypes, values, nulls, false, 0);
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
+		/*
+		 * UPDATE: extract both old and new PK values.  If the PK changed,
+		 * log D(old_pk) + I(new_pk) so replay removes the old row from
+		 * new_rel and inserts the new one.  If PK is unchanged, log a
+		 * single U(pk) as before.
+		 */
+		int64	old_pk_val, new_pk_val;
+
+		pk_datum = heap_getattr(trigdata->tg_trigtuple, pk_attnum,
+								trigdata->tg_relation->rd_att, &isnull);
+		if (isnull)
+			elog(ERROR, "sorted_heap_compact_trigger: old PK column is NULL");
+		if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &old_pk_val))
+			elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
+				 pk_typid);
+
+		pk_datum = heap_getattr(trigdata->tg_newtuple, pk_attnum,
+								trigdata->tg_relation->rd_att, &isnull);
+		if (isnull)
+			elog(ERROR, "sorted_heap_compact_trigger: new PK column is NULL");
+		if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &new_pk_val))
+			elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
+				 pk_typid);
+
+		if (old_pk_val != new_pk_val)
+		{
+			/* PK changed: D(old) + I(new) */
+			values[0] = CharGetDatum('D');
+			values[1] = Int64GetDatum(old_pk_val);
+			SPI_execute_with_args(sql.data, 2, argtypes, values, nulls,
+								 false, 0);
+
+			values[0] = CharGetDatum('I');
+			values[1] = Int64GetDatum(new_pk_val);
+			SPI_execute_with_args(sql.data, 2, argtypes, values, nulls,
+								 false, 0);
+		}
+		else
+		{
+			/* PK unchanged: single U */
+			values[0] = CharGetDatum('U');
+			values[1] = Int64GetDatum(new_pk_val);
+			SPI_execute_with_args(sql.data, 2, argtypes, values, nulls,
+								 false, 0);
+		}
+	}
+	else if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+	{
+		tuple = trigdata->tg_trigtuple;
+		pk_datum = heap_getattr(tuple, pk_attnum,
+								trigdata->tg_relation->rd_att, &isnull);
+		if (isnull)
+			elog(ERROR, "sorted_heap_compact_trigger: PK column is NULL");
+		if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &pk_val))
+			elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
+				 pk_typid);
+
+		values[0] = CharGetDatum('I');
+		values[1] = Int64GetDatum(pk_val);
+		SPI_execute_with_args(sql.data, 2, argtypes, values, nulls,
+							 false, 0);
+	}
+	else
+	{
+		/* DELETE */
+		tuple = trigdata->tg_trigtuple;
+		pk_datum = heap_getattr(tuple, pk_attnum,
+								trigdata->tg_relation->rd_att, &isnull);
+		if (isnull)
+			elog(ERROR, "sorted_heap_compact_trigger: PK column is NULL");
+		if (!sorted_heap_key_to_int64(pk_datum, pk_typid, &pk_val))
+			elog(ERROR, "sorted_heap_compact_trigger: unsupported PK type %u",
+				 pk_typid);
+
+		values[0] = CharGetDatum('D');
+		values[1] = Int64GetDatum(pk_val);
+		SPI_execute_with_args(sql.data, 2, argtypes, values, nulls,
+							 false, 0);
+	}
+
 	pfree(sql.data);
 
 	SPI_finish();
@@ -461,6 +532,10 @@ sorted_heap_compact_online(PG_FUNCTION_ARGS)
 	int64			last_id = 0;
 	double			ntuples;
 	int				pass;
+
+	/* Verify ownership */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	/* Phase 1: Validate and collect PK info */
 	rel = table_open(relid, AccessShareLock);
@@ -845,6 +920,10 @@ sorted_heap_merge_online(PG_FUNCTION_ARGS)
 	int64			last_id = 0;
 	double			ntuples;
 	int				pass;
+
+	/* Verify ownership */
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	/* Phase 0: Validate */
 	rel = table_open(relid, AccessShareLock);
