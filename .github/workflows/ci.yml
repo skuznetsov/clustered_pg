@@ -47,9 +47,8 @@ jobs:
         run: make installcheck PGHOST=/tmp PGPORT=5432 PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
 
       - name: Shell tests
-        env:
-          PATH: /usr/lib/postgresql/${{ matrix.pg_version }}/bin:${{ env.PATH }}
         run: |
+          export PATH="/usr/lib/postgresql/${{ matrix.pg_version }}/bin:$PATH"
           make test-crash-recovery TMP_SELFTEST_ROOT=/tmp TEST_CRASH_PORT=5440
           make test-toast          TMP_SELFTEST_ROOT=/tmp TEST_TOAST_PORT=5441
           make test-alter-table    TMP_SELFTEST_ROOT=/tmp TEST_ALTER_PORT=5442
