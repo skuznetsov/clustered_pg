@@ -11,12 +11,14 @@ set -euo pipefail
 #   2. heap + btree PK (standard approach)
 #   3. heap without index (seqscan baseline)
 #
-# Usage: ./scripts/bench_sorted_heap.sh [tmp_root] [port] [scales]
-#   scales: comma-separated list, e.g. "1000000,10000000,100000000"
+# Usage: ./scripts/bench_sorted_heap.sh [tmp_root] [port] [scales] [clients]
+#   scales:  comma-separated list, e.g. "1000000,10000000,100000000"
+#   clients: number of concurrent pgbench clients (default 1)
 
 TMP_ROOT="${1:-/private/tmp}"
 PORT="${2:-65494}"
 SCALES_CSV="${3:-1000000,10000000}"
+CLIENTS="${4:-1}"
 PGBENCH_DURATION=10   # seconds per pgbench SELECT benchmark
 EXPLAIN_ITERS=5       # iterations for EXPLAIN ANALYZE averaging
 
@@ -106,12 +108,12 @@ extract_ms() {
 
 # --- Helper: run pgbench and extract TPS ---
 run_pgbench() {
-  local script_file="$1" scale="$2" mode="${3:-simple}"
+  local script_file="$1" scale="$2" mode="${3:-simple}" clients="${4:-1}"
   local output
   output=$("$PG_BINDIR/pgbench" -h "$TMP_DIR" -p "$PORT" postgres \
     -n -T "$PGBENCH_DURATION" -f "$script_file" \
     -M "$mode" \
-    -D scale="$scale" -c 1 -j 1 2>&1)
+    -D scale="$scale" -c "$clients" -j "$clients" 2>&1)
   local tps
   tps=$(echo "$output" | grep -oE 'tps = [0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
   if [ -z "$tps" ]; then tps="0"; fi
@@ -165,7 +167,7 @@ echo "sorted_heap vs heap+btree vs heap seqscan"
 echo "============================================================"
 echo "Hardware: $(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo '?') CPUs, $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.0f GB", $1/1024/1024/1024}' 2>/dev/null || echo '? GB') RAM"
 echo "PG config: shared_buffers=4GB, work_mem=256MB, maintenance_work_mem=2GB"
-echo "pgbench: ${PGBENCH_DURATION}s per test, 1 client"
+echo "pgbench: ${PGBENCH_DURATION}s per test, ${CLIENTS} client(s)"
 echo "EXPLAIN ANALYZE: best of ${EXPLAIN_ITERS} runs (execution time only)"
 echo ""
 
@@ -365,6 +367,40 @@ for N in "${SCALES[@]}"; do
     printf "  Wide (100K):     sorted_heap %s tps | heap+btree %s tps\n" \
       "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
       "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+  fi
+
+  # ============================================================
+  # pgbench throughput — multi-client prepared (only when CLIENTS > 1)
+  # ============================================================
+  if [ "$CLIENTS" -gt 1 ]; then
+    echo ""
+    echo "--- pgbench throughput — prepared (${PGBENCH_DURATION}s, ${CLIENTS} clients) ---"
+
+    tps_sh=$(run_pgbench "$TMP_DIR/bench/point_sh_bench.sql" "$N" prepared "$CLIENTS")
+    tps_heap=$(run_pgbench "$TMP_DIR/bench/point_heap_bench.sql" "$N" prepared "$CLIENTS")
+    printf "  Point (1 row):   sorted_heap %s tps | heap+btree %s tps\n" \
+      "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+      "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+    tps_sh=$(run_pgbench "$TMP_DIR/bench/narrow_sh_bench.sql" "$N" prepared "$CLIENTS")
+    tps_heap=$(run_pgbench "$TMP_DIR/bench/narrow_heap_bench.sql" "$N" prepared "$CLIENTS")
+    printf "  Narrow (100):    sorted_heap %s tps | heap+btree %s tps\n" \
+      "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+      "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+    tps_sh=$(run_pgbench "$TMP_DIR/bench/medium_sh_bench.sql" "$N" prepared "$CLIENTS")
+    tps_heap=$(run_pgbench "$TMP_DIR/bench/medium_heap_bench.sql" "$N" prepared "$CLIENTS")
+    printf "  Medium (5K):     sorted_heap %s tps | heap+btree %s tps\n" \
+      "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+      "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+    if [ "$N" -ge 200000 ]; then
+      tps_sh=$(run_pgbench "$TMP_DIR/bench/wide_sh_bench.sql" "$N" prepared "$CLIENTS")
+      tps_heap=$(run_pgbench "$TMP_DIR/bench/wide_heap_bench.sql" "$N" prepared "$CLIENTS")
+      printf "  Wide (100K):     sorted_heap %s tps | heap+btree %s tps\n" \
+        "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+        "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+    fi
   fi
 
   echo ""
