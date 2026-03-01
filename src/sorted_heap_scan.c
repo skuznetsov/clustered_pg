@@ -1305,35 +1305,25 @@ sorted_heap_scan_next(ScanState *ss)
 /* ----------------------------------------------------------------
  *  EPQ recheck — always true (quals are evaluated by ExecScan)
  * ---------------------------------------------------------------- */
-#if PG_VERSION_NUM >= 180000
 static bool
 sorted_heap_scan_recheck(ScanState *ss, TupleTableSlot *slot)
 {
 	return true;
 }
-#endif
 
 /* ----------------------------------------------------------------
  *  ExecCustomScan — delegates to ExecScan for qual + projection.
  *
- *  PG 18 calls methods->ExecCustomScan directly (no ExecScan wrapper),
- *  PG 18+: executor calls ExecCustomScan directly, so we must invoke
+ *  The executor calls methods->ExecCustomScan() directly in both
+ *  PG 17 and PG 18 (no ExecScan wrapper), so we must always invoke
  *  ExecScan ourselves for qual evaluation and projection.
- *  PG 17:  executor wraps our callback in ExecScan, so we just return
- *  the next tuple from the access method.
  * ---------------------------------------------------------------- */
 static TupleTableSlot *
 sorted_heap_exec_custom_scan(CustomScanState *node)
 {
-#if PG_VERSION_NUM < 180000
-	/* PG 17: executor wraps in ExecScan, our callback is access method */
-	return sorted_heap_scan_next(&node->ss);
-#else
-	/* PG 18: executor calls us directly, we must call ExecScan */
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) sorted_heap_scan_next,
 					(ExecScanRecheckMtd) sorted_heap_scan_recheck);
-#endif
 }
 
 /* ----------------------------------------------------------------
