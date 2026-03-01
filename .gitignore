@@ -15,3 +15,6 @@ tmp_check_iso/
 # OS/editor temporary files
 *.swp
 *~
+
+# Agent tooling
+.agents/
