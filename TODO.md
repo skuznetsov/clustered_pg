@@ -36,8 +36,8 @@ Parallel scan (large tables):
 | File | Lines | Purpose |
 |------|------:|---------|
 | `sorted_heap.h` | 181 | Meta page layout, zone map structs (v5/v6), SortedHeapRelInfo |
-| `sorted_heap.c` | 2410 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
-| `sorted_heap_scan.c` | 1543 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning, runtime params |
+| `sorted_heap.c` | 2452 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
+| `sorted_heap_scan.c` | 1547 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning, runtime params |
 | `sorted_heap_online.c` | 1053 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
 | `sql/clustered_pg.sql` | 2073 | Regression tests (SH1–SH17) |
@@ -45,8 +45,9 @@ Parallel scan (large tables):
 | `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 | `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
-| `scripts/test_alter_table.sh` | 313 | ALTER TABLE on sorted_heap (ADD/DROP/RENAME/ALTER TYPE/PK) |
-| `scripts/bench_sorted_heap.sh` | 375 | sorted_heap vs heap+btree vs seqscan comparative benchmark |
+| `scripts/test_alter_table.sh` | 357 | ALTER TABLE on sorted_heap (ADD/DROP/RENAME/ALTER TYPE/PK, concurrent DDL) |
+| `scripts/test_dump_restore.sh` | 176 | pg_dump/restore lifecycle test (data, TOAST, indexes, zone map) |
+| `scripts/bench_sorted_heap.sh` | 411 | sorted_heap vs heap+btree vs seqscan comparative benchmark (multi-client) |
 
 ## Completed Phases
 
@@ -447,7 +448,38 @@ relative throughput under sustained load, not absolute query latency.
 - SH17 regression tests: point, range, mixed Const+Param prepared queries
   under `force_generic_plan`, correctness cross-checks against non-prepared
 
+## Operational Notes
+
+### pg_dump / pg_restore
+Data is restored via COPY → `multi_insert`, which rebuilds physical data but
+does not set `SHM_FLAG_ZONEMAP_VALID`. Run `sorted_heap_compact()` (or
+`sorted_heap_merge()`) after restore to re-enable scan pruning. Tested:
+10 checks (data integrity, TOAST, secondary indexes, zone map rebuild).
+
+### Logical Replication
+Subscribers receive changes via the apply worker, which uses standard DML.
+Initial table sync uses COPY. Same as pg_dump: run compact after initial sync
+to build zone map on the subscriber.
+
+### Connection Poolers
+Prepared statement mode (PgBouncer `pool_mode=transaction`) works correctly —
+runtime parameter resolution handles generic plans. No special configuration
+needed.
+
+### pg_upgrade
+Untested. Expected to work: pg_upgrade copies data files as-is (meta page and
+overflow pages are standard 8KB blocks), and the extension .so is loaded on
+startup via `shared_preload_libraries` (not needed for sorted_heap — it's loaded
+on first use via `CREATE EXTENSION`).
+
+### Extension Upgrade Path
+No `clustered_pg--0.1.0--0.2.0.sql` upgrade script exists. Currently requires
+`DROP EXTENSION` + `CREATE EXTENSION` for version changes (data preserved in
+tables, zone map rebuilt on next compact).
+
 ## Possible Future Work
 
 - Index-only scan equivalent using zone map
 - Online compact/merge support for UUID/text PKs (requires log format redesign)
+- Extension upgrade SQL scripts for version transitions
+- pg_upgrade testing with two major PG versions
