@@ -53,7 +53,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Create ephemeral cluster with tuned settings ---
-TMP_DIR="$(mktemp -d "$TMP_ROOT/clustered_pg_bench.XXXXXX")"
+TMP_DIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_bench.XXXXXX")"
 make -C "$ROOT_DIR" install >/dev/null 2>&1
 "$PG_BINDIR/initdb" -D "$TMP_DIR/data" -A trust --no-locale >/dev/null 2>&1
 
@@ -78,7 +78,7 @@ PSQL() {
   "$PG_BINDIR/psql" -h "$TMP_DIR" -p "$PORT" postgres -v ON_ERROR_STOP=1 -qtAX "$@"
 }
 
-PSQL -c "CREATE EXTENSION clustered_pg"
+PSQL -c "CREATE EXTENSION pg_sorted_heap"
 
 # --- Helper: format number with commas ---
 fmt() {

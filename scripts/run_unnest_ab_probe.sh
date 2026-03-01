@@ -17,7 +17,7 @@ TMP_ROOT="${TMPDIR:-/private/tmp}"
 TMP_DIR=""
 
 if [ "$OUT_PATH" = "auto" ]; then
-  OUT_PATH="/private/tmp/clustered_pg_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="/private/tmp/pg_sorted_heap_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [[ "$OUT_PATH" == auto:* ]]; then
   OUT_DIR="${OUT_PATH#auto:}"
   if [ -z "$OUT_DIR" ]; then
@@ -28,7 +28,7 @@ elif [[ "$OUT_PATH" == auto:* ]]; then
     echo "auto output directory must be an absolute path" >&2
     exit 2
   fi
-  OUT_PATH="$OUT_DIR/clustered_pg_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="$OUT_DIR/pg_sorted_heap_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
 fi
 
 for v in "$RUNS" "$BATCH_SIZE" "$BATCHES" "$SELECT_ITERS" "$PROBE_SIZE"; do
@@ -87,7 +87,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TMP_DIR="$(mktemp -d "$TMP_ROOT/clustered_pg_unnest_ab_probe.XXXXXX")"
+TMP_DIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_unnest_ab_probe.XXXXXX")"
 
 make -C "$ROOT_DIR" install >/dev/null
 "$PG_BINDIR/initdb" -D "$TMP_DIR/data" -A trust --no-locale >/dev/null
@@ -103,16 +103,16 @@ run_probe() {
     -v warmup_selects="$WARMUP_SELECTS" \
     -v emit_observability="$EMIT_OBSERVABILITY" <<'SQL'
 \set ON_ERROR_STOP on
-CREATE EXTENSION clustered_pg;
+CREATE EXTENSION pg_sorted_heap;
 SET synchronous_commit = off;
 SET jit = off;
 SET enable_seqscan = off;
-SET clustered_pg.ab_runs = :'runs';
-SET clustered_pg.ab_batch_size = :'batch_size';
-SET clustered_pg.ab_batches = :'batches';
-SET clustered_pg.ab_select_iters = :'select_iters';
-SET clustered_pg.ab_probe_size = :'probe_size';
-SET clustered_pg.ab_warmup_selects = :'warmup_selects';
+SET pg_sorted_heap.ab_runs = :'runs';
+SET pg_sorted_heap.ab_batch_size = :'batch_size';
+SET pg_sorted_heap.ab_batches = :'batches';
+SET pg_sorted_heap.ab_select_iters = :'select_iters';
+SET pg_sorted_heap.ab_probe_size = :'probe_size';
+SET pg_sorted_heap.ab_warmup_selects = :'warmup_selects';
 
 CREATE TEMP TABLE bench_results(
   run int NOT NULL,
@@ -126,12 +126,12 @@ CREATE TEMP TABLE bench_results(
 
 DO $$
 DECLARE
-  v_runs int := current_setting('clustered_pg.ab_runs')::int;
-  v_batch_size int := current_setting('clustered_pg.ab_batch_size')::int;
-  v_batches int := current_setting('clustered_pg.ab_batches')::int;
-  v_select_iters int := current_setting('clustered_pg.ab_select_iters')::int;
-  v_probe_size int := current_setting('clustered_pg.ab_probe_size')::int;
-  v_warmup_selects int := current_setting('clustered_pg.ab_warmup_selects')::int;
+  v_runs int := current_setting('pg_sorted_heap.ab_runs')::int;
+  v_batch_size int := current_setting('pg_sorted_heap.ab_batch_size')::int;
+  v_batches int := current_setting('pg_sorted_heap.ab_batches')::int;
+  v_select_iters int := current_setting('pg_sorted_heap.ab_select_iters')::int;
+  v_probe_size int := current_setting('pg_sorted_heap.ab_probe_size')::int;
+  v_warmup_selects int := current_setting('pg_sorted_heap.ab_warmup_selects')::int;
   v_run int;
   v_storage text;
   v_started timestamptz;
@@ -298,11 +298,11 @@ WHERE c.storage = 'clustered';
 \if :emit_observability
 \echo '--- observability ---'
 \pset tuples_only on
-SELECT 'observability_kv|' || public.clustered_pg_observability();
+SELECT 'observability_kv|' || public.pg_sorted_heap_observability();
 \pset tuples_only off
 \endif
 
-DROP EXTENSION clustered_pg CASCADE;
+DROP EXTENSION pg_sorted_heap CASCADE;
 SQL
 }
 

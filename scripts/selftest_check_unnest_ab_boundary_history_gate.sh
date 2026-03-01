@@ -23,7 +23,7 @@ if [ ! -x "$GATE_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_boundary_history_gate_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_boundary_history_gate_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

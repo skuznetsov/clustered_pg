@@ -23,7 +23,7 @@ if [ ! -x "$CHECK_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_planner_defaultpath_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_planner_defaultpath_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -63,16 +63,16 @@ NO_SAMPLE_LOG="$WORKDIR/no_sample.log"
 BAD_FORMAT_LOG="$WORKDIR/bad_format.log"
 
 cat >"$GOOD_LOG" <<EOF
-planner_probe|rows=1000|fastpath=on|query=point_default|plan=Index Scan using clustered_pg_planner_probe_idx on clustered_pg_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
-planner_probe|rows=10000|fastpath=on|query=point_default|plan=Index Scan using clustered_pg_planner_probe_idx on clustered_pg_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
+planner_probe|rows=1000|fastpath=on|query=point_default|plan=Index Scan using pg_sorted_heap_planner_probe_idx on pg_sorted_heap_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
+planner_probe|rows=10000|fastpath=on|query=point_default|plan=Index Scan using pg_sorted_heap_planner_probe_idx on pg_sorted_heap_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
 EOF
 
 cat >"$BAD_PLAN_LOG" <<EOF
-planner_probe|rows=20000|fastpath=on|query=point_default|plan=Seq Scan on clustered_pg_planner_probe|startup_cost=0.00|total_cost=300.00|plan_rows=1|plan_width=8
+planner_probe|rows=20000|fastpath=on|query=point_default|plan=Seq Scan on pg_sorted_heap_planner_probe|startup_cost=0.00|total_cost=300.00|plan_rows=1|plan_width=8
 EOF
 
 cat >"$NO_SAMPLE_LOG" <<EOF
-planner_probe|rows=500|fastpath=on|query=point_default|plan=Index Scan using clustered_pg_planner_probe_idx on clustered_pg_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
+planner_probe|rows=500|fastpath=on|query=point_default|plan=Index Scan using pg_sorted_heap_planner_probe_idx on pg_sorted_heap_planner_probe|startup_cost=0.00|total_cost=8.02|plan_rows=1|plan_width=8
 EOF
 
 cat >"$BAD_FORMAT_LOG" <<EOF

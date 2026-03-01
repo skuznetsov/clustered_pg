@@ -2,7 +2,7 @@
 *.o
 *.so
 *.dylib
-clustered_pg-*.so
+pg_sorted_heap-*.so
 
 # PG regression artifacts
 regression.out

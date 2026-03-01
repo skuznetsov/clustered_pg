@@ -57,7 +57,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Create ephemeral cluster ---
-TMP_DIR=$(mktemp -d "$TMP_ROOT/clustered_pg_dump.XXXXXX")
+TMP_DIR=$(mktemp -d "$TMP_ROOT/pg_sorted_heap_dump.XXXXXX")
 "$PG_BINDIR/initdb" -D "$TMP_DIR/data" -A trust --no-locale >/dev/null 2>&1
 
 cat >> "$TMP_DIR/data/postgresql.conf" <<'PGCONF'
@@ -78,7 +78,7 @@ DB="dump_test"
 echo "=== pg_dump / pg_restore lifecycle test ==="
 
 # --- Setup: create table, secondary index, TOAST data, compact ---
-PSQL "$DB" -c "CREATE EXTENSION clustered_pg"
+PSQL "$DB" -c "CREATE EXTENSION pg_sorted_heap"
 
 PSQL "$DB" -c "
   CREATE TABLE sh_dump (

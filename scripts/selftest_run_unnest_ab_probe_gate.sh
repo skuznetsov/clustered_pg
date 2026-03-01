@@ -23,7 +23,7 @@ if [ ! -x "$GATE_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_unnest_gate_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_unnest_gate_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -50,7 +50,7 @@ case "$out" in
   auto:*)
     out_dir="${out#auto:}"
     mkdir -p "$out_dir"
-    cat >"$out_dir/clustered_pg_unnest_ab_mock_${port}.log" <<EOM
+    cat >"$out_dir/pg_sorted_heap_unnest_ab_mock_${port}.log" <<EOM
 ratio_kv|insert=1.00|join_unnest=1.00|any_array=1.00
 EOM
     ;;
@@ -73,8 +73,8 @@ stat_mode="$4"
 min_samples="${5:-}"
 echo "compare|ref=$ref_dir|new=$new_dir|min_fraction=$min_fraction|stat_mode=$stat_mode|min_samples=$min_samples" >> "$calls_log"
 
-ref_count="$(find "$ref_dir" -maxdepth 1 -type f -name 'clustered_pg_unnest_ab_*.log' | wc -l | tr -d ' ')"
-new_count="$(find "$new_dir" -maxdepth 1 -type f -name 'clustered_pg_unnest_ab_*.log' | wc -l | tr -d ' ')"
+ref_count="$(find "$ref_dir" -maxdepth 1 -type f -name 'pg_sorted_heap_unnest_ab_*.log' | wc -l | tr -d ' ')"
+new_count="$(find "$new_dir" -maxdepth 1 -type f -name 'pg_sorted_heap_unnest_ab_*.log' | wc -l | tr -d ' ')"
 if [ "$ref_count" -lt 2 ] || [ "$new_count" -lt 3 ]; then
   echo "unexpected log counts ref=$ref_count new=$new_count" >&2
   exit 1
@@ -218,10 +218,10 @@ fi
 
 EXISTING_REF="$WORKDIR/existing_ref"
 mkdir -p "$EXISTING_REF"
-cat >"$EXISTING_REF/clustered_pg_unnest_ab_existing_1.log" <<'EOF'
+cat >"$EXISTING_REF/pg_sorted_heap_unnest_ab_existing_1.log" <<'EOF'
 ratio_kv|insert=1.00|join_unnest=1.00|any_array=1.00
 EOF
-cat >"$EXISTING_REF/clustered_pg_unnest_ab_existing_2.log" <<'EOF'
+cat >"$EXISTING_REF/pg_sorted_heap_unnest_ab_existing_2.log" <<'EOF'
 ratio_kv|insert=1.01|join_unnest=1.01|any_array=1.01
 EOF
 

@@ -18,7 +18,9 @@
 #include "catalog/pg_opclass.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
 #include "commands/explain_format.h"
+#endif
 #include "executor/executor.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
@@ -128,7 +130,9 @@ static Node *sorted_heap_create_scan_state(CustomScan *cscan);
 static void sorted_heap_begin_custom_scan(CustomScanState *node,
 										  EState *estate, int eflags);
 static TupleTableSlot *sorted_heap_scan_next(ScanState *ss);
+#if PG_VERSION_NUM >= 180000
 static bool sorted_heap_scan_recheck(ScanState *ss, TupleTableSlot *slot);
+#endif
 static TupleTableSlot *sorted_heap_exec_custom_scan(CustomScanState *node);
 static void sorted_heap_end_custom_scan(CustomScanState *node);
 static void sorted_heap_rescan_custom_scan(CustomScanState *node);
@@ -1301,25 +1305,35 @@ sorted_heap_scan_next(ScanState *ss)
 /* ----------------------------------------------------------------
  *  EPQ recheck — always true (quals are evaluated by ExecScan)
  * ---------------------------------------------------------------- */
+#if PG_VERSION_NUM >= 180000
 static bool
 sorted_heap_scan_recheck(ScanState *ss, TupleTableSlot *slot)
 {
 	return true;
 }
+#endif
 
 /* ----------------------------------------------------------------
  *  ExecCustomScan — delegates to ExecScan for qual + projection.
  *
  *  PG 18 calls methods->ExecCustomScan directly (no ExecScan wrapper),
- *  so we must invoke ExecScan ourselves to get proper qual evaluation
- *  and projection from scan tuple to result tuple.
+ *  PG 18+: executor calls ExecCustomScan directly, so we must invoke
+ *  ExecScan ourselves for qual evaluation and projection.
+ *  PG 17:  executor wraps our callback in ExecScan, so we just return
+ *  the next tuple from the access method.
  * ---------------------------------------------------------------- */
 static TupleTableSlot *
 sorted_heap_exec_custom_scan(CustomScanState *node)
 {
+#if PG_VERSION_NUM < 180000
+	/* PG 17: executor wraps in ExecScan, our callback is access method */
+	return sorted_heap_scan_next(&node->ss);
+#else
+	/* PG 18: executor calls us directly, we must call ExecScan */
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) sorted_heap_scan_next,
 					(ExecScanRecheckMtd) sorted_heap_scan_recheck);
+#endif
 }
 
 /* ----------------------------------------------------------------

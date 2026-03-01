@@ -1,4 +1,4 @@
-# clustered_pg
+# pg_sorted_heap
 
 PostgreSQL extension providing physically sorted storage via custom Table AMs.
 The primary access method is **`sorted_heap`** — a heap-based AM that sorts
@@ -117,7 +117,7 @@ make && make install
 ### Create a sorted_heap table
 
 ```sql
-CREATE EXTENSION clustered_pg;
+CREATE EXTENSION pg_sorted_heap;
 
 CREATE TABLE events (
     id      int PRIMARY KEY,
@@ -131,7 +131,7 @@ SELECT i, now() - (i || ' seconds')::interval, repeat('x', 80)
 FROM generate_series(1, 100000) i;
 
 -- Compact to globally sort and build zone map
-SELECT clustered_pg.sorted_heap_compact('events'::regclass);
+SELECT pg_sorted_heap.sorted_heap_compact('events'::regclass);
 
 -- Zone map pruning kicks in automatically
 EXPLAIN (ANALYZE, BUFFERS)
@@ -157,37 +157,37 @@ make test-dump-restore         # pg_dump/restore lifecycle (10 checks)
 
 ```sql
 -- Offline compact: full CLUSTER rewrite (AccessExclusiveLock)
-SELECT clustered_pg.sorted_heap_compact('t'::regclass);
+SELECT pg_sorted_heap.sorted_heap_compact('t'::regclass);
 
 -- Online compact: trigger-based, non-blocking (ShareUpdateExclusiveLock,
 -- brief AccessExclusiveLock for final swap)
-CALL clustered_pg.sorted_heap_compact_online('t'::regclass);
+CALL pg_sorted_heap.sorted_heap_compact_online('t'::regclass);
 
 -- Offline merge: two-way merge of sorted prefix + unsorted tail
-SELECT clustered_pg.sorted_heap_merge('t'::regclass);
+SELECT pg_sorted_heap.sorted_heap_merge('t'::regclass);
 
 -- Online merge: non-blocking variant
-CALL clustered_pg.sorted_heap_merge_online('t'::regclass);
+CALL pg_sorted_heap.sorted_heap_merge_online('t'::regclass);
 ```
 
 ### Zone map inspection
 
 ```sql
 -- Human-readable zone map stats (flags, entry count, ranges)
-SELECT clustered_pg.sorted_heap_zonemap_stats('t'::regclass);
+SELECT pg_sorted_heap.sorted_heap_zonemap_stats('t'::regclass);
 
 -- Manual zone map rebuild (without compaction)
-SELECT clustered_pg.sorted_heap_rebuild_zonemap('t'::regclass);
+SELECT pg_sorted_heap.sorted_heap_rebuild_zonemap('t'::regclass);
 ```
 
 ### Scan statistics
 
 ```sql
 -- Structured stats: total_scans, blocks_scanned, blocks_pruned, source
-SELECT * FROM clustered_pg.sorted_heap_scan_stats();
+SELECT * FROM pg_sorted_heap.sorted_heap_scan_stats();
 
 -- Reset counters
-SELECT clustered_pg.sorted_heap_reset_stats();
+SELECT pg_sorted_heap.sorted_heap_reset_stats();
 ```
 
 ### Configuration
@@ -203,8 +203,8 @@ SET sorted_heap.vacuum_rebuild_zonemap = off;
 ### Observability
 
 ```sql
-SELECT clustered_pg.version();
-SELECT clustered_pg.observability();
+SELECT pg_sorted_heap.version();
+SELECT pg_sorted_heap.observability();
 ```
 
 ### clustered_heap (Table AM) — legacy
@@ -230,7 +230,7 @@ CREATE INDEX ON t USING btree (key_col);
 | `sorted_heap.c` | 2,452 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
 | `sorted_heap_scan.c` | 1,547 | Custom scan provider: planner hook, parallel scan, multi-col pruning, runtime params |
 | `sorted_heap_online.c` | 1,053 | Online compact + online merge: trigger, copy, replay, swap |
-| `clustered_pg.c` | 1,537 | Extension entry point, legacy clustered index AM, GUC registration |
+| `pg_sorted_heap.c` | 1,537 | Extension entry point, legacy clustered index AM, GUC registration |
 
 ### Zone map details
 

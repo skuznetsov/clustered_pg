@@ -23,7 +23,7 @@ if [ ! -x "$CHECK_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_planner_ratio_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_planner_ratio_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

@@ -23,7 +23,7 @@ if [ ! -x "$COMPARE_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_perf_set_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_perf_set_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -34,7 +34,7 @@ write_log() {
   local idx="$2"
   local baseline="$3"
   local churn="$4"
-  cat >"$dir/clustered_pg_perf_probe_${idx}.log" <<EOF
+  cat >"$dir/pg_sorted_heap_perf_probe_${idx}.log" <<EOF
 baseline_fastpath | $baseline
 churn_fastpath | $churn
 EOF

@@ -55,7 +55,7 @@ matches=()
 while IFS= read -r p; do
   matches+=("$p")
 done < <(find "$ROOT" -mindepth 1 -maxdepth 1 \
-  \( -name 'clustered_pg_*' \
+  \( -name 'pg_sorted_heap_*' \
      -o -name 'workflow_runner_guard.*' \
      -o -name 'workflow_path_parity.*' \
      -o -name 'runtime_workflow_path_parity.*' \) | sort)

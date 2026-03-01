@@ -23,7 +23,7 @@ if [ ! -x "$COMPARE_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_planner_setcmp_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_planner_setcmp_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -33,7 +33,7 @@ write_log() {
   local dir="$1"
   local idx="$2"
   local ratio="$3"
-  cat >"$dir/clustered_pg_planner_probe_${idx}.log" <<EOF
+  cat >"$dir/pg_sorted_heap_planner_probe_${idx}.log" <<EOF
 planner_probe_compare|rows=200|forced_point_off_total=1000000.00|forced_point_on_total=8.00|off_over_on=$ratio
 EOF
 }

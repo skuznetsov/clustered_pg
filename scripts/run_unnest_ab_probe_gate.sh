@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ "$#" -lt 10 ] || [ "$#" -gt 11 ]; then
   echo "usage: $0 <ref_runs> <new_runs> <batch_size> <batches> <select_iters> <probe_size> <base_port> <out_root_abs_dir> <min_fraction> <stat_mode> [min_samples]" >&2
-  echo "optional env: UNNEST_GATE_EXISTING_REF_DIR=<abs_dir_with_clustered_pg_unnest_ab_logs> UNNEST_GATE_KEEP_NEW_DIR=<on|off> UNNEST_GATE_ALLOW_OPTIMISTIC_TAIL=<on|off>" >&2
+  echo "optional env: UNNEST_GATE_EXISTING_REF_DIR=<abs_dir_with_pg_sorted_heap_unnest_ab_logs> UNNEST_GATE_KEEP_NEW_DIR=<on|off> UNNEST_GATE_ALLOW_OPTIMISTIC_TAIL=<on|off>" >&2
   exit 2
 fi
 
@@ -151,7 +151,7 @@ if [ ! -x "$COMPARE_SCRIPT" ]; then
   exit 2
 fi
 
-NEW_DIR="$(mktemp -d "$OUT_ROOT/clustered_pg_unnest_ab_new_set.XXXXXX")"
+NEW_DIR="$(mktemp -d "$OUT_ROOT/pg_sorted_heap_unnest_ab_new_set.XXXXXX")"
 REF_SOURCE="generated"
 REF_RETAINED=1
 
@@ -181,7 +181,7 @@ if [ -n "$EXISTING_REF_DIR" ]; then
   REF_DIR="$EXISTING_REF_DIR"
   REF_SOURCE="existing"
 else
-  REF_DIR="$(mktemp -d "$OUT_ROOT/clustered_pg_unnest_ab_ref_set.XXXXXX")"
+  REF_DIR="$(mktemp -d "$OUT_ROOT/pg_sorted_heap_unnest_ab_ref_set.XXXXXX")"
   run_set "$REF_RUNS" "$BASE_PORT" "$REF_DIR"
 fi
 

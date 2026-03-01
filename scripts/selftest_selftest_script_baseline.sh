@@ -32,7 +32,7 @@ if [ ! -d "$WORKFLOW_DIR" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_selftest_baseline.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_selftest_baseline.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

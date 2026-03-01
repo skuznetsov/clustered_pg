@@ -81,13 +81,13 @@ on:
       - scripts/selftest_run_planner_probe_with_summary.sh
       - scripts/run_planner_probe_gate.sh
       - scripts/selftest_run_planner_probe_gate.sh
-      - scripts/tmp_clean_clustered_pg.sh
-      - scripts/selftest_tmp_clean_clustered_pg.sh
+      - scripts/tmp_clean_pg_sorted_heap.sh
+      - scripts/selftest_tmp_clean_pg_sorted_heap.sh
       - scripts/selftest_runtime_tmpdir_validation.sh
       - scripts/selftest_runtime_output_target_validation.sh
       - scripts/selftest_runtime_port_validation.sh
-      - scripts/extract_clustered_pg_define.sh
-      - scripts/selftest_extract_clustered_pg_define.sh
+      - scripts/extract_pg_sorted_heap_define.sh
+      - scripts/selftest_extract_pg_sorted_heap_define.sh
       - README.md
       - OPERATIONS.md
       - scripts/selftest_runtime_profile_export.sh
@@ -187,13 +187,13 @@ on:
       - scripts/selftest_run_planner_probe_with_summary.sh
       - scripts/run_planner_probe_gate.sh
       - scripts/selftest_run_planner_probe_gate.sh
-      - scripts/tmp_clean_clustered_pg.sh
-      - scripts/selftest_tmp_clean_clustered_pg.sh
+      - scripts/tmp_clean_pg_sorted_heap.sh
+      - scripts/selftest_tmp_clean_pg_sorted_heap.sh
       - scripts/selftest_runtime_tmpdir_validation.sh
       - scripts/selftest_runtime_output_target_validation.sh
       - scripts/selftest_runtime_port_validation.sh
-      - scripts/extract_clustered_pg_define.sh
-      - scripts/selftest_extract_clustered_pg_define.sh
+      - scripts/extract_pg_sorted_heap_define.sh
+      - scripts/selftest_extract_pg_sorted_heap_define.sh
       - README.md
       - OPERATIONS.md
       - scripts/selftest_runtime_profile_export.sh
@@ -232,19 +232,19 @@ jobs:
         run: make policy-lint-strict
 
       - name: Prepare isolated tuning probe root
-        run: mkdir -p /tmp/clustered_pg_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
+        run: mkdir -p /tmp/pg_sorted_heap_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
 
       - name: Run lightweight script selftests
         env:
           LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN: "on"
           LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S: "0"
-          UNNEST_TUNE_PROBE_OUT_ROOT: /tmp/clustered_pg_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
-        run: ./scripts/run_lightweight_selftests.sh /tmp jsonl | tee /tmp/clustered_pg_lightweight_selftests.jsonl
+          UNNEST_TUNE_PROBE_OUT_ROOT: /tmp/pg_sorted_heap_unnest_tune_probe_${{ github.run_id }}_${{ github.run_attempt }}
+        run: ./scripts/run_lightweight_selftests.sh /tmp jsonl | tee /tmp/pg_sorted_heap_lightweight_selftests.jsonl
 
       - name: Upload lightweight selftest log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: clustered-pg-lightweight-selftest-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/clustered_pg_lightweight_selftests.jsonl
+          path: /tmp/pg_sorted_heap_lightweight_selftests.jsonl
           if-no-files-found: error

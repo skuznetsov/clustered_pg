@@ -1,4 +1,4 @@
-# clustered_pg operations runbook
+# pg_sorted_heap operations runbook
 
 This file captures the day-to-day diagnostics workflow for extension stability and performance checks.
 
@@ -216,7 +216,7 @@ Validate planner probe forced-index ratio against a minimum threshold:
 
 ```bash
 make planner-cost-check \
-  PLANNER_PROBE_LOG=/private/tmp/clustered_pg_planner_probe_YYYYMMDD_HHMMSS_PID.log \
+  PLANNER_PROBE_LOG=/private/tmp/pg_sorted_heap_planner_probe_YYYYMMDD_HHMMSS_PID.log \
   PLANNER_MIN_OFF_OVER_ON=100.0
 ```
 
@@ -224,7 +224,7 @@ Validate that default point-query path uses an index for larger row sets:
 
 ```bash
 make planner-cost-default-path-check \
-  PLANNER_PROBE_LOG=/private/tmp/clustered_pg_planner_probe_YYYYMMDD_HHMMSS_PID.log \
+  PLANNER_PROBE_LOG=/private/tmp/pg_sorted_heap_planner_probe_YYYYMMDD_HHMMSS_PID.log \
   PLANNER_MIN_DEFAULT_INDEX_ROWS=10000
 ```
 
@@ -238,9 +238,9 @@ Generate machine-readable planner probe summary (for CI artifacts/trending):
 
 ```bash
 make planner-cost-summary \
-  PLANNER_PROBE_LOG=/private/tmp/clustered_pg_planner_probe_YYYYMMDD_HHMMSS_PID.log \
+  PLANNER_PROBE_LOG=/private/tmp/pg_sorted_heap_planner_probe_YYYYMMDD_HHMMSS_PID.log \
   PLANNER_SUMMARY_FORMAT=json \
-  PLANNER_SUMMARY_OUT=/private/tmp/clustered_pg_planner_probe_summary.json
+  PLANNER_SUMMARY_OUT=/private/tmp/pg_sorted_heap_planner_probe_summary.json
 ```
 
 One-command probe + summary artifact pipeline:
@@ -336,8 +336,8 @@ make fastpath-perf-probe PERF_OUT=auto:/private/tmp
 
 `make unnest-ab-probe` accepts additional runtime knobs:
 
-- `UNNEST_AB_LOCAL_HINT_MAX_KEYS=<n>` maps to `clustered_pg.pkidx_local_hint_max_keys` (session-local hint cache key capacity).
-- `UNNEST_AB_ASSUME_UNIQUE_KEYS=<on|off>` maps to `clustered_pg.pkidx_assume_unique_keys`.
+- `UNNEST_AB_LOCAL_HINT_MAX_KEYS=<n>` maps to `pg_sorted_heap.pkidx_local_hint_max_keys` (session-local hint cache key capacity).
+- `UNNEST_AB_ASSUME_UNIQUE_KEYS=<on|off>` maps to `pg_sorted_heap.pkidx_assume_unique_keys`.
 - `UNNEST_AB_WARMUP_SELECTS=<n>` performs unmeasured select warmup iterations before timed `JOIN UNNEST` / `ANY(...)` loops (`1` by default; set `0` for cold-start latency measurement).
 - `UNNEST_AB_ALLOW_UNSAFE_UNIQUE=<on|off>` is a fail-closed override required when `UNNEST_AB_ASSUME_UNIQUE_KEYS=on`.
 - Safe baseline for probe-heavy workloads: start with `UNNEST_AB_LOCAL_HINT_MAX_KEYS=16384` before enabling any unsafe assumptions.
@@ -357,7 +357,7 @@ Notes:
 - Set `UNNEST_SENTINEL_WARMUP_SELECTS=0` when you explicitly want cold-start latency sensitivity.
 
 Safety note:
-- `clustered_pg.pkidx_assume_unique_keys` is superuser-only and defaults to `off`.
+- `pg_sorted_heap.pkidx_assume_unique_keys` is superuser-only and defaults to `off`.
 - Turn it on only for workloads with guaranteed unique probe keys; otherwise correctness can degrade on duplicate-key data.
 - Even with unique keys, high-scale throughput can degrade; keep this mode `off` for production baselines unless workload-specific evidence proves benefit.
 - Direct `run_unnest_ab_probe*` execution with `assume_unique_keys=on` requires explicit override: `UNNEST_AB_ALLOW_UNSAFE_UNIQUE=on`.
@@ -375,7 +375,7 @@ make unnest-ab-compare-median \
 ```
 
 Notes:
-- log files must match `clustered_pg_unnest_ab_*.log` and contain `ratio_kv|insert=...|join_unnest=...|any_array=...`.
+- log files must match `pg_sorted_heap_unnest_ab_*.log` and contain `ratio_kv|insert=...|join_unnest=...|any_array=...`.
 - comparator supports `UNNEST_AB_SET_STAT_MODE=median|p05|p95|trimmed-mean`.
 - default `UNNEST_AB_SET_MIN_SAMPLES` is `1` for `median` and `3` for `p05`/`p95`/`trimmed-mean`.
 - comparator header includes `metric_polarity=higher_is_better` for policy automation.
@@ -500,7 +500,7 @@ make selftest-lightweight LIGHTWEIGHT_SELFTEST_TMP_ROOT=/private/tmp
 ```
 
 The runner emits per-script `elapsed_s=<n>` and final `total_elapsed_s=<n>` telemetry.
-It also includes script-level guards for runtime `TMPDIR`, `auto:<dir>` output-target, `PORT`, shared define-parser behavior, runtime-selftest profile validation, and runtime-profile export format (`selftest_runtime_tmpdir_validation.sh`, `selftest_runtime_output_target_validation.sh`, `selftest_runtime_port_validation.sh`, `selftest_extract_clustered_pg_define.sh`, `selftest_runtime_perf_selftest_validation.sh`, `selftest_runtime_profile_export.sh`).
+It also includes script-level guards for runtime `TMPDIR`, `auto:<dir>` output-target, `PORT`, shared define-parser behavior, runtime-selftest profile validation, and runtime-profile export format (`selftest_runtime_tmpdir_validation.sh`, `selftest_runtime_output_target_validation.sh`, `selftest_runtime_port_validation.sh`, `selftest_extract_pg_sorted_heap_define.sh`, `selftest_runtime_perf_selftest_validation.sh`, `selftest_runtime_profile_export.sh`).
 For machine-readable output use:
 
 ```bash

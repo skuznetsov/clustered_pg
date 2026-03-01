@@ -19,7 +19,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_make_unnest_ab_perf_sentinel_cold_observe_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_make_unnest_ab_perf_sentinel_cold_observe_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

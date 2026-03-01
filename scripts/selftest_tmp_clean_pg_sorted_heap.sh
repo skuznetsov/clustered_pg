@@ -17,27 +17,27 @@ if [ ! -d "$TMP_ROOT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_clustered_pg.sh"
+CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_pg_sorted_heap.sh"
 if [ ! -x "$CLEAN_SCRIPT" ]; then
   echo "cleanup script not executable: $CLEAN_SCRIPT" >&2
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_tmp_clean_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_tmp_clean_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
-M1="$WORKDIR/clustered_pg_stress_dummy"
-M2="$WORKDIR/clustered_pg_planner_probe_dummy.log"
-M3="$WORKDIR/clustered_pg_perf_ref_set_dummy"
-M4="$WORKDIR/clustered_pg_planner_new_set_dummy"
-M5="$WORKDIR/clustered_pg_lightweight_selftests_dummy.jsonl"
+M1="$WORKDIR/pg_sorted_heap_stress_dummy"
+M2="$WORKDIR/pg_sorted_heap_planner_probe_dummy.log"
+M3="$WORKDIR/pg_sorted_heap_perf_ref_set_dummy"
+M4="$WORKDIR/pg_sorted_heap_planner_new_set_dummy"
+M5="$WORKDIR/pg_sorted_heap_lightweight_selftests_dummy.jsonl"
 M6="$WORKDIR/workflow_runner_guard.dummy"
 M7="$WORKDIR/runtime_workflow_path_parity.dummy"
-LIVE="$WORKDIR/clustered_pg_regress_live"
-RECENT="$WORKDIR/clustered_pg_perf_probe_recent"
+LIVE="$WORKDIR/pg_sorted_heap_regress_live"
+RECENT="$WORKDIR/pg_sorted_heap_perf_probe_recent"
 KEEP="$WORKDIR/unrelated_file"
 mkdir -p "$M1"
 touch "$M2"
@@ -99,4 +99,4 @@ if "$CLEAN_SCRIPT" "$WORKDIR" "bad_value" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "selftest_tmp_clean_clustered_pg status=ok"
+echo "selftest_tmp_clean_pg_sorted_heap status=ok"

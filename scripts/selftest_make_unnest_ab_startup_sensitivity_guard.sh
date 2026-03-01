@@ -19,7 +19,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_make_startup_sensitivity_guard_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_make_startup_sensitivity_guard_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

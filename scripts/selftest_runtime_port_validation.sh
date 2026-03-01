@@ -24,7 +24,7 @@ if [ ! -x "$RUN_PLANNER" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_runtime_port_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_runtime_port_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

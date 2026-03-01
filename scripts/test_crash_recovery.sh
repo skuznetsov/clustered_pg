@@ -49,7 +49,7 @@ check() {
 create_cluster() {
   local name="$1"
   local dir
-  dir=$(mktemp -d "$TMP_ROOT/clustered_pg_crash_${name}.XXXXXX")
+  dir=$(mktemp -d "$TMP_ROOT/pg_sorted_heap_crash_${name}.XXXXXX")
 
   "$PG_BINDIR/initdb" -D "$dir/data" -A trust --no-locale >/dev/null 2>&1
   cat >> "$dir/data/postgresql.conf" <<'PGCONF'
@@ -105,7 +105,7 @@ scenario_crash_during_copy() {
   dir=$(create_cluster "copy")
 
   start_cluster "$dir" "$port"
-  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION clustered_pg"
+  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION pg_sorted_heap"
   PSQL_CMD "$dir" "$port" -c "
     CREATE TABLE crash_copy(id int PRIMARY KEY, val text) USING sorted_heap;
     INSERT INTO crash_copy SELECT g, repeat('x', 200) FROM generate_series(1, 5000) g;
@@ -157,7 +157,7 @@ scenario_crash_after_compact() {
   dir=$(create_cluster "compact")
 
   start_cluster "$dir" "$port"
-  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION clustered_pg"
+  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION pg_sorted_heap"
   PSQL_CMD "$dir" "$port" -c "
     CREATE TABLE crash_compact(id int PRIMARY KEY, val text) USING sorted_heap;
     INSERT INTO crash_compact SELECT g, repeat('x', 80) FROM generate_series(1, 10000) g;
@@ -210,7 +210,7 @@ scenario_crash_during_zm_rebuild() {
   dir=$(create_cluster "rebuild")
 
   start_cluster "$dir" "$port"
-  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION clustered_pg"
+  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION pg_sorted_heap"
   PSQL_CMD "$dir" "$port" -c "
     CREATE TABLE crash_zm(id int PRIMARY KEY, val text) USING sorted_heap;
     INSERT INTO crash_zm SELECT g, repeat('x', 200) FROM generate_series(1, 50000) g;
@@ -255,7 +255,7 @@ scenario_crash_during_online_compact() {
   dir=$(create_cluster "online")
 
   start_cluster "$dir" "$port"
-  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION clustered_pg"
+  PSQL_CMD "$dir" "$port" -c "CREATE EXTENSION pg_sorted_heap"
   PSQL_CMD "$dir" "$port" -c "
     CREATE TABLE crash_online(id int PRIMARY KEY, val text) USING sorted_heap;
     INSERT INTO crash_online SELECT g, repeat('x', 200)

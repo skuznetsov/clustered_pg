@@ -1,4 +1,4 @@
-# clustered_pg: Action Plan & Research Log
+# pg_sorted_heap: Action Plan & Research Log
 
 ## Code Analysis Summary
 
@@ -11,14 +11,14 @@
 
 ### Verified Bugs
 
-1. **SPI plan_init outside PG_TRY** (2 locations: `clustered_pg.c:1059, 1126`)
+1. **SPI plan_init outside PG_TRY** (2 locations: `pg_sorted_heap.c:1059, 1126`)
    - `SPI_connect()` succeeds, then `plan_init()` is called before `PG_TRY` block
    - If plan_init throws (it calls SPI_prepare which can ereport), SPI_finish() is skipped
    - PostgreSQL transaction abort cleans up eventually, but nested SPI contexts could leak
    - Severity: MEDIUM (transaction abort provides safety net)
 
-2. **Defensive overflow guard missing in capacity calculator** (`clustered_pg.c:1413`)
-   - `clustered_pg_next_capacity` returns values multiplied by sizeof(ItemPointerData) in callers
+2. **Defensive overflow guard missing in capacity calculator** (`pg_sorted_heap.c:1413`)
+   - `pg_sorted_heap_next_capacity` returns values multiplied by sizeof(ItemPointerData) in callers
    - With current GUC bounds (max 1048576) this cannot overflow in practice
    - But no protection if GUC bounds are increased in the future
    - Severity: LOW (theoretical, currently unreachable)
@@ -55,7 +55,7 @@
 ### Phase 1: Fix Verified Bugs [DONE]
 - [x] 1.1 Move plan_init inside PG_TRY for count_repack_due (line 1059)
 - [x] 1.2 Move plan_init inside PG_TRY for rebuild_segment_map (line 1126)
-- [x] 1.3 Add defensive overflow guard in clustered_pg_next_capacity
+- [x] 1.3 Add defensive overflow guard in pg_sorted_heap_next_capacity
 
 ### Phase 2: Add Functional SQL Tests [DONE]
 - [x] 2.1 Multi-key rescan correctness (JOIN UNNEST with hit/miss/mixed probes)
@@ -112,13 +112,13 @@ Delivered across 4 sessions:
   - integer overflow unreachable with GUC max=1048576
   - SQL buffers adequately sized for realistic schema names
 [session-1] Fixed 2 SPI plan_init leak patterns (lines 1059, 1126) -- moved inside PG_TRY
-[session-1] Added overflow guard to clustered_pg_next_capacity
+[session-1] Added overflow guard to pg_sorted_heap_next_capacity
 [session-1] Compile verified: make -> clean build, no warnings
 [session-1] TODO.md analysis: 17.5K lines with ~1:5 signal-to-noise ratio.
   Upper 40% is meta-work (re-baselines, make-help contracts, CI workflow guards).
   Quadrumvirate applied ritualistically to trivial tasks.
   97 shell selftests vs 1 SQL regression test -- inverted test pyramid.
-[session-1] Added 7 functional test groups to sql/clustered_pg.sql:
+[session-1] Added 7 functional test groups to sql/pg_sorted_heap.sql:
   - int2/int4 index AM (equality + range filter) -- both types work correctly
   - locator edge cases (0,0), (INT64_MAX, INT64_MAX), advance/next from zero
   - JOIN UNNEST rescan path: 10 hits, 0 misses, 3/5 mixed -- all correct
@@ -187,7 +187,7 @@ Delivered across 4 sessions:
   - Transaction rollback stale entries: zone map is best-effort placement hint.
     Stale block numbers cause PostgreSQL to find another page — performance
     hint degrades, not a correctness issue.
-  - AM OID cache (clustered_pg_pkidx_am_oid_cache): static variable cleared
+  - AM OID cache (pg_sorted_heap_pkidx_am_oid_cache): static variable cleared
     on backend restart. Extension reinstall requires new session. Safe.
   - UPDATE path: PostgreSQL routes UPDATEs through heap_update, not tuple_insert.
     Directed placement only applies to INSERT/COPY. Acceptable for append-heavy

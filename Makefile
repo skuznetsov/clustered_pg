@@ -1,9 +1,10 @@
-EXTENSION = clustered_pg
-MODULE_big = clustered_pg
-OBJS = clustered_pg.o sorted_heap.o sorted_heap_scan.o sorted_heap_online.o
-DATA = sql/clustered_pg--0.1.0.sql
+EXTENSION = pg_sorted_heap
+MODULE_big = pg_sorted_heap
+OBJS = src/pg_sorted_heap.o src/sorted_heap.o src/sorted_heap_scan.o src/sorted_heap_online.o
+PG_CPPFLAGS = -I$(srcdir)/src
+DATA = sql/pg_sorted_heap--0.1.0.sql
 DOCS =
-REGRESS = clustered_pg
+REGRESS = pg_sorted_heap
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -262,7 +263,7 @@ unnest-ab-profile-boundary-history-selftest:
 
 unnest-ab-profile-boundary-history-gate:
 	@set -euo pipefail; \
-	tmp_summary="$$(mktemp "$(UNNEST_AB_NIGHTLY_OUT_ROOT)/clustered_pg_boundary_history_gate.XXXXXX")"; \
+	tmp_summary="$$(mktemp "$(UNNEST_AB_NIGHTLY_OUT_ROOT)/pg_sorted_heap_boundary_history_gate.XXXXXX")"; \
 	trap 'rm -f "$$tmp_summary"' EXIT; \
 	bash ./scripts/summarize_unnest_ab_boundary_history.sh "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_INPUT)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_STRICT_MIN_OBS)" > "$$tmp_summary"; \
 	bash ./scripts/check_unnest_ab_boundary_history_gate.sh "$$tmp_summary" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_STRICT_MIN_OBS)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_MIN_SAMPLES_TOTAL)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_BALANCED_MAX_STRICT_RATE)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_BOUNDARY40_MAX_STRICT_RATE)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_BOUNDARY56_MIN_STRICT_RATE)" "$(UNNEST_AB_NIGHTLY_HISTORY_GATE_PRESSURE_MIN_STRICT_RATE)"
@@ -272,7 +273,7 @@ unnest-ab-profile-boundary-history-gate-selftest:
 
 unnest-ab-profile-boundary-history-derive-thresholds:
 	@set -euo pipefail; \
-	tmp_summary="$$(mktemp "$(UNNEST_AB_NIGHTLY_OUT_ROOT)/clustered_pg_boundary_history_derive.XXXXXX")"; \
+	tmp_summary="$$(mktemp "$(UNNEST_AB_NIGHTLY_OUT_ROOT)/pg_sorted_heap_boundary_history_derive.XXXXXX")"; \
 	trap 'rm -f "$$tmp_summary"' EXIT; \
 	bash ./scripts/summarize_unnest_ab_boundary_history.sh "$(UNNEST_AB_NIGHTLY_HISTORY_DERIVE_INPUT)" "$(UNNEST_AB_NIGHTLY_HISTORY_DERIVE_STRICT_MIN_OBS)" > "$$tmp_summary"; \
 	bash ./scripts/derive_unnest_ab_boundary_history_gate_thresholds.sh "$$tmp_summary" "$(UNNEST_AB_NIGHTLY_HISTORY_DERIVE_STRICT_MIN_OBS)" "$(UNNEST_AB_NIGHTLY_HISTORY_DERIVE_MAX_HEADROOM)" "$(UNNEST_AB_NIGHTLY_HISTORY_DERIVE_MIN_FLOOR_MARGIN)"
@@ -393,10 +394,10 @@ unnest-ab-tuning-matrix:
 	UNNEST_TUNE_PROBE_OUT_ROOT="$(UNNEST_TUNE_PROBE_OUT_ROOT)" ./scripts/run_unnest_ab_tuning_matrix.sh $(UNNEST_TUNE_RUNS) $(UNNEST_TUNE_BATCH_SIZE) $(UNNEST_TUNE_BATCHES) $(UNNEST_TUNE_SELECT_ITERS) $(UNNEST_TUNE_PROBE_SIZE) $(UNNEST_TUNE_BASE_PORT) $(UNNEST_TUNE_OUT) $(UNNEST_TUNE_TRIGGER_LIST) $(UNNEST_TUNE_MIN_DISTINCT_LIST) $(UNNEST_TUNE_MAX_TIDS_LIST)
 
 tmp-clean:
-	./scripts/tmp_clean_clustered_pg.sh $(TMP_CLEAN_ROOT) $(TMP_CLEAN_MIN_AGE_S)
+	./scripts/tmp_clean_pg_sorted_heap.sh $(TMP_CLEAN_ROOT) $(TMP_CLEAN_MIN_AGE_S)
 
 tmp-clean-selftest:
-	./scripts/selftest_tmp_clean_clustered_pg.sh $(TMP_SELFTEST_ROOT)
+	./scripts/selftest_tmp_clean_pg_sorted_heap.sh $(TMP_SELFTEST_ROOT)
 
 selftest-lightweight:
 	@case "$(LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN)" in \
@@ -432,6 +433,12 @@ test-alter-table:
 test-dump-restore:
 	./scripts/test_dump_restore.sh $(TMP_SELFTEST_ROOT) $(TEST_DUMP_PORT)
 
+TEST_UPGRADE_PORT_OLD ?= 65496
+TEST_UPGRADE_PORT_NEW ?= 65497
+
+test-pg-upgrade:
+	./scripts/test_pg_upgrade.sh $(TMP_SELFTEST_ROOT) $(TEST_UPGRADE_PORT_OLD) $(TEST_UPGRADE_PORT_NEW)
+
 bench:
 	./scripts/bench_sorted_heap.sh $(TMP_SELFTEST_ROOT) $(BENCH_PORT) $(BENCH_SCALES)
 
@@ -442,7 +449,7 @@ policy-lint-strict:
 	POLICY_LINT_WARNINGS_MAX=0 ./scripts/lint_comparator_policy.sh
 
 help:
-	@echo "clustered_pg custom targets:"
+	@echo "pg_sorted_heap custom targets:"
 	@echo "  make fastpath-perf-probe-selftest-profiles RUNTIME_PROFILE_FORMAT=<kv|json>"
 	@echo "  make planner-cost-probe PLANNER_PROBE_ROWS=<csv> PLANNER_PROBE_PORT=<port> PLANNER_PROBE_OUT=<path|auto|auto:<abs_dir>>"
 	@echo "  make planner-cost-probe-summary PLANNER_PROBE_ROWS=<csv> PLANNER_PROBE_PORT=<port> PLANNER_PROBE_OUT=<path|auto|auto:<abs_dir>> PLANNER_SUMMARY_FORMAT=<json|csv> PLANNER_SUMMARY_OUT=<path|auto|auto:<abs_dir>>"

@@ -17,15 +17,15 @@ if [ ! -d "$TMP_ROOT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HELPER="$SCRIPT_DIR/extract_clustered_pg_define.sh"
-SOURCE_C="$SCRIPT_DIR/../clustered_pg.c"
+HELPER="$SCRIPT_DIR/extract_pg_sorted_heap_define.sh"
+SOURCE_C="$SCRIPT_DIR/../pg_sorted_heap.c"
 
 if [ ! -x "$HELPER" ]; then
   echo "required script is not executable: $HELPER" >&2
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_extract_define_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_extract_define_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -59,4 +59,4 @@ expect_fail_contains "failed to parse CLUSTERED_PG_NOT_A_REAL_DEFINE" \
 expect_fail_contains "invalid define_name: BAD-NAME" \
   bash "$HELPER" "$SOURCE_C" "BAD-NAME"
 
-echo "selftest_extract_clustered_pg_define status=ok zone_map_max_keys=$value"
+echo "selftest_extract_pg_sorted_heap_define status=ok zone_map_max_keys=$value"

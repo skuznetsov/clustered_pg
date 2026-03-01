@@ -61,7 +61,7 @@ if [ ! -x "$INDEX_BUILD_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_date_map_mode_bench.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_date_map_mode_bench.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

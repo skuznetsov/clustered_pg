@@ -1,63 +1,63 @@
--- clustered_pg extension SQL
+-- pg_sorted_heap extension SQL
 
-\echo Use "CREATE EXTENSION clustered_pg" to load this file.
+\echo Use "CREATE EXTENSION pg_sorted_heap" to load this file.
 
 CREATE DOMAIN @extschema@.clustered_locator AS bytea
 	CHECK (octet_length(VALUE) = 16);
 
 CREATE FUNCTION @extschema@.version()
 RETURNS text
-AS '$libdir/clustered_pg', 'clustered_pg_version'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_version'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.observability()
 RETURNS text
-AS '$libdir/clustered_pg', 'clustered_pg_observability'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_observability'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION @extschema@.clustered_pg_observability()
+CREATE FUNCTION @extschema@.pg_sorted_heap_observability()
 RETURNS text
-AS '$libdir/clustered_pg', 'clustered_pg_observability'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_observability'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.tableam_handler(internal)
 RETURNS table_am_handler
-AS '$libdir/clustered_pg', 'clustered_pg_tableam_handler'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_tableam_handler'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.pk_index_handler(internal)
 RETURNS index_am_handler
-AS '$libdir/clustered_pg', 'clustered_pg_pkidx_handler'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_pkidx_handler'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.locator_pack(bigint, bigint)
 RETURNS @extschema@.clustered_locator
-AS '$libdir/clustered_pg', 'clustered_pg_locator_pack'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_pack'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_pack_int8(bigint)
 RETURNS @extschema@.clustered_locator
-AS '$libdir/clustered_pg', 'clustered_pg_locator_pack_int8'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_pack_int8'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_major(@extschema@.clustered_locator)
 RETURNS bigint
-AS '$libdir/clustered_pg', 'clustered_pg_locator_major'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_major'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_minor(@extschema@.clustered_locator)
 RETURNS bigint
-AS '$libdir/clustered_pg', 'clustered_pg_locator_minor'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_minor'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_to_hex(@extschema@.clustered_locator)
 RETURNS text
-AS '$libdir/clustered_pg', 'clustered_pg_locator_to_hex'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_to_hex'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_cmp(@extschema@.clustered_locator, @extschema@.clustered_locator)
 RETURNS int
-AS '$libdir/clustered_pg', 'clustered_pg_locator_cmp'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_cmp'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_lt(@extschema@.clustered_locator, @extschema@.clustered_locator)
@@ -138,12 +138,12 @@ DEFAULT FOR TYPE @extschema@.clustered_locator USING btree AS
 
 CREATE FUNCTION @extschema@.locator_advance_major(@extschema@.clustered_locator, bigint)
 RETURNS @extschema@.clustered_locator
-AS '$libdir/clustered_pg', 'clustered_pg_locator_advance_major'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_advance_major'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE FUNCTION @extschema@.locator_next_minor(@extschema@.clustered_locator, bigint)
 RETURNS @extschema@.clustered_locator
-AS '$libdir/clustered_pg', 'clustered_pg_locator_next_minor'
+AS '$libdir/pg_sorted_heap', 'pg_sorted_heap_locator_next_minor'
 LANGUAGE C STRICT IMMUTABLE;
 
 CREATE ACCESS METHOD clustered_heap TYPE TABLE HANDLER @extschema@.tableam_handler;
@@ -227,7 +227,7 @@ COMMENT ON ACCESS METHOD clustered_pk_index IS 'Clustered index AM for key disco
 
 CREATE FUNCTION @extschema@.sorted_heap_handler(internal)
 RETURNS table_am_handler
-AS '$libdir/clustered_pg', 'sorted_heap_tableam_handler'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_tableam_handler'
 LANGUAGE C STRICT;
 
 CREATE ACCESS METHOD sorted_heap TYPE TABLE
@@ -237,17 +237,17 @@ COMMENT ON ACCESS METHOD sorted_heap IS 'Sorted heap table access method with LS
 
 CREATE FUNCTION @extschema@.sorted_heap_zonemap_stats(regclass)
 RETURNS text
-AS '$libdir/clustered_pg', 'sorted_heap_zonemap_stats'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_zonemap_stats'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.sorted_heap_compact(regclass)
 RETURNS void
-AS '$libdir/clustered_pg', 'sorted_heap_compact'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_compact'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.sorted_heap_rebuild_zonemap(regclass)
 RETURNS void
-AS '$libdir/clustered_pg', 'sorted_heap_rebuild_zonemap_sql'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_rebuild_zonemap_sql'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.sorted_heap_scan_stats(
@@ -256,30 +256,30 @@ CREATE FUNCTION @extschema@.sorted_heap_scan_stats(
   OUT blocks_pruned bigint,
   OUT source text
 ) RETURNS record
-AS '$libdir/clustered_pg', 'sorted_heap_scan_stats'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_scan_stats'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.sorted_heap_reset_stats()
 RETURNS void
-AS '$libdir/clustered_pg', 'sorted_heap_reset_stats'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_reset_stats'
 LANGUAGE C STRICT;
 
 CREATE FUNCTION @extschema@.sorted_heap_compact_trigger()
 RETURNS trigger
-AS '$libdir/clustered_pg', 'sorted_heap_compact_trigger'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_compact_trigger'
 LANGUAGE C;
 
 CREATE PROCEDURE @extschema@.sorted_heap_compact_online(regclass)
-AS '$libdir/clustered_pg', 'sorted_heap_compact_online'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_compact_online'
 LANGUAGE C;
 
 CREATE FUNCTION @extschema@.sorted_heap_merge(regclass)
 RETURNS void
-AS '$libdir/clustered_pg', 'sorted_heap_merge'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_merge'
 LANGUAGE C STRICT;
 
 CREATE PROCEDURE @extschema@.sorted_heap_merge_online(regclass)
-AS '$libdir/clustered_pg', 'sorted_heap_merge_online'
+AS '$libdir/pg_sorted_heap', 'sorted_heap_merge_online'
 LANGUAGE C;
 
-COMMENT ON EXTENSION clustered_pg IS 'Physically clustered storage via directed placement in table AM.';
+COMMENT ON EXTENSION pg_sorted_heap IS 'Physically clustered storage via directed placement in table AM.';

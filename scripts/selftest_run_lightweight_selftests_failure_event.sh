@@ -24,7 +24,7 @@ if [ ! -x "$RUNNER_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_lightweight_fail_event_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_lightweight_fail_event_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

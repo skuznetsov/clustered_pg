@@ -59,7 +59,7 @@ if [ "$AUTO_TMP_CLEAN_ENABLED" -eq 1 ] && ! [[ "$AUTO_TMP_CLEAN_MIN_AGE_S" =~ ^[
   exit 2
 fi
 
-TMP_CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_clustered_pg.sh"
+TMP_CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_pg_sorted_heap.sh"
 if [ "$AUTO_TMP_CLEAN_ENABLED" -eq 1 ] && [ ! -x "$TMP_CLEAN_SCRIPT" ]; then
   echo "tmp-clean script not executable: $TMP_CLEAN_SCRIPT" >&2
   exit 2
@@ -221,7 +221,7 @@ run_one "selftest_run_planner_probe_gate.sh"
 run_one "selftest_runtime_tmpdir_validation.sh"
 run_one "selftest_runtime_output_target_validation.sh"
 run_one "selftest_runtime_port_validation.sh"
-run_one "selftest_extract_clustered_pg_define.sh"
+run_one "selftest_extract_pg_sorted_heap_define.sh"
 run_one "selftest_docs_policy_safety_quickstart_contract.sh"
 run_one "selftest_docs_pg_core_regression_smoke_contract.sh"
 run_one "selftest_policy_safety_target_composition.sh"
@@ -237,7 +237,7 @@ run_one "selftest_run_lightweight_selftests_run_label_propagation.sh"
 run_one "selftest_run_lightweight_selftests_success_stream.sh"
 run_one "selftest_run_lightweight_selftests_failure_event.sh"
 run_one "selftest_run_lightweight_selftests_preflight_failure_event.sh"
-run_one "selftest_tmp_clean_clustered_pg.sh"
+run_one "selftest_tmp_clean_pg_sorted_heap.sh"
 
 emit_done
 

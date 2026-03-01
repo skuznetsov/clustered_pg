@@ -33,7 +33,7 @@ fi
 
 collect_logs() {
   local dir="$1"
-  find "$dir" -maxdepth 1 -type f -name 'clustered_pg_unnest_ab_*.log' | sort
+  find "$dir" -maxdepth 1 -type f -name 'pg_sorted_heap_unnest_ab_*.log' | sort
 }
 
 extract_ratio_metric() {

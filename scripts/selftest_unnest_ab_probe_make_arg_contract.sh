@@ -19,7 +19,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_probe_make_arg_contract_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_probe_make_arg_contract_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

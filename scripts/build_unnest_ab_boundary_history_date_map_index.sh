@@ -66,7 +66,7 @@ trim_whitespace() {
   printf '%s' "$value"
 }
 
-TMP_DIR="$(mktemp -d "/private/tmp/clustered_pg_date_map_index_build.XXXXXX")"
+TMP_DIR="$(mktemp -d "/private/tmp/pg_sorted_heap_date_map_index_build.XXXXXX")"
 TMP_OUT="$TMP_DIR/date_map.index.tsv"
 cleanup() {
   rm -rf "$TMP_DIR"

@@ -70,7 +70,7 @@ if [ "$DERIVED_MAX_PORT" -ge 65535 ]; then
 fi
 
 if [ "$OUT_PATH" = "auto" ]; then
-  OUT_PATH="/private/tmp/clustered_pg_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="/private/tmp/pg_sorted_heap_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [[ "$OUT_PATH" == auto:* ]]; then
   OUT_DIR="${OUT_PATH#auto:}"
   if [ -z "$OUT_DIR" ]; then
@@ -81,7 +81,7 @@ elif [[ "$OUT_PATH" == auto:* ]]; then
     echo "auto output directory must be an absolute path" >&2
     exit 2
   fi
-  OUT_PATH="$OUT_DIR/clustered_pg_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="$OUT_DIR/pg_sorted_heap_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
 fi
 
 if [ -n "$OUT_PATH" ]; then

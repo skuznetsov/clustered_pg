@@ -23,7 +23,7 @@ fi
 
 collect_logs() {
   local dir="$1"
-  find "$dir" -maxdepth 1 -type f -name 'clustered_pg_perf_probe_*.log' | sort
+  find "$dir" -maxdepth 1 -type f -name 'pg_sorted_heap_perf_probe_*.log' | sort
 }
 
 extract_elapsed() {

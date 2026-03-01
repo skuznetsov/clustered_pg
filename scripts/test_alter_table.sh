@@ -56,7 +56,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Create ephemeral cluster ---
-TMP_DIR="$(mktemp -d "$TMP_ROOT/clustered_pg_alter.XXXXXX")"
+TMP_DIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_alter.XXXXXX")"
 make -C "$ROOT_DIR" install >/dev/null 2>&1
 "$PG_BINDIR/initdb" -D "$TMP_DIR/data" -A trust --no-locale >/dev/null 2>&1
 "$PG_BINDIR/pg_ctl" -D "$TMP_DIR/data" -l "$TMP_DIR/postmaster.log" \
@@ -66,7 +66,7 @@ PSQL() {
   "$PG_BINDIR/psql" -h "$TMP_DIR" -p "$PORT" postgres -v ON_ERROR_STOP=1 -qtAX "$@"
 }
 
-PSQL -c "CREATE EXTENSION clustered_pg"
+PSQL -c "CREATE EXTENSION pg_sorted_heap"
 
 # --- Setup: table with data + zone map ---
 PSQL <<'SQL'

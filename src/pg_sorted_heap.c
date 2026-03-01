@@ -33,18 +33,18 @@
 
 PG_MODULE_MAGIC;
 
-PG_FUNCTION_INFO_V1(clustered_pg_version);
-PG_FUNCTION_INFO_V1(clustered_pg_observability);
-PG_FUNCTION_INFO_V1(clustered_pg_tableam_handler);
-PG_FUNCTION_INFO_V1(clustered_pg_pkidx_handler);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_pack);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_major);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_minor);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_to_hex);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_pack_int8);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_cmp);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_advance_major);
-PG_FUNCTION_INFO_V1(clustered_pg_locator_next_minor);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_version);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_observability);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_tableam_handler);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_pkidx_handler);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_pack);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_major);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_minor);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_to_hex);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_pack_int8);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_cmp);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_advance_major);
+PG_FUNCTION_INFO_V1(pg_sorted_heap_locator_next_minor);
 
 #define CLUSTERED_PG_EXTENSION_VERSION "0.1.0"
 #define CLUSTERED_PG_OBS_API_VERSION 1
@@ -58,7 +58,7 @@ typedef struct ClusteredPgStats
 	uint64		vacuumcleanup_calls;
 } ClusteredPgStats;
 
-static ClusteredPgStats clustered_pg_stats = {0};
+static ClusteredPgStats pg_sorted_heap_stats = {0};
 
 typedef struct ClusteredLocator
 {
@@ -66,8 +66,8 @@ typedef struct ClusteredLocator
 	uint64		minor_key;
 } ClusteredLocator;
 
-static bool			clustered_pg_clustered_heapam_initialized = false;
-static TableAmRoutine clustered_pg_clustered_heapam_routine;
+static bool			pg_sorted_heap_clustered_heapam_initialized = false;
+static TableAmRoutine pg_sorted_heap_clustered_heapam_routine;
 
 typedef struct ClusteredPgPkidxBuildState
 {
@@ -103,8 +103,8 @@ typedef struct ClusteredPgZoneMapRelInfo
 	bool		probed;			/* true after first index-list scan attempt */
 } ClusteredPgZoneMapRelInfo;
 
-static HTAB	   *clustered_pg_zone_map_rels = NULL;
-static Oid		clustered_pg_pkidx_am_oid_cache = InvalidOid;
+static HTAB	   *pg_sorted_heap_zone_map_rels = NULL;
+static Oid		pg_sorted_heap_pkidx_am_oid_cache = InvalidOid;
 
 /* Sort helper for multi_insert key grouping */
 typedef struct ClusteredPgMultiInsertKeySlot
@@ -115,12 +115,12 @@ typedef struct ClusteredPgMultiInsertKeySlot
 } ClusteredPgMultiInsertKeySlot;
 
 /* Saved original heap callbacks for delegation */
-static void (*clustered_pg_heap_tuple_insert_orig)(Relation rel,
+static void (*pg_sorted_heap_heap_tuple_insert_orig)(Relation rel,
 												   TupleTableSlot *slot,
 												   CommandId cid,
 												   int options,
 												   struct BulkInsertStateData *bistate) = NULL;
-static void (*clustered_pg_heap_multi_insert_orig)(Relation rel,
+static void (*pg_sorted_heap_heap_multi_insert_orig)(Relation rel,
 												   TupleTableSlot **slots,
 												   int nslots,
 												   CommandId cid,
@@ -128,41 +128,43 @@ static void (*clustered_pg_heap_multi_insert_orig)(Relation rel,
 												   struct BulkInsertStateData *bistate) = NULL;
 
 
-static bool clustered_pg_pkidx_int_key_to_int64(Datum value, Oid valueType,
+static bool pg_sorted_heap_pkidx_int_key_to_int64(Datum value, Oid valueType,
 												int64 *minor_key);
-static ClusteredPgZoneMapRelInfo *clustered_pg_zone_map_get_relinfo(Relation rel);
-static void clustered_pg_zone_map_invalidate(Oid relid);
-static void clustered_pg_relcache_callback(Datum arg, Oid relid);
-static void clustered_pg_clustered_heap_tuple_insert(Relation rel,
+static ClusteredPgZoneMapRelInfo *pg_sorted_heap_zone_map_get_relinfo(Relation rel);
+static void pg_sorted_heap_zone_map_invalidate(Oid relid);
+static void pg_sorted_heap_relcache_callback(Datum arg, Oid relid);
+static void pg_sorted_heap_clustered_heap_tuple_insert(Relation rel,
 													TupleTableSlot *slot,
 													CommandId cid, int options,
 													struct BulkInsertStateData *bistate);
-static void clustered_pg_clustered_heap_multi_insert(Relation rel,
+static void pg_sorted_heap_clustered_heap_multi_insert(Relation rel,
 													TupleTableSlot **slots,
 													int nslots,
 													CommandId cid, int options,
 													struct BulkInsertStateData *bistate);
-static int clustered_pg_multi_insert_key_cmp(const void *a, const void *b);
+static int pg_sorted_heap_multi_insert_key_cmp(const void *a, const void *b);
 
-static void clustered_pg_pack_u64_be(uint8_t *dst, uint64 src);
-static uint64 clustered_pg_unpack_u64_be(const uint8_t *src);
-static void clustered_pg_validate_locator_len(bytea *locator);
-static bool clustered_pg_pkidx_insert(Relation indexRelation, Datum *values,
+static void pg_sorted_heap_pack_u64_be(uint8_t *dst, uint64 src);
+static uint64 pg_sorted_heap_unpack_u64_be(const uint8_t *src);
+static void pg_sorted_heap_validate_locator_len(bytea *locator);
+static bool pg_sorted_heap_pkidx_insert(Relation indexRelation, Datum *values,
 									 bool *isnull, ItemPointer heap_tid,
 									 Relation heapRelation,
 									 IndexUniqueCheck checkUnique,
 									 bool indexUnchanged, IndexInfo *indexInfo);
-static CompareType clustered_pg_pkidx_translate_strategy(StrategyNumber strategy,
+#if PG_VERSION_NUM >= 180000
+static CompareType pg_sorted_heap_pkidx_translate_strategy(StrategyNumber strategy,
 													 Oid opfamily);
-static StrategyNumber clustered_pg_pkidx_translate_cmptype(CompareType cmptype,
+static StrategyNumber pg_sorted_heap_pkidx_translate_cmptype(CompareType cmptype,
 													 Oid opfamily);
-static void clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
+#endif
+static void pg_sorted_heap_clustered_heap_relation_set_new_filelocator(Relation rel,
 														const RelFileLocator *rlocator,
 														char persistence,
 														TransactionId *freezeXid,
 														MultiXactId *minmulti);
-static void clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel);
-static double clustered_pg_clustered_heap_index_build_range_scan(
+static void pg_sorted_heap_clustered_heap_relation_nontransactional_truncate(Relation rel);
+static double pg_sorted_heap_clustered_heap_index_build_range_scan(
 	Relation tableRelation,
 	Relation indexRelation,
 	IndexInfo *indexInfo,
@@ -174,15 +176,15 @@ static double clustered_pg_clustered_heap_index_build_range_scan(
 	IndexBuildCallback callback,
 	void *callback_state,
 	TableScanDesc scan);
-static void clustered_pg_clustered_heap_index_validate_scan(
+static void pg_sorted_heap_clustered_heap_index_validate_scan(
 	Relation tableRelation,
 	Relation indexRelation,
 	IndexInfo *indexInfo,
 	Snapshot snapshot,
 	ValidateIndexState *state);
-static void clustered_pg_clustered_heap_relation_copy_data(Relation rel,
+static void pg_sorted_heap_clustered_heap_relation_copy_data(Relation rel,
 														const RelFileLocator *newrlocator);
-static void clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
+static void pg_sorted_heap_clustered_heap_relation_copy_for_cluster(Relation OldTable,
 															 Relation NewTable,
 															 Relation OldIndex,
 															 bool use_sort,
@@ -192,12 +194,12 @@ static void clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTa
 															 double *num_tuples,
 															 double *tups_vacuumed,
 															 double *tups_recently_dead);
-static void clustered_pg_clustered_heap_init_tableam_routine(void);
+static void pg_sorted_heap_clustered_heap_init_tableam_routine(void);
 
 
 
 static void
-clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
+pg_sorted_heap_clustered_heap_relation_set_new_filelocator(Relation rel,
 														const RelFileLocator *rlocator,
 														char persistence,
 														TransactionId *freezeXid,
@@ -212,11 +214,11 @@ clustered_pg_clustered_heap_relation_set_new_filelocator(Relation rel,
 
 	heap->relation_set_new_filelocator(rel, rlocator, persistence, freezeXid, minmulti);
 
-	clustered_pg_zone_map_invalidate(RelationGetRelid(rel));
+	pg_sorted_heap_zone_map_invalidate(RelationGetRelid(rel));
 }
 
 static void
-clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel)
+pg_sorted_heap_clustered_heap_relation_nontransactional_truncate(Relation rel)
 {
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
 
@@ -226,11 +228,11 @@ clustered_pg_clustered_heap_relation_nontransactional_truncate(Relation rel)
 				 errmsg("heap table access method is unavailable")));
 
 	heap->relation_nontransactional_truncate(rel);
-	clustered_pg_zone_map_invalidate(RelationGetRelid(rel));
+	pg_sorted_heap_zone_map_invalidate(RelationGetRelid(rel));
 }
 
 static double
-clustered_pg_clustered_heap_index_build_range_scan(Relation tableRelation,
+pg_sorted_heap_clustered_heap_index_build_range_scan(Relation tableRelation,
 									 Relation indexRelation,
 									 IndexInfo *indexInfo,
 									 bool allow_sync,
@@ -289,7 +291,7 @@ clustered_pg_clustered_heap_index_build_range_scan(Relation tableRelation,
 }
 
 static void
-clustered_pg_clustered_heap_index_validate_scan(Relation tableRelation,
+pg_sorted_heap_clustered_heap_index_validate_scan(Relation tableRelation,
 								Relation indexRelation,
 								IndexInfo *indexInfo,
 								Snapshot snapshot,
@@ -334,7 +336,7 @@ clustered_pg_clustered_heap_index_validate_scan(Relation tableRelation,
 }
 
 static void
-clustered_pg_clustered_heap_relation_copy_data(Relation rel,
+pg_sorted_heap_clustered_heap_relation_copy_data(Relation rel,
 								   const RelFileLocator *newrlocator)
 {
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
@@ -345,11 +347,11 @@ clustered_pg_clustered_heap_relation_copy_data(Relation rel,
 				 errmsg("heap table access method is unavailable")));
 
 	heap->relation_copy_data(rel, newrlocator);
-	clustered_pg_zone_map_invalidate(RelationGetRelid(rel));
+	pg_sorted_heap_zone_map_invalidate(RelationGetRelid(rel));
 }
 
 static void
-clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
+pg_sorted_heap_clustered_heap_relation_copy_for_cluster(Relation OldTable,
 													Relation NewTable,
 													Relation OldIndex,
 													bool use_sort,
@@ -377,7 +379,7 @@ clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
 									num_tuples,
 									tups_vacuumed,
 									tups_recently_dead);
-	clustered_pg_zone_map_invalidate(RelationGetRelid(OldTable));
+	pg_sorted_heap_zone_map_invalidate(RelationGetRelid(OldTable));
 }
 
 /* Maximum distinct keys tracked per relation before resetting zone map */
@@ -402,21 +404,21 @@ clustered_pg_clustered_heap_relation_copy_for_cluster(Relation OldTable,
  * stale block references after physical storage changes.
  */
 static void
-clustered_pg_zone_map_invalidate(Oid relid)
+pg_sorted_heap_zone_map_invalidate(Oid relid)
 {
 	ClusteredPgZoneMapRelInfo *info;
 
-	if (clustered_pg_zone_map_rels == NULL)
+	if (pg_sorted_heap_zone_map_rels == NULL)
 		return;
 
-	info = hash_search(clustered_pg_zone_map_rels, &relid, HASH_FIND, NULL);
+	info = hash_search(pg_sorted_heap_zone_map_rels, &relid, HASH_FIND, NULL);
 	if (info != NULL)
 	{
 		if (info->block_map != NULL)
 			hash_destroy(info->block_map);
 		info->block_map = NULL;
 		info->initialized = false;
-		hash_search(clustered_pg_zone_map_rels, &relid, HASH_REMOVE, NULL);
+		hash_search(pg_sorted_heap_zone_map_rels, &relid, HASH_REMOVE, NULL);
 	}
 }
 
@@ -425,14 +427,14 @@ clustered_pg_zone_map_invalidate(Oid relid)
  * newly created clustered_pk_index indexes are discovered on next insert.
  */
 static void
-clustered_pg_relcache_callback(Datum arg, Oid relid)
+pg_sorted_heap_relcache_callback(Datum arg, Oid relid)
 {
-	if (clustered_pg_zone_map_rels == NULL)
+	if (pg_sorted_heap_zone_map_rels == NULL)
 		return;
 
 	if (OidIsValid(relid))
 	{
-		clustered_pg_zone_map_invalidate(relid);
+		pg_sorted_heap_zone_map_invalidate(relid);
 	}
 	else
 	{
@@ -440,34 +442,34 @@ clustered_pg_relcache_callback(Datum arg, Oid relid)
 		HASH_SEQ_STATUS status;
 		ClusteredPgZoneMapRelInfo *entry;
 
-		hash_seq_init(&status, clustered_pg_zone_map_rels);
+		hash_seq_init(&status, pg_sorted_heap_zone_map_rels);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			if (entry->block_map != NULL)
 				hash_destroy(entry->block_map);
 		}
-		hash_destroy(clustered_pg_zone_map_rels);
-		clustered_pg_zone_map_rels = NULL;
+		hash_destroy(pg_sorted_heap_zone_map_rels);
+		pg_sorted_heap_zone_map_rels = NULL;
 	}
 }
 
 static Oid
-clustered_pg_get_pkidx_am_oid(void)
+pg_sorted_heap_get_pkidx_am_oid(void)
 {
-	if (!OidIsValid(clustered_pg_pkidx_am_oid_cache))
-		clustered_pg_pkidx_am_oid_cache = get_am_oid("clustered_pk_index", true);
-	return clustered_pg_pkidx_am_oid_cache;
+	if (!OidIsValid(pg_sorted_heap_pkidx_am_oid_cache))
+		pg_sorted_heap_pkidx_am_oid_cache = get_am_oid("clustered_pk_index", true);
+	return pg_sorted_heap_pkidx_am_oid_cache;
 }
 
 static ClusteredPgZoneMapRelInfo *
-clustered_pg_zone_map_get_relinfo(Relation rel)
+pg_sorted_heap_zone_map_get_relinfo(Relation rel)
 {
 	Oid			relid = RelationGetRelid(rel);
 	ClusteredPgZoneMapRelInfo *info;
 	bool		found;
 
 	/* Create top-level hash on first call */
-	if (clustered_pg_zone_map_rels == NULL)
+	if (pg_sorted_heap_zone_map_rels == NULL)
 	{
 		HASHCTL		ctl;
 
@@ -475,7 +477,7 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(ClusteredPgZoneMapRelInfo);
 		ctl.hcxt = TopMemoryContext;
-		clustered_pg_zone_map_rels = hash_create("clustered_pg zone map rels",
+		pg_sorted_heap_zone_map_rels = hash_create("pg_sorted_heap zone map rels",
 												 16, &ctl,
 												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
@@ -485,19 +487,19 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 	 * CREATE/DROP cycles), destroy and recreate the top-level HTAB.
 	 * This also cleans up zombie entries for dropped tables.
 	 */
-	if (hash_get_num_entries(clustered_pg_zone_map_rels) >=
+	if (hash_get_num_entries(pg_sorted_heap_zone_map_rels) >=
 		CLUSTERED_PG_ZONE_MAP_MAX_RELS)
 	{
 		HASH_SEQ_STATUS status;
 		ClusteredPgZoneMapRelInfo *entry;
 
-		hash_seq_init(&status, clustered_pg_zone_map_rels);
+		hash_seq_init(&status, pg_sorted_heap_zone_map_rels);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			if (entry->block_map != NULL)
 				hash_destroy(entry->block_map);
 		}
-		hash_destroy(clustered_pg_zone_map_rels);
+		hash_destroy(pg_sorted_heap_zone_map_rels);
 		{
 			HASHCTL		ctl;
 
@@ -505,13 +507,13 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 			ctl.keysize = sizeof(Oid);
 			ctl.entrysize = sizeof(ClusteredPgZoneMapRelInfo);
 			ctl.hcxt = TopMemoryContext;
-			clustered_pg_zone_map_rels = hash_create("clustered_pg zone map rels",
+			pg_sorted_heap_zone_map_rels = hash_create("pg_sorted_heap zone map rels",
 													 16, &ctl,
 													 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 		}
 	}
 
-	info = hash_search(clustered_pg_zone_map_rels, &relid, HASH_ENTER, &found);
+	info = hash_search(pg_sorted_heap_zone_map_rels, &relid, HASH_ENTER, &found);
 	if (!found)
 	{
 		info->relid = relid;
@@ -524,7 +526,7 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 
 	if (!info->initialized && !info->probed)
 	{
-		Oid			pkidx_am = clustered_pg_get_pkidx_am_oid();
+		Oid			pkidx_am = pg_sorted_heap_get_pkidx_am_oid();
 		List	   *indexlist;
 		ListCell   *lc;
 
@@ -556,7 +558,7 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
 					ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
 					ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
 					ctl.hcxt = TopMemoryContext;
-					info->block_map = hash_create("clustered_pg zone block map",
+					info->block_map = hash_create("pg_sorted_heap zone block map",
 												  256, &ctl,
 												  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 					info->initialized = true;
@@ -578,7 +580,7 @@ clustered_pg_zone_map_get_relinfo(Relation rel)
  * high-cardinality workloads.
  */
 static void
-clustered_pg_zone_map_check_overflow(ClusteredPgZoneMapRelInfo *relinfo)
+pg_sorted_heap_zone_map_check_overflow(ClusteredPgZoneMapRelInfo *relinfo)
 {
 	if (relinfo->block_map != NULL &&
 		hash_get_num_entries(relinfo->block_map) >=
@@ -591,14 +593,14 @@ clustered_pg_zone_map_check_overflow(ClusteredPgZoneMapRelInfo *relinfo)
 		ctl.keysize = sizeof(ClusteredPgZoneMapBlockKey);
 		ctl.entrysize = sizeof(ClusteredPgZoneMapBlockEntry);
 		ctl.hcxt = TopMemoryContext;
-		relinfo->block_map = hash_create("clustered_pg zone block map",
+		relinfo->block_map = hash_create("pg_sorted_heap zone block map",
 										 256, &ctl,
 										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
 }
 
 static void
-clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
+pg_sorted_heap_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 										 CommandId cid, int options,
 										 struct BulkInsertStateData *bistate)
 {
@@ -606,7 +608,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 	int64		minor_key = 0;
 	bool		key_valid = false;
 
-	relinfo = clustered_pg_zone_map_get_relinfo(rel);
+	relinfo = pg_sorted_heap_zone_map_get_relinfo(rel);
 
 	if (relinfo != NULL && relinfo->initialized)
 	{
@@ -615,7 +617,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 
 		val = slot_getattr(slot, relinfo->key_attnum, &isnull);
 		if (!isnull &&
-			clustered_pg_pkidx_int_key_to_int64(val, relinfo->key_typid,
+			pg_sorted_heap_pkidx_int_key_to_int64(val, relinfo->key_typid,
 												&minor_key))
 		{
 			ClusteredPgZoneMapBlockKey mapkey;
@@ -642,7 +644,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 	}
 
 	/* Delegate to standard heap insert */
-	clustered_pg_heap_tuple_insert_orig(rel, slot, cid, options, bistate);
+	pg_sorted_heap_heap_tuple_insert_orig(rel, slot, cid, options, bistate);
 
 	/* Record actual placement in zone map */
 	if (key_valid && relinfo != NULL && relinfo->block_map != NULL)
@@ -652,7 +654,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 		ClusteredPgZoneMapBlockEntry *entry;
 		bool			found;
 
-		clustered_pg_zone_map_check_overflow(relinfo);
+		pg_sorted_heap_zone_map_check_overflow(relinfo);
 
 		mapkey.minor_key = minor_key;
 		entry = hash_search(relinfo->block_map, &mapkey, HASH_ENTER, &found);
@@ -661,7 +663,7 @@ clustered_pg_clustered_heap_tuple_insert(Relation rel, TupleTableSlot *slot,
 }
 
 static int
-clustered_pg_multi_insert_key_cmp(const void *a, const void *b)
+pg_sorted_heap_multi_insert_key_cmp(const void *a, const void *b)
 {
 	const ClusteredPgMultiInsertKeySlot *ka = (const ClusteredPgMultiInsertKeySlot *) a;
 	const ClusteredPgMultiInsertKeySlot *kb = (const ClusteredPgMultiInsertKeySlot *) b;
@@ -684,7 +686,7 @@ clustered_pg_multi_insert_key_cmp(const void *a, const void *b)
 #define CLUSTERED_PG_MULTI_INSERT_GROUP_THRESHOLD 64
 
 static void
-clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
+pg_sorted_heap_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 										 int nslots, CommandId cid, int options,
 										 struct BulkInsertStateData *bistate)
 {
@@ -697,12 +699,12 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 	int64		prev_key;
 	bool		prev_valid;
 
-	relinfo = clustered_pg_zone_map_get_relinfo(rel);
+	relinfo = pg_sorted_heap_zone_map_get_relinfo(rel);
 
 	/* No directed placement possible: delegate directly */
 	if (relinfo == NULL || !relinfo->initialized || nslots <= 0)
 	{
-		clustered_pg_heap_multi_insert_orig(rel, slots, nslots,
+		pg_sorted_heap_heap_multi_insert_orig(rel, slots, nslots,
 											cid, options, bistate);
 		return;
 	}
@@ -721,7 +723,7 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		ks[i].idx = i;
 		val = slot_getattr(slots[i], relinfo->key_attnum, &isnull);
 		if (!isnull &&
-			clustered_pg_pkidx_int_key_to_int64(val, relinfo->key_typid,
+			pg_sorted_heap_pkidx_int_key_to_int64(val, relinfo->key_typid,
 												&ks[i].key))
 			ks[i].valid = true;
 		else
@@ -769,7 +771,7 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 			}
 		}
 
-		clustered_pg_heap_multi_insert_orig(rel, slots, nslots,
+		pg_sorted_heap_heap_multi_insert_orig(rel, slots, nslots,
 											cid, options, bistate);
 
 		/*
@@ -780,10 +782,10 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		 */
 		if (relinfo->block_map != NULL)
 		{
-			clustered_pg_zone_map_check_overflow(relinfo);
+			pg_sorted_heap_zone_map_check_overflow(relinfo);
 
 			qsort(ks, nslots, sizeof(ClusteredPgMultiInsertKeySlot),
-				  clustered_pg_multi_insert_key_cmp);
+				  pg_sorted_heap_multi_insert_key_cmp);
 
 			for (i = 0; i < nslots; )
 			{
@@ -821,7 +823,7 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 
 	/* Sort by key so same-key slots are adjacent */
 	qsort(ks, nslots, sizeof(ClusteredPgMultiInsertKeySlot),
-		  clustered_pg_multi_insert_key_cmp);
+		  pg_sorted_heap_multi_insert_key_cmp);
 
 	/* Build reordered slot pointer array */
 	sorted_slots = palloc(nslots * sizeof(TupleTableSlot *));
@@ -867,7 +869,7 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 			}
 		}
 
-		clustered_pg_heap_multi_insert_orig(rel, sorted_slots + group_start,
+		pg_sorted_heap_heap_multi_insert_orig(rel, sorted_slots + group_start,
 											group_size, cid, options, bistate);
 
 		/* Record last-used block for this key in zone map */
@@ -875,7 +877,7 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 		{
 			BlockNumber last_block;
 
-			clustered_pg_zone_map_check_overflow(relinfo);
+			pg_sorted_heap_zone_map_check_overflow(relinfo);
 
 			last_block = ItemPointerGetBlockNumber(
 				&sorted_slots[group_start + group_size - 1]->tts_tid);
@@ -899,11 +901,11 @@ clustered_pg_clustered_heap_multi_insert(Relation rel, TupleTableSlot **slots,
 }
 
 static void
-clustered_pg_clustered_heap_init_tableam_routine(void)
+pg_sorted_heap_clustered_heap_init_tableam_routine(void)
 {
 	const TableAmRoutine *heap;
 
-	if (clustered_pg_clustered_heapam_initialized)
+	if (pg_sorted_heap_clustered_heapam_initialized)
 		return;
 
 	heap = GetHeapamTableAmRoutine();
@@ -912,35 +914,35 @@ clustered_pg_clustered_heap_init_tableam_routine(void)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("heap table access method is unavailable")));
 
-	clustered_pg_clustered_heapam_routine = *heap;
-	clustered_pg_clustered_heapam_routine.type = T_TableAmRoutine;
-	clustered_pg_clustered_heapam_routine.relation_set_new_filelocator =
-		clustered_pg_clustered_heap_relation_set_new_filelocator;
-	clustered_pg_clustered_heapam_routine.relation_nontransactional_truncate =
-		clustered_pg_clustered_heap_relation_nontransactional_truncate;
-	clustered_pg_clustered_heapam_routine.index_build_range_scan =
-		clustered_pg_clustered_heap_index_build_range_scan;
-	clustered_pg_clustered_heapam_routine.index_validate_scan =
-		clustered_pg_clustered_heap_index_validate_scan;
-	clustered_pg_clustered_heapam_routine.relation_copy_data =
-		clustered_pg_clustered_heap_relation_copy_data;
-	clustered_pg_clustered_heapam_routine.relation_copy_for_cluster =
-		clustered_pg_clustered_heap_relation_copy_for_cluster;
+	pg_sorted_heap_clustered_heapam_routine = *heap;
+	pg_sorted_heap_clustered_heapam_routine.type = T_TableAmRoutine;
+	pg_sorted_heap_clustered_heapam_routine.relation_set_new_filelocator =
+		pg_sorted_heap_clustered_heap_relation_set_new_filelocator;
+	pg_sorted_heap_clustered_heapam_routine.relation_nontransactional_truncate =
+		pg_sorted_heap_clustered_heap_relation_nontransactional_truncate;
+	pg_sorted_heap_clustered_heapam_routine.index_build_range_scan =
+		pg_sorted_heap_clustered_heap_index_build_range_scan;
+	pg_sorted_heap_clustered_heapam_routine.index_validate_scan =
+		pg_sorted_heap_clustered_heap_index_validate_scan;
+	pg_sorted_heap_clustered_heapam_routine.relation_copy_data =
+		pg_sorted_heap_clustered_heap_relation_copy_data;
+	pg_sorted_heap_clustered_heapam_routine.relation_copy_for_cluster =
+		pg_sorted_heap_clustered_heap_relation_copy_for_cluster;
 
 	/* Directed placement: override insert paths to steer rows by key */
-	clustered_pg_heap_tuple_insert_orig = heap->tuple_insert;
-	clustered_pg_clustered_heapam_routine.tuple_insert =
-		clustered_pg_clustered_heap_tuple_insert;
+	pg_sorted_heap_heap_tuple_insert_orig = heap->tuple_insert;
+	pg_sorted_heap_clustered_heapam_routine.tuple_insert =
+		pg_sorted_heap_clustered_heap_tuple_insert;
 
-	clustered_pg_heap_multi_insert_orig = heap->multi_insert;
-	clustered_pg_clustered_heapam_routine.multi_insert =
-		clustered_pg_clustered_heap_multi_insert;
+	pg_sorted_heap_heap_multi_insert_orig = heap->multi_insert;
+	pg_sorted_heap_clustered_heapam_routine.multi_insert =
+		pg_sorted_heap_clustered_heap_multi_insert;
 
-	clustered_pg_clustered_heapam_initialized = true;
+	pg_sorted_heap_clustered_heapam_initialized = true;
 }
 
 static bool
-clustered_pg_pkidx_int_key_to_int64(Datum value, Oid valueType, int64 *minor_key)
+pg_sorted_heap_pkidx_int_key_to_int64(Datum value, Oid valueType, int64 *minor_key)
 {
 	switch (valueType)
 	{
@@ -959,7 +961,7 @@ clustered_pg_pkidx_int_key_to_int64(Datum value, Oid valueType, int64 *minor_key
 }
 
 static bool
-clustered_pg_pkidx_extract_minor_key(Relation indexRelation, Datum *values,
+pg_sorted_heap_pkidx_extract_minor_key(Relation indexRelation, Datum *values,
 									bool *isnull, int64 *minor_key)
 {
 	TupleDesc	tupdesc;
@@ -976,13 +978,13 @@ clustered_pg_pkidx_extract_minor_key(Relation indexRelation, Datum *values,
 	if (isnull[0])
 		return false;
 
-	return clustered_pg_pkidx_int_key_to_int64(values[0],
+	return pg_sorted_heap_pkidx_int_key_to_int64(values[0],
 											  TupleDescAttr(tupdesc, 0)->atttypid,
 											  minor_key);
 }
 
 static IndexBulkDeleteResult *
-clustered_pg_pkidx_init_bulkdelete_stats(IndexVacuumInfo *info,
+pg_sorted_heap_pkidx_init_bulkdelete_stats(IndexVacuumInfo *info,
 										IndexBulkDeleteResult *stats)
 {
 	IndexBulkDeleteResult *result = stats;
@@ -1001,7 +1003,7 @@ clustered_pg_pkidx_init_bulkdelete_stats(IndexVacuumInfo *info,
 }
 
 static void
-clustered_pg_pkidx_build_callback(Relation indexRelation, ItemPointer heap_tid,
+pg_sorted_heap_pkidx_build_callback(Relation indexRelation, ItemPointer heap_tid,
                                  Datum *values, bool *isnull, bool tupleIsAlive,
                                  void *state)
 {
@@ -1012,17 +1014,17 @@ clustered_pg_pkidx_build_callback(Relation indexRelation, ItemPointer heap_tid,
 		return;
 	if (!tupleIsAlive)
 		return;
-	if (!clustered_pg_pkidx_extract_minor_key(indexRelation, values, isnull, &minor_key))
+	if (!pg_sorted_heap_pkidx_extract_minor_key(indexRelation, values, isnull, &minor_key))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("clustered_pg build path does not support this index key"),
+				 errmsg("pg_sorted_heap build path does not support this index key"),
 				 errhint("clustered_pk_index supports exactly one key attribute of types int2, int4 or int8.")));
 	buildstate->index_tuples++;
 }
 
 
 static void
-clustered_pg_pack_u64_be(uint8_t *dst, uint64 src)
+pg_sorted_heap_pack_u64_be(uint8_t *dst, uint64 src)
 {
 	int			i;
 
@@ -1031,7 +1033,7 @@ clustered_pg_pack_u64_be(uint8_t *dst, uint64 src)
 }
 
 static uint64
-clustered_pg_unpack_u64_be(const uint8_t *src)
+pg_sorted_heap_unpack_u64_be(const uint8_t *src)
 {
 	uint64		result = 0;
 	int			i;
@@ -1042,7 +1044,7 @@ clustered_pg_unpack_u64_be(const uint8_t *src)
 	return result;
 }
 Datum
-clustered_pg_locator_pack(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_pack(PG_FUNCTION_ARGS)
 {
 	int64		major = PG_GETARG_INT64(0);
 	int64		minor = PG_GETARG_INT64(1);
@@ -1053,14 +1055,14 @@ clustered_pg_locator_pack(PG_FUNCTION_ARGS)
 	SET_VARSIZE(locator, VARHDRSZ + (int) sizeof(ClusteredLocator));
 	payload = (uint8 *) VARDATA(locator);
 
-	clustered_pg_pack_u64_be(payload, (uint64) major);
-	clustered_pg_pack_u64_be(payload + 8, (uint64) minor);
+	pg_sorted_heap_pack_u64_be(payload, (uint64) major);
+	pg_sorted_heap_pack_u64_be(payload + 8, (uint64) minor);
 
 	PG_RETURN_BYTEA_P(locator);
 }
 
 Datum
-clustered_pg_locator_pack_int8(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_pack_int8(PG_FUNCTION_ARGS)
 {
 	int64		pk = PG_GETARG_INT64(0);
 	bytea	   *locator;
@@ -1070,14 +1072,14 @@ clustered_pg_locator_pack_int8(PG_FUNCTION_ARGS)
 	SET_VARSIZE(locator, VARHDRSZ + (int) sizeof(ClusteredLocator));
 	payload = (uint8 *) VARDATA(locator);
 
-	clustered_pg_pack_u64_be(payload, 0);
-	clustered_pg_pack_u64_be(payload + 8, (uint64) pk);
+	pg_sorted_heap_pack_u64_be(payload, 0);
+	pg_sorted_heap_pack_u64_be(payload + 8, (uint64) pk);
 
 	PG_RETURN_BYTEA_P(locator);
 }
 
 static void
-clustered_pg_validate_locator_len(bytea *locator)
+pg_sorted_heap_validate_locator_len(bytea *locator)
 {
 	if (VARSIZE_ANY_EXHDR(locator) != (int) sizeof(ClusteredLocator))
 		ereport(ERROR,
@@ -1087,27 +1089,27 @@ clustered_pg_validate_locator_len(bytea *locator)
 }
 
 Datum
-clustered_pg_locator_major(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_major(PG_FUNCTION_ARGS)
 {
 	bytea	   *locator = PG_GETARG_BYTEA_P(0);
 	const uint8 *payload = (const uint8 *) VARDATA_ANY(locator);
 
-	clustered_pg_validate_locator_len(locator);
-	PG_RETURN_INT64((int64) clustered_pg_unpack_u64_be(payload));
+	pg_sorted_heap_validate_locator_len(locator);
+	PG_RETURN_INT64((int64) pg_sorted_heap_unpack_u64_be(payload));
 }
 
 Datum
-clustered_pg_locator_minor(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_minor(PG_FUNCTION_ARGS)
 {
 	bytea	   *locator = PG_GETARG_BYTEA_P(0);
 	const uint8 *payload = (const uint8 *) VARDATA_ANY(locator);
 
-	clustered_pg_validate_locator_len(locator);
-	PG_RETURN_INT64((int64) clustered_pg_unpack_u64_be(payload + 8));
+	pg_sorted_heap_validate_locator_len(locator);
+	PG_RETURN_INT64((int64) pg_sorted_heap_unpack_u64_be(payload + 8));
 }
 
 Datum
-clustered_pg_locator_to_hex(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_to_hex(PG_FUNCTION_ARGS)
 {
 	bytea	   *locator = PG_GETARG_BYTEA_P(0);
 	uint64		major_key;
@@ -1115,19 +1117,20 @@ clustered_pg_locator_to_hex(PG_FUNCTION_ARGS)
 	const uint8 *payload = (const uint8 *) VARDATA_ANY(locator);
 	char	   *text_repr;
 
-	clustered_pg_validate_locator_len(locator);
+	pg_sorted_heap_validate_locator_len(locator);
 
-	major_key = clustered_pg_unpack_u64_be(payload);
-	minor_key = clustered_pg_unpack_u64_be(payload + 8);
+	major_key = pg_sorted_heap_unpack_u64_be(payload);
+	minor_key = pg_sorted_heap_unpack_u64_be(payload + 8);
 
 	text_repr = psprintf("%016" PRIX64 ":%016" PRIX64,
-						 major_key, minor_key);
+						 (unsigned long long) major_key,
+						 (unsigned long long) minor_key);
 
 	PG_RETURN_TEXT_P(cstring_to_text(text_repr));
 }
 
 Datum
-clustered_pg_locator_cmp(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_cmp(PG_FUNCTION_ARGS)
 {
 	bytea	   *a = PG_GETARG_BYTEA_P(0);
 	bytea	   *b = PG_GETARG_BYTEA_P(1);
@@ -1136,13 +1139,13 @@ clustered_pg_locator_cmp(PG_FUNCTION_ARGS)
 	int64		a_major, a_minor;
 	int64		b_major, b_minor;
 
-	clustered_pg_validate_locator_len(a);
-	clustered_pg_validate_locator_len(b);
+	pg_sorted_heap_validate_locator_len(a);
+	pg_sorted_heap_validate_locator_len(b);
 
-	a_major = (int64) clustered_pg_unpack_u64_be(pa);
-	a_minor = (int64) clustered_pg_unpack_u64_be(pa + 8);
-	b_major = (int64) clustered_pg_unpack_u64_be(pb);
-	b_minor = (int64) clustered_pg_unpack_u64_be(pb + 8);
+	a_major = (int64) pg_sorted_heap_unpack_u64_be(pa);
+	a_minor = (int64) pg_sorted_heap_unpack_u64_be(pa + 8);
+	b_major = (int64) pg_sorted_heap_unpack_u64_be(pb);
+	b_minor = (int64) pg_sorted_heap_unpack_u64_be(pb + 8);
 
 	if (a_major < b_major)
 		PG_RETURN_INT32(-1);
@@ -1157,7 +1160,7 @@ clustered_pg_locator_cmp(PG_FUNCTION_ARGS)
 }
 
 Datum
-clustered_pg_locator_advance_major(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_advance_major(PG_FUNCTION_ARGS)
 {
 	bytea	   *locator = PG_GETARG_BYTEA_P(0);
 	int64		delta = PG_GETARG_INT64(1);
@@ -1167,10 +1170,10 @@ clustered_pg_locator_advance_major(PG_FUNCTION_ARGS)
 	bytea	   *moved;
 	uint8	   *out;
 
-	clustered_pg_validate_locator_len(locator);
+	pg_sorted_heap_validate_locator_len(locator);
 
-	major = clustered_pg_unpack_u64_be(payload);
-	minor = clustered_pg_unpack_u64_be(payload + 8);
+	major = pg_sorted_heap_unpack_u64_be(payload);
+	minor = pg_sorted_heap_unpack_u64_be(payload + 8);
 
 	{
 		int64	signed_major = (int64) major;
@@ -1187,14 +1190,14 @@ clustered_pg_locator_advance_major(PG_FUNCTION_ARGS)
 	moved = palloc(VARHDRSZ + (int) sizeof(ClusteredLocator));
 	SET_VARSIZE(moved, VARHDRSZ + (int) sizeof(ClusteredLocator));
 	out = (uint8 *) VARDATA(moved);
-	clustered_pg_pack_u64_be(out, major);
-	clustered_pg_pack_u64_be(out + 8, minor);
+	pg_sorted_heap_pack_u64_be(out, major);
+	pg_sorted_heap_pack_u64_be(out + 8, minor);
 
 	PG_RETURN_BYTEA_P(moved);
 }
 
 Datum
-clustered_pg_locator_next_minor(PG_FUNCTION_ARGS)
+pg_sorted_heap_locator_next_minor(PG_FUNCTION_ARGS)
 {
 	bytea	   *locator = PG_GETARG_BYTEA_P(0);
 	int64		delta = PG_GETARG_INT64(1);
@@ -1205,10 +1208,10 @@ clustered_pg_locator_next_minor(PG_FUNCTION_ARGS)
 	bytea	   *moved;
 	uint8	   *out;
 
-	clustered_pg_validate_locator_len(locator);
+	pg_sorted_heap_validate_locator_len(locator);
 
-	major = clustered_pg_unpack_u64_be(payload);
-	minor = (int64) clustered_pg_unpack_u64_be(payload + 8);
+	major = pg_sorted_heap_unpack_u64_be(payload);
+	minor = (int64) pg_sorted_heap_unpack_u64_be(payload + 8);
 
 	next_minor = minor + delta;
 	if ((delta > 0 && next_minor < minor) ||
@@ -1220,8 +1223,8 @@ clustered_pg_locator_next_minor(PG_FUNCTION_ARGS)
 	moved = palloc(VARHDRSZ + (int) sizeof(ClusteredLocator));
 	SET_VARSIZE(moved, VARHDRSZ + (int) sizeof(ClusteredLocator));
 	out = (uint8 *) VARDATA(moved);
-	clustered_pg_pack_u64_be(out, major);
-	clustered_pg_pack_u64_be(out + 8, (uint64) next_minor);
+	pg_sorted_heap_pack_u64_be(out, major);
+	pg_sorted_heap_pack_u64_be(out + 8, (uint64) next_minor);
 
 	PG_RETURN_BYTEA_P(moved);
 }
@@ -1230,30 +1233,30 @@ clustered_pg_locator_next_minor(PG_FUNCTION_ARGS)
  * Simple extension identity.
  */
 Datum
-clustered_pg_version(PG_FUNCTION_ARGS)
+pg_sorted_heap_version(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text("clustered_pg " CLUSTERED_PG_EXTENSION_VERSION));
+	PG_RETURN_TEXT_P(cstring_to_text("pg_sorted_heap " CLUSTERED_PG_EXTENSION_VERSION));
 }
 
 Datum
-clustered_pg_observability(PG_FUNCTION_ARGS)
+pg_sorted_heap_observability(PG_FUNCTION_ARGS)
 {
 	char		text_buf[512];
 
-	clustered_pg_stats.observability_calls++;
+	pg_sorted_heap_stats.observability_calls++;
 
 	snprintf(text_buf, sizeof(text_buf),
-			 "clustered_pg=%s api=%d "
+			 "pg_sorted_heap=%s api=%d "
 			 "counters={observability=%" PRIu64 ",costestimate=%" PRIu64
 			 ",index_inserts=%" PRIu64 ",insert_errors=%" PRIu64
 			 ",vacuumcleanup=%" PRIu64 "}",
 			 CLUSTERED_PG_EXTENSION_VERSION,
 			 CLUSTERED_PG_OBS_API_VERSION,
-			 clustered_pg_stats.observability_calls,
-			 clustered_pg_stats.costestimate_calls,
-			 clustered_pg_stats.insert_calls,
-			 clustered_pg_stats.insert_errors,
-			 clustered_pg_stats.vacuumcleanup_calls);
+			 (unsigned long long) pg_sorted_heap_stats.observability_calls,
+			 (unsigned long long) pg_sorted_heap_stats.costestimate_calls,
+			 (unsigned long long) pg_sorted_heap_stats.insert_calls,
+			 (unsigned long long) pg_sorted_heap_stats.insert_errors,
+			 (unsigned long long) pg_sorted_heap_stats.vacuumcleanup_calls);
 
 	PG_RETURN_TEXT_P(cstring_to_text(text_buf));
 }
@@ -1265,14 +1268,14 @@ clustered_pg_observability(PG_FUNCTION_ARGS)
  * AM entry point so future locator-aware hooks can be layered in safely.
  */
 Datum
-clustered_pg_tableam_handler(PG_FUNCTION_ARGS)
+pg_sorted_heap_tableam_handler(PG_FUNCTION_ARGS)
 {
 	/*
 	 * Expose clustered_heap wrapper routine: core tuple semantics still delegate
 	 * to heap, while clustered metadata lifecycle hooks stay active.
 	 */
-	clustered_pg_clustered_heap_init_tableam_routine();
-	PG_RETURN_POINTER(&clustered_pg_clustered_heapam_routine);
+	pg_sorted_heap_clustered_heap_init_tableam_routine();
+	PG_RETURN_POINTER(&pg_sorted_heap_clustered_heapam_routine);
 }
 
 /*
@@ -1281,7 +1284,7 @@ clustered_pg_tableam_handler(PG_FUNCTION_ARGS)
  */
 
 static IndexBuildResult *
-clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
+pg_sorted_heap_pkidx_build(Relation heapRelation, Relation indexRelation,
 						IndexInfo *indexInfo)
 {
 	ClusteredPgPkidxBuildState buildstate;
@@ -1316,7 +1319,7 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 													indexInfo,
 												(indexInfo == NULL || !indexInfo->ii_Concurrent),
 													false,
-													clustered_pg_pkidx_build_callback,
+													pg_sorted_heap_pkidx_build_callback,
 													(void *) &buildstate,
 													NULL);
 	result->index_tuples = (double) buildstate.index_tuples;
@@ -1325,14 +1328,14 @@ clustered_pg_pkidx_build(Relation heapRelation, Relation indexRelation,
 }
 
 static void
-clustered_pg_pkidx_buildempty(Relation indexRelation)
+pg_sorted_heap_pkidx_buildempty(Relation indexRelation)
 {
 	/* No-op: metadata lives in zone map (in-memory) */
 	(void) indexRelation;
 }
 
 static bool
-clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
+pg_sorted_heap_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 					ItemPointer heap_tid, Relation heapRelation,
 					IndexUniqueCheck checkUnique, bool indexUnchanged,
 					IndexInfo *indexInfo)
@@ -1341,7 +1344,7 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 
 	(void)checkUnique;
 	(void)indexUnchanged;
-	clustered_pg_stats.insert_calls++;
+	pg_sorted_heap_stats.insert_calls++;
 
 	if (indexInfo == NULL || indexInfo->ii_NumIndexAttrs != 1)
 		ereport(ERROR,
@@ -1349,7 +1352,7 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 				 errmsg("clustered_pk_index supports exactly one key attribute"),
 				 errhint("Create a single-column index for the first iteration.")));
 
-	if (!clustered_pg_pkidx_extract_minor_key(indexRelation, values, isnull, &minor_key))
+	if (!pg_sorted_heap_pkidx_extract_minor_key(indexRelation, values, isnull, &minor_key))
 			ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
 						 errmsg("clustered_pk_index currently supports only int2/int4/int8 index key types"),
 						 errdetail("Index key is NULL, missing, or has unsupported type.")));
@@ -1358,29 +1361,29 @@ clustered_pg_pkidx_insert(Relation indexRelation, Datum *values, bool *isnull,
 }
 
 static IndexBulkDeleteResult *
-clustered_pg_pkidx_bulkdelete(IndexVacuumInfo *info,
+pg_sorted_heap_pkidx_bulkdelete(IndexVacuumInfo *info,
 						IndexBulkDeleteResult *stats,
 						IndexBulkDeleteCallback callback,
 						void *callback_state)
 {
 	(void)callback;
 	(void)callback_state;
-	return clustered_pg_pkidx_init_bulkdelete_stats(info, stats);
+	return pg_sorted_heap_pkidx_init_bulkdelete_stats(info, stats);
 }
 
 static IndexBulkDeleteResult *
-clustered_pg_pkidx_vacuumcleanup(IndexVacuumInfo *info,
+pg_sorted_heap_pkidx_vacuumcleanup(IndexVacuumInfo *info,
 							IndexBulkDeleteResult *stats)
 {
 	if (info != NULL && !info->analyze_only && info->index != NULL &&
 		info->index->rd_index != NULL)
-		clustered_pg_stats.vacuumcleanup_calls++;
+		pg_sorted_heap_stats.vacuumcleanup_calls++;
 
-	return clustered_pg_pkidx_init_bulkdelete_stats(info, stats);
+	return pg_sorted_heap_pkidx_init_bulkdelete_stats(info, stats);
 }
 
 static void
-clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path,
+pg_sorted_heap_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path,
 							double loop_count, Cost *startup_cost,
 							Cost *total_cost, Selectivity *selectivity,
 							double *correlation, double *pages)
@@ -1389,7 +1392,7 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 	 * This index AM does not support scans (amgettuple=NULL, amgetbitmap=NULL).
 	 * Return prohibitively high cost so the planner never selects it.
 	 */
-	clustered_pg_stats.costestimate_calls++;
+	pg_sorted_heap_stats.costestimate_calls++;
 
 	(void) root;
 	(void) loop_count;
@@ -1402,14 +1405,15 @@ clustered_pg_pkidx_costestimate(struct PlannerInfo *root, struct IndexPath *path
 }
 
 static bool
-clustered_pg_pkidx_validate(Oid opclassoid)
+pg_sorted_heap_pkidx_validate(Oid opclassoid)
 {
 	(void)opclassoid;
 	return true;
 }
 
+#if PG_VERSION_NUM >= 180000
 static CompareType
-clustered_pg_pkidx_translate_strategy(StrategyNumber strategy, Oid opfamily)
+pg_sorted_heap_pkidx_translate_strategy(StrategyNumber strategy, Oid opfamily)
 {
 	(void) opfamily;
 
@@ -1431,7 +1435,7 @@ clustered_pg_pkidx_translate_strategy(StrategyNumber strategy, Oid opfamily)
 }
 
 static StrategyNumber
-clustered_pg_pkidx_translate_cmptype(CompareType cmptype, Oid opfamily)
+pg_sorted_heap_pkidx_translate_cmptype(CompareType cmptype, Oid opfamily)
 {
 	(void) opfamily;
 
@@ -1451,9 +1455,10 @@ clustered_pg_pkidx_translate_cmptype(CompareType cmptype, Oid opfamily)
 			return InvalidStrategy;
 	}
 }
+#endif
 
 Datum
-clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
+pg_sorted_heap_pkidx_handler(PG_FUNCTION_ARGS)
 {
 	static const IndexAmRoutine amroutine = {
 		.type = T_IndexAmRoutine,
@@ -1461,9 +1466,11 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.amsupport = 1,
 		.amcanorder = false,
 		.amcanorderbyop = false,
+#if PG_VERSION_NUM >= 180000
 		.amcanhash = false,
 		.amconsistentequality = true,
 		.amconsistentordering = true,
+#endif
 		.amcanbackward = false,
 		.amcanunique = false,
 		.amcanmulticol = false,
@@ -1481,16 +1488,18 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.amparallelvacuumoptions = VACUUM_OPTION_NO_PARALLEL,
 		.amkeytype = InvalidOid,
 
-		.ambuild = clustered_pg_pkidx_build,
-		.ambuildempty = clustered_pg_pkidx_buildempty,
-		.aminsert = clustered_pg_pkidx_insert,
-		.ambulkdelete = clustered_pg_pkidx_bulkdelete,
-		.amvacuumcleanup = clustered_pg_pkidx_vacuumcleanup,
+		.ambuild = pg_sorted_heap_pkidx_build,
+		.ambuildempty = pg_sorted_heap_pkidx_buildempty,
+		.aminsert = pg_sorted_heap_pkidx_insert,
+		.ambulkdelete = pg_sorted_heap_pkidx_bulkdelete,
+		.amvacuumcleanup = pg_sorted_heap_pkidx_vacuumcleanup,
 		.amcanreturn = NULL,
+#if PG_VERSION_NUM >= 180000
 		.amgettreeheight = NULL,
-		.amcostestimate = clustered_pg_pkidx_costestimate,
+#endif
+		.amcostestimate = pg_sorted_heap_pkidx_costestimate,
 		.amoptions = NULL,
-		.amvalidate = clustered_pg_pkidx_validate,
+		.amvalidate = pg_sorted_heap_pkidx_validate,
 		.ambeginscan = NULL,
 		.amrescan = NULL,
 		.amgettuple = NULL,
@@ -1498,8 +1507,10 @@ clustered_pg_pkidx_handler(PG_FUNCTION_ARGS)
 		.amendscan = NULL,
 		.ammarkpos = NULL,
 		.amrestrpos = NULL,
-		.amtranslatestrategy = clustered_pg_pkidx_translate_strategy,
-		.amtranslatecmptype = clustered_pg_pkidx_translate_cmptype,
+#if PG_VERSION_NUM >= 180000
+		.amtranslatestrategy = pg_sorted_heap_pkidx_translate_strategy,
+		.amtranslatecmptype = pg_sorted_heap_pkidx_translate_cmptype,
+#endif
 	};
 	IndexAmRoutine *result;
 
@@ -1531,7 +1542,7 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved("sorted_heap");
 
-	CacheRegisterRelcacheCallback(clustered_pg_relcache_callback, (Datum) 0);
+	CacheRegisterRelcacheCallback(pg_sorted_heap_relcache_callback, (Datum) 0);
 	CacheRegisterRelcacheCallback(sorted_heap_relcache_callback, (Datum) 0);
 	sorted_heap_scan_init();
 }

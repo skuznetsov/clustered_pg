@@ -29,7 +29,7 @@ if [ ! -f "$CONTRACT_FILE" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_policy_lint_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_policy_lint_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }

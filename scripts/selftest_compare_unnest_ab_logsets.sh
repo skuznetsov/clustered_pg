@@ -23,7 +23,7 @@ if [ ! -x "$COMPARE_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_unnest_setcmp_selftest.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_unnest_setcmp_selftest.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -35,7 +35,7 @@ write_log() {
   local insert_ratio="$3"
   local join_ratio="$4"
   local any_ratio="$5"
-  cat >"$dir/clustered_pg_unnest_ab_${idx}.log" <<EOF
+  cat >"$dir/pg_sorted_heap_unnest_ab_${idx}.log" <<EOF
 ratio_kv|insert=$insert_ratio|join_unnest=$join_ratio|any_array=$any_ratio
 EOF
 }

@@ -18,9 +18,9 @@ if [[ "$PROBE_OUT" == auto:* ]]; then
     echo "auto output directory must be an absolute path" >&2
     exit 2
   fi
-  PROBE_OUT="$PROBE_OUT_DIR/clustered_pg_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
+  PROBE_OUT="$PROBE_OUT_DIR/pg_sorted_heap_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [ "$PROBE_OUT" = "auto" ]; then
-  PROBE_OUT="/private/tmp/clustered_pg_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
+  PROBE_OUT="/private/tmp/pg_sorted_heap_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
 fi
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -le 1024 ] || [ "$PORT" -ge 65535 ]; then
@@ -53,7 +53,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TMP_DIR="$(mktemp -d "$TMP_ROOT/clustered_pg_planner_probe.XXXXXX")"
+TMP_DIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_planner_probe.XXXXXX")"
 
 rows_list=()
 forced_index_hits=0
@@ -141,24 +141,24 @@ run_single_case() {
     range_high=10
   fi
 
-  run_psql "DROP TABLE IF EXISTS clustered_pg_planner_probe;"
-  run_psql "CREATE TABLE clustered_pg_planner_probe(id bigint) USING clustered_heap;"
-  run_psql "CREATE INDEX clustered_pg_planner_probe_idx ON clustered_pg_planner_probe USING clustered_pk_index (id);"
-  run_psql "INSERT INTO clustered_pg_planner_probe(id) SELECT generate_series(1,$row_count);"
-  run_psql "ANALYZE clustered_pg_planner_probe;"
-  emit_probe "$row_count" "off" "point_default" "SELECT id FROM clustered_pg_planner_probe WHERE id = $row_count;"
-  emit_probe "$row_count" "off" "range_default" "SELECT id FROM clustered_pg_planner_probe WHERE id BETWEEN 1 AND $range_high;"
-  emit_probe "$row_count" "off" "point_forced_index" "SELECT id FROM clustered_pg_planner_probe WHERE id = $row_count;"
+  run_psql "DROP TABLE IF EXISTS pg_sorted_heap_planner_probe;"
+  run_psql "CREATE TABLE pg_sorted_heap_planner_probe(id bigint) USING clustered_heap;"
+  run_psql "CREATE INDEX pg_sorted_heap_planner_probe_idx ON pg_sorted_heap_planner_probe USING clustered_pk_index (id);"
+  run_psql "INSERT INTO pg_sorted_heap_planner_probe(id) SELECT generate_series(1,$row_count);"
+  run_psql "ANALYZE pg_sorted_heap_planner_probe;"
+  emit_probe "$row_count" "off" "point_default" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id = $row_count;"
+  emit_probe "$row_count" "off" "range_default" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id BETWEEN 1 AND $range_high;"
+  emit_probe "$row_count" "off" "point_forced_index" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id = $row_count;"
   off_forced_total="$last_total_cost"
-  emit_probe "$row_count" "on" "point_default" "SELECT id FROM clustered_pg_planner_probe WHERE id = $row_count;"
-  emit_probe "$row_count" "on" "range_default" "SELECT id FROM clustered_pg_planner_probe WHERE id BETWEEN 1 AND $range_high;"
-  emit_probe "$row_count" "on" "point_forced_index" "SELECT id FROM clustered_pg_planner_probe WHERE id = $row_count;"
+  emit_probe "$row_count" "on" "point_default" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id = $row_count;"
+  emit_probe "$row_count" "on" "range_default" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id BETWEEN 1 AND $range_high;"
+  emit_probe "$row_count" "on" "point_forced_index" "SELECT id FROM pg_sorted_heap_planner_probe WHERE id = $row_count;"
   on_forced_total="$last_total_cost"
 
   off_over_on="$(awk -v off="$off_forced_total" -v on="$on_forced_total" 'BEGIN { if (on <= 0) { print "inf"; } else { printf "%.6f", off / on; } }')"
   echo "planner_probe_compare|rows=$row_count|forced_point_off_total=$off_forced_total|forced_point_on_total=$on_forced_total|off_over_on=$off_over_on"
   run_psql "RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_indexscan; RESET enable_indexonlyscan;"
-  run_psql "DROP TABLE clustered_pg_planner_probe;"
+  run_psql "DROP TABLE pg_sorted_heap_planner_probe;"
 }
 
 run_probe_main() {
@@ -180,7 +180,7 @@ run_probe_main() {
 make -C "$ROOT_DIR" install >/dev/null
 "$PG_BINDIR/initdb" -D "$TMP_DIR/data" -A trust --no-locale >/dev/null
 "$PG_BINDIR/pg_ctl" -D "$TMP_DIR/data" -l "$TMP_DIR/postmaster.log" -o "-k $TMP_DIR -p $PORT" start >/dev/null
-run_psql "CREATE EXTENSION clustered_pg;"
+run_psql "CREATE EXTENSION pg_sorted_heap;"
 
 if [ -n "$PROBE_OUT" ]; then
   mkdir -p "$(dirname "$PROBE_OUT")"

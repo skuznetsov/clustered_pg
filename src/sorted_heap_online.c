@@ -246,7 +246,11 @@ sorted_heap_copy_sorted(Relation old_rel, Relation new_rel,
 	double		ntuples = 0;
 	const TableAmRoutine *heap = GetHeapamTableAmRoutine();
 
+#if PG_VERSION_NUM < 180000
+	iscan = index_beginscan(old_rel, pk_index, snapshot, 0, 0);
+#else
 	iscan = index_beginscan(old_rel, pk_index, snapshot, NULL, 0, 0);
+#endif
 	index_rescan(iscan, NULL, 0, NULL, 0);
 
 	slot = table_slot_create(old_rel, NULL);
@@ -394,8 +398,13 @@ sorted_heap_replay_log(Relation old_rel, Relation new_rel,
 			}
 
 			pk_index = index_open(pk_index_oid, AccessShareLock);
+#if PG_VERSION_NUM < 180000
+			iscan = index_beginscan(old_rel, pk_index,
+									GetActiveSnapshot(), 1, 0);
+#else
 			iscan = index_beginscan(old_rel, pk_index,
 									GetActiveSnapshot(), NULL, 1, 0);
+#endif
 			index_rescan(iscan, skey, 1, NULL, 0);
 
 			slot = table_slot_create(old_rel, NULL);

@@ -2,4 +2,4 @@ comment = 'Clustered storage and clustered index experiment scaffold for Postgre
 default_version = '0.1.0'
 relocatable = false
 superuser = false
-module_pathname = '$libdir/clustered_pg'
+module_pathname = '$libdir/pg_sorted_heap'

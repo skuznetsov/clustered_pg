@@ -18,7 +18,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_SCRIPT="$SCRIPT_DIR/run_lightweight_selftests.sh"
-TMP_CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_clustered_pg.sh"
+TMP_CLEAN_SCRIPT="$SCRIPT_DIR/tmp_clean_pg_sorted_heap.sh"
 
 if [ ! -x "$RUNNER_SCRIPT" ]; then
   echo "runner script not executable: $RUNNER_SCRIPT" >&2
@@ -29,7 +29,7 @@ if [ ! -f "$TMP_CLEAN_SCRIPT" ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "$TMP_ROOT/clustered_pg_lightweight_auto_clean_validation.XXXXXX")"
+WORKDIR="$(mktemp -d "$TMP_ROOT/pg_sorted_heap_lightweight_auto_clean_validation.XXXXXX")"
 cleanup() {
   rm -rf "$WORKDIR"
 }
@@ -78,7 +78,7 @@ if grep -Fq '"event":"' "$OUT_AGE"; then
 fi
 
 LOCAL_RUNNER="$WORKDIR/run_lightweight_selftests.sh"
-LOCAL_TMP_CLEAN="$WORKDIR/tmp_clean_clustered_pg.sh"
+LOCAL_TMP_CLEAN="$WORKDIR/tmp_clean_pg_sorted_heap.sh"
 cp "$RUNNER_SCRIPT" "$LOCAL_RUNNER"
 cp "$TMP_CLEAN_SCRIPT" "$LOCAL_TMP_CLEAN"
 chmod +x "$LOCAL_RUNNER"

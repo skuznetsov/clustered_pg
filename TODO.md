@@ -1,4 +1,4 @@
-# clustered_pg — Project Status
+# pg_sorted_heap — Project Status
 
 PostgreSQL extension providing the `sorted_heap` table access method:
 physically sorted storage with zone-map-based scan pruning.
@@ -39,9 +39,9 @@ Parallel scan (large tables):
 | `sorted_heap.c` | 2452 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
 | `sorted_heap_scan.c` | 1547 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning, runtime params |
 | `sorted_heap_online.c` | 1053 | Online compact + online merge: trigger, copy, replay, swap |
-| `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
-| `sql/clustered_pg.sql` | 2073 | Regression tests (SH1–SH17) |
-| `expected/clustered_pg.out` | 3152 | Expected test output |
+| `pg_sorted_heap.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
+| `sql/pg_sorted_heap.sql` | 2073 | Regression tests (SH1–SH17) |
+| `expected/pg_sorted_heap.out` | 3152 | Expected test output |
 | `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 | `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
@@ -476,7 +476,7 @@ startup via `shared_preload_libraries` (not needed for sorted_heap — it's load
 on first use via `CREATE EXTENSION`).
 
 ### Extension Upgrade Path
-No `clustered_pg--0.1.0--0.2.0.sql` upgrade script exists. Currently requires
+No `pg_sorted_heap--0.1.0--0.2.0.sql` upgrade script exists. Currently requires
 `DROP EXTENSION` + `CREATE EXTENSION` for version changes (data preserved in
 tables, zone map rebuilt on next compact).
 

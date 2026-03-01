@@ -115,19 +115,19 @@ if [ "$lightweight_auto_clean_age_env_hits" -ne 1 ]; then
   echo "expected exactly one workflow env contract 'LIGHTWEIGHT_SELFTEST_AUTO_TMP_CLEAN_MIN_AGE_S: \"0\"' (hits=$lightweight_auto_clean_age_env_hits)" >&2
   exit 1
 fi
-lightweight_tune_probe_root_env_hits="$(grep -F --count "UNNEST_TUNE_PROBE_OUT_ROOT: /tmp/clustered_pg_unnest_tune_probe_\${{ github.run_id }}_\${{ github.run_attempt }}" "$WORKFLOW" || true)"
+lightweight_tune_probe_root_env_hits="$(grep -F --count "UNNEST_TUNE_PROBE_OUT_ROOT: /tmp/pg_sorted_heap_unnest_tune_probe_\${{ github.run_id }}_\${{ github.run_attempt }}" "$WORKFLOW" || true)"
 if [ "$lightweight_tune_probe_root_env_hits" -ne 1 ]; then
   echo "expected exactly one workflow env contract for UNNEST_TUNE_PROBE_OUT_ROOT with run-scoped path (hits=$lightweight_tune_probe_root_env_hits)" >&2
   exit 1
 fi
-lightweight_tune_probe_root_prepare_hits="$(grep -F --count "run: mkdir -p /tmp/clustered_pg_unnest_tune_probe_\${{ github.run_id }}_\${{ github.run_attempt }}" "$WORKFLOW" || true)"
+lightweight_tune_probe_root_prepare_hits="$(grep -F --count "run: mkdir -p /tmp/pg_sorted_heap_unnest_tune_probe_\${{ github.run_id }}_\${{ github.run_attempt }}" "$WORKFLOW" || true)"
 if [ "$lightweight_tune_probe_root_prepare_hits" -ne 1 ]; then
   echo "expected exactly one workflow preparation step creating run-scoped tuning probe root (hits=$lightweight_tune_probe_root_prepare_hits)" >&2
   exit 1
 fi
-lightweight_tee_hits="$(grep -F --count "tee /tmp/clustered_pg_lightweight_selftests.jsonl" "$WORKFLOW" || true)"
+lightweight_tee_hits="$(grep -F --count "tee /tmp/pg_sorted_heap_lightweight_selftests.jsonl" "$WORKFLOW" || true)"
 if [ "$lightweight_tee_hits" -ne 1 ]; then
-  echo "expected exactly one tee sink to /tmp/clustered_pg_lightweight_selftests.jsonl (hits=$lightweight_tee_hits)" >&2
+  echo "expected exactly one tee sink to /tmp/pg_sorted_heap_lightweight_selftests.jsonl (hits=$lightweight_tee_hits)" >&2
   exit 1
 fi
 
@@ -167,13 +167,13 @@ require_literal_upload_exactly_once() {
 
 require_literal_upload "if: always()"
 require_literal_upload "uses: actions/upload-artifact@v4"
-require_literal_upload "path: /tmp/clustered_pg_lightweight_selftests.jsonl"
+require_literal_upload "path: /tmp/pg_sorted_heap_lightweight_selftests.jsonl"
 require_literal_upload "name: clustered-pg-lightweight-selftest-\${{ github.run_id }}-\${{ github.run_attempt }}"
 require_literal_upload "if-no-files-found: error"
 
 require_literal_upload_exactly_once "if: always()"
 require_literal_upload_exactly_once "uses: actions/upload-artifact@v4"
-require_literal_upload_exactly_once "path: /tmp/clustered_pg_lightweight_selftests.jsonl"
+require_literal_upload_exactly_once "path: /tmp/pg_sorted_heap_lightweight_selftests.jsonl"
 require_literal_upload_exactly_once "name: clustered-pg-lightweight-selftest-\${{ github.run_id }}-\${{ github.run_attempt }}"
 require_literal_upload_exactly_once "if-no-files-found: error"
 
