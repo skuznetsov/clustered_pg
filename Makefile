@@ -33,6 +33,7 @@ TEST_CONCURRENT_PORT ?= 65490
 TEST_CRASH_PORT ?= 65491
 TEST_TOAST_PORT ?= 65492
 TEST_ALTER_PORT ?= 65493
+TEST_DUMP_PORT ?= 65495
 BENCH_PORT ?= 65494
 BENCH_SCALES ?= 1000000,10000000
 TMP_CLEAN_MIN_AGE_S ?= 0
@@ -427,6 +428,9 @@ test-toast:
 
 test-alter-table:
 	./scripts/test_alter_table.sh $(TMP_SELFTEST_ROOT) $(TEST_ALTER_PORT)
+
+test-dump-restore:
+	./scripts/test_dump_restore.sh $(TMP_SELFTEST_ROOT) $(TEST_DUMP_PORT)
 
 bench:
 	./scripts/bench_sorted_heap.sh $(TMP_SELFTEST_ROOT) $(BENCH_PORT) $(BENCH_SCALES)
