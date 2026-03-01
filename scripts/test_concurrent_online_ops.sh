@@ -253,6 +253,75 @@ WORKER_PIDS=()
 verify_table "online_merge"
 
 # ============================================================
+# Test C: UPDATE PK during online compact — no duplicates
+# ============================================================
+echo ""
+echo "=== Test C: UPDATE PK during online compact ==="
+
+# Create a fresh table for this test
+PSQL <<SQL
+CREATE TABLE pkchange_test(
+    id int PRIMARY KEY,
+    val text
+) USING sorted_heap;
+
+INSERT INTO pkchange_test
+  SELECT g, repeat('x', 200)
+  FROM generate_series(1, 50000) g;
+
+SELECT sorted_heap_compact('pkchange_test'::regclass);
+SQL
+
+# Worker that changes PKs: shifts rows from 40001-50000 up by 100000
+pkchange_worker() {
+  local count=0
+  local end_time=$(($(date +%s) + DML_DURATION))
+  while [ "$(date +%s)" -lt "$end_time" ]; do
+    local target=$((40001 + RANDOM % 10000))
+    local new_id=$((target + 100000))
+    "$PG_BINDIR/psql" -h "$TMP_DIR" -p "$PORT" postgres -qtAX \
+      -c "UPDATE pkchange_test SET id = $new_id WHERE id = $target" \
+      2>/dev/null || true
+    count=$((count + 1))
+    sleep $WORKER_SLEEP
+  done
+  echo "$count" > "$TMP_DIR/pkchanges_done"
+}
+
+WORKER_PIDS=()
+pkchange_worker &
+WORKER_PIDS+=($!)
+select_worker &
+WORKER_PIDS+=($!)
+
+PSQL -c "CALL sorted_heap_compact_online('pkchange_test'::regclass)" 2>/dev/null
+
+for pid in "${WORKER_PIDS[@]}"; do
+  wait "$pid" 2>/dev/null || true
+done
+WORKER_PIDS=()
+
+# Verify: exactly 50000 rows (PK change = move, not duplicate)
+pkc_count=$(PSQL -c "SELECT count(*) FROM pkchange_test")
+check "pkchange_count" "50000" "$pkc_count"
+
+# No duplicate PKs
+pkc_dups=$(PSQL -c \
+  "SELECT count(*) FROM (SELECT id FROM pkchange_test GROUP BY id HAVING count(*) > 1) sub")
+check "pkchange_no_duplicate_pks" "0" "$pkc_dups"
+
+# No old PKs remain that were moved (old range 40001-50000 should have gaps,
+# new range 140001-150000 should have corresponding rows)
+pkc_moved=$(cat "$TMP_DIR/pkchanges_done" 2>/dev/null || echo "?")
+echo "  pkchange: total_rows=$pkc_count dups=$pkc_dups pk_changes_attempted=$pkc_moved"
+
+# Verify rows with new PKs exist
+pkc_new_range=$(PSQL -c "SELECT count(*) FROM pkchange_test WHERE id > 100000")
+echo "  pkchange: rows_in_new_range=$pkc_new_range"
+
+PSQL -c "DROP TABLE pkchange_test" 2>/dev/null || true
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
