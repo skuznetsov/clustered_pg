@@ -37,16 +37,16 @@ Parallel scan (large tables):
 |------|------:|---------|
 | `sorted_heap.h` | 181 | Meta page layout, zone map structs (v5/v6), SortedHeapRelInfo |
 | `sorted_heap.c` | 2410 | Table AM: sorted multi_insert, zone map persistence, compact, merge, vacuum |
-| `sorted_heap_scan.c` | 1187 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning |
+| `sorted_heap_scan.c` | 1543 | Custom scan provider: planner hook, ExecScan, parallel scan, multi-col pruning, runtime params |
 | `sorted_heap_online.c` | 1053 | Online compact + online merge: trigger, copy, replay, swap |
 | `clustered_pg.c` | 1537 | Extension entry point, legacy clustered index AM, GUC registration |
-| `sql/clustered_pg.sql` | 2032 | Regression tests (SH1–SH16) |
-| `expected/clustered_pg.out` | 3066 | Expected test output |
+| `sql/clustered_pg.sql` | 2073 | Regression tests (SH1–SH17) |
+| `expected/clustered_pg.out` | 3152 | Expected test output |
 | `scripts/test_concurrent_online_ops.sh` | 264 | Concurrent DML + online compact/merge (ephemeral cluster) |
 | `scripts/test_crash_recovery.sh` | 335 | Crash recovery scenarios (pg_ctl stop -m immediate) |
 | `scripts/test_toast_and_concurrent_compact.sh` | 338 | TOAST integrity + concurrent online compact guard |
 | `scripts/test_alter_table.sh` | 313 | ALTER TABLE on sorted_heap (ADD/DROP/RENAME/ALTER TYPE/PK) |
-| `scripts/bench_sorted_heap.sh` | 343 | sorted_heap vs heap+btree vs seqscan comparative benchmark |
+| `scripts/bench_sorted_heap.sh` | 375 | sorted_heap vs heap+btree vs seqscan comparative benchmark |
 
 ## Completed Phases
 
@@ -102,41 +102,40 @@ True query performance without pgbench overhead. Average of 5 runs.
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.045ms / 1 buf | 0.050ms / 7 bufs | 17.4ms / 6,370 bufs |
-| Narrow (100) | 0.044ms / 2 bufs | 0.066ms / 8 bufs | 17.4ms / 6,370 bufs |
-| Medium (5K) | 0.454ms / 33 bufs | 0.552ms / 52 bufs | 17.5ms / 6,370 bufs |
-| Wide (100K) | 7.7ms / 638 bufs | 9.2ms / 917 bufs | 18.3ms / 6,370 bufs |
+| Point (1 row) | 0.038ms / 1 buf | 0.045ms / 7 bufs | 15.3ms / 6,370 bufs |
+| Narrow (100) | 0.043ms / 2 bufs | 0.067ms / 8 bufs | 16.7ms / 6,370 bufs |
+| Medium (5K) | 0.438ms / 33 bufs | 0.528ms / 52 bufs | 16.5ms / 6,370 bufs |
+| Wide (100K) | 7.5ms / 638 bufs | 9.1ms / 917 bufs | 17.4ms / 6,370 bufs |
 
 **10M rows**
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.037ms / 1 buf | 0.056ms / 7 bufs | 119.7ms / 63,695 bufs |
-| Narrow (100) | 0.046ms / 1 buf | 0.071ms / 7 bufs | 137.5ms / 63,695 bufs |
-| Medium (5K) | 0.452ms / 32 bufs | 0.548ms / 51 bufs | 133.0ms / 63,695 bufs |
-| Wide (100K) | 7.6ms / 638 bufs | 9.0ms / 917 bufs | 139.1ms / 63,695 bufs |
+| Point (1 row) | 0.034ms / 1 buf | 0.054ms / 7 bufs | 118.8ms / 63,695 bufs |
+| Narrow (100) | 0.040ms / 1 buf | 0.062ms / 7 bufs | 129.9ms / 63,695 bufs |
+| Medium (5K) | 0.449ms / 32 bufs | 0.594ms / 51 bufs | 121.9ms / 63,695 bufs |
+| Wide (100K) | 7.6ms / 638 bufs | 9.3ms / 917 bufs | 122.7ms / 63,695 bufs |
 
 **100M rows**
 
 | Query | sorted_heap | heap+btree | heap seqscan |
 |-------|------------|-----------|-------------|
-| Point (1 row) | 0.086ms / 1 buf | 0.257ms / 8 bufs | 2,099ms / 519,907 bufs |
-| Narrow (100) | 0.304ms / 2 bufs | 0.205ms / 9 bufs | 2,240ms / 520,777 bufs |
-| Medium (5K) | 0.779ms / 38 bufs | 1.184ms / 58 bufs | 2,197ms / 519,850 bufs |
-| Wide (100K) | 13.5ms / 737 bufs | 13.4ms / 1,017 bufs | 2,185ms / 518,892 bufs |
+| Point (1 row) | 0.128ms / 1 buf | 1.6ms / 8 bufs | 1,242ms / 519,909 bufs |
+| Narrow (100) | 0.265ms / 2 bufs | 0.183ms / 9 bufs | 1,380ms / 520,778 bufs |
+| Medium (5K) | 0.516ms / 38 bufs | 0.730ms / 58 bufs | 1,350ms / 519,855 bufs |
+| Wide (100K) | 9.0ms / 737 bufs | 10.3ms / 1,017 bufs | 1,347ms / 518,896 bufs |
 
 sorted_heap reads fewer blocks than btree for all query types. Zone map
 prunes to exact block range; btree traverses 3-4 index pages per lookup.
-At 100M rows, sorted_heap point query reads 1 buffer vs 8 for btree
-(3x faster execution time).
+At 100M rows, sorted_heap point query reads 1 buffer vs 8 for btree.
 
 ### INSERT (rows/sec)
 
 | Scale | sorted_heap | heap+btree | heap (no idx) | compact |
 |------:|------------:|-----------:|--------------:|--------:|
-| 1M | 803K | 928K | 1.56M | 0.3s |
-| 10M | 868K | 893K | 1.47M | 3.4s |
-| 100M | 567K | 660K | 1.48M | 67.3s |
+| 1M | 964K | 1.01M | 1.85M | 0.3s |
+| 10M | 832K | 942K | 1.78M | 3.2s |
+| 100M | 608K | 1.07M | 2.36M | 46.1s |
 
 ### Table Size
 
@@ -151,26 +150,40 @@ At 100M rows, sorted_heap point query reads 1 buffer vs 8 for btree
 Includes pgbench overhead (connection, planning). Useful for comparing
 relative throughput under sustained load, not absolute query latency.
 
-| Query | 1M sh / heap | 10M sh / heap | 100M sh / heap |
+**Simple mode** (`-M simple`): each query parsed, planned, and executed separately.
+
+| Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
 |-------|-------------:|--------------:|---------------:|
-| Point (1 row) | 23.2K / 38.1K | 8.8K / 39.5K | 4,021 / 1,910 |
-| Narrow (100) | 18.3K / 25.5K | 7.9K / 27.3K | 4,983 / 2,320 |
-| Medium (5K) | 3.1K / 3.8K | 2.5K / 4.6K | 622 / 417 |
-| Wide (100K) | 199 / 284 | 193 / 282 | 100 / 75 |
+| Point (1 row) | 28.7K / 40.9K | 29.2K / 39.4K | 8,148 / 6,711 |
+| Narrow (100) | 22.0K / 26.5K | 20.6K / 27.2K | 4,616 / 3,987 |
+| Medium (5K) | 3.3K / 3.9K | 3.1K / 4.6K | 844 / 1,214 |
+| Wide (100K) | 198 / 289 | 192 / 279 | 143 / 140 |
+
+**Prepared mode** (`-M prepared`): query planned once, re-executed with parameters.
+
+| Query | 1M sh / btree | 10M sh / btree | 100M sh / btree |
+|-------|-------------:|--------------:|---------------:|
+| Point (1 row) | 46.6K / 61.0K | 44.6K / 55.4K | 16.0K / 30.4K |
+| Narrow (100) | 22.4K / 28.8K | 22.2K / 28.1K | 9.7K / 17.1K |
+| Medium (5K) | 3.3K / 5.0K | 3.2K / 4.7K | 1,583 / 2,095 |
+| Wide (100K) | 287 / 277 | 278 / 278 | 156 / 148 |
 
 ### Observations
 
 - **EXPLAIN ANALYZE** shows sorted_heap reads fewer blocks than btree
   at every selectivity level. At 10M rows: point query reads 1 block
   (vs 7 for btree, 63,695 for seqscan). At 100M: 1 block vs 8 for btree,
-  519,907 for seqscan. Zone map prunes to exact contiguous block range.
-- **pgbench throughput** — at 1M/10M btree shows higher TPS because pgbench
-  overhead (connection + planning per query) dominates when execution time is
-  sub-millisecond. At 100M sorted_heap wins all queries: point 2.1x (4,021 vs
-  1,910 tps), narrow 2.15x (4,983 vs 2,320), medium 1.49x, wide 1.33x.
-  The crossover happens because btree tree depth grows (4+ levels) while
-  zone map binary search stays O(log N) with 1-buffer reads.
-- **INSERT** — comparable at scale; heap without index is fastest (~1.5M/s)
+  519,909 for seqscan. Zone map prunes to exact contiguous block range.
+- **Prepared mode** — runtime parameter resolution enables generic plans for
+  sorted_heap. Point query TPS at 10M: 44.6K prepared vs 29.2K simple (+53%).
+  At 100M: 16.0K prepared vs 8.1K simple (+97%). Wide (100K row) queries
+  show parity between sorted_heap and btree at all scales since execution
+  cost dominates over planning overhead.
+- **Simple mode** — at 1M/10M btree shows higher TPS because per-query
+  planning overhead dominates when execution time is sub-millisecond.
+  At 100M sorted_heap wins point (+21%) and narrow (+16%) queries; btree
+  wins medium queries where its deeper tree is offset by wider scan ranges.
+- **INSERT** — comparable at scale; heap without index is fastest (~2M/s)
   since there is no index maintenance or batch sorting overhead.
 - **Storage** — nearly identical (sorted_heap trades btree index for
   meta+overflow pages). Heap without index is smallest (no index overhead).
@@ -414,6 +427,25 @@ relative throughput under sustained load, not absolute query latency.
 - Secondary index after DDL — consistent with seqscan
 - DROP PK → pruning disabled, DML works; re-ADD PK + compact → pruning restored
 - 33 checks, all pass
+
+### Runtime Parameter Resolution (Prepared Statements)
+- `sorted_heap_extract_bounds()` now accepts both `Const` and `Param` nodes
+- Two-path architecture in the planner:
+  - **Path A** (all Const): block range computed at plan time (unchanged)
+  - **Path B** (has Param): expressions stored in `custom_exprs`, bounds
+    deferred to executor via `ExecInitExprList` + `ExecEvalExprSwitchContext`
+- `sorted_heap_resolve_runtime_bounds()`: evaluates Param expressions at
+  executor startup, merges with Const-only baseline, computes block range
+- `sorted_heap_apply_bound()`: shared helper for both plan-time and runtime
+  bound application (eliminates ~100 lines of duplicated switch logic)
+- Rescan support: re-evaluates runtime bounds on each rescan (NestLoop)
+- Cost estimation for Path B uses `clauselist_selectivity()` for generic
+  plan adoption after ~5 executions
+- EXPLAIN shows "N total blocks (runtime bounds)" for Path B without ANALYZE;
+  with ANALYZE shows actual resolved range as usual
+- Path A/B detection via `list_length(custom_private)` (2 vs 3 elements)
+- SH17 regression tests: point, range, mixed Const+Param prepared queries
+  under `force_generic_plan`, correctness cross-checks against non-prepared
 
 ## Possible Future Work
 
