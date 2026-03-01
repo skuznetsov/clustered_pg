@@ -1,0 +1,23 @@
+title: pg_sorted_heap
+description: Sorted heap table AM for PostgreSQL with zone map scan pruning
+url: https://skuznetsov.github.io
+baseurl: /pg_sorted_heap
+
+remote_theme: just-the-docs/just-the-docs
+
+color_scheme: light
+
+search_enabled: true
+search.heading_level: 3
+
+aux_links:
+  GitHub: https://github.com/skuznetsov/pg_sorted_heap
+
+footer_content: >-
+  pg_sorted_heap is released under the
+  <a href="https://github.com/skuznetsov/pg_sorted_heap/blob/main/LICENSE">PostgreSQL License</a>.
+
+exclude:
+  - locator-contract.md
+  - policy-review-trusted-manifest-workflow.md
+  - perf-baselines

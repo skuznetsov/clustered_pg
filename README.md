@@ -105,7 +105,7 @@ queries show sorted_heap slightly ahead at all scales.
 
 ### Requirements
 
-- PostgreSQL 18+ (uses PG 18 `ExecCustomScan` API)
+- PostgreSQL 17 or 18
 - Standard PGXS build toolchain (`pg_config` in PATH)
 
 ### Build and install
@@ -149,6 +149,7 @@ make test-concurrent           # concurrent DML + online ops
 make test-toast                # TOAST integrity + concurrent guard
 make test-alter-table          # ALTER TABLE DDL (36 checks)
 make test-dump-restore         # pg_dump/restore lifecycle (10 checks)
+make test-pg-upgrade           # pg_upgrade 17->18 (13 checks)
 ```
 
 ## SQL API
@@ -273,8 +274,9 @@ CREATE INDEX ON t USING btree (key_col);
   workloads.
 - pg_dump/restore: data restored via COPY, zone map needs compact after
   restore to re-enable scan pruning.
-- pg_upgrade: untested. Expected to work (data files copied as-is).
+- pg_upgrade 17 to 18: tested and verified (13 checks). Data files including
+  zone map are copied as-is.
 
 ## License
 
-Experimental. Not yet licensed for redistribution.
+Released under the [PostgreSQL License](LICENSE).
