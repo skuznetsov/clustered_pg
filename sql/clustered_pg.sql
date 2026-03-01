@@ -2027,6 +2027,47 @@ SELECT count(*) AS sh16_uniq_final FROM sh16_uniq;
 
 DROP TABLE sh16_uniq;
 
+-- ================================================================
+-- SH17: Runtime Parameter Resolution (Prepared Statements)
+-- Tests that sorted_heap can generate generic plans with Param nodes.
+-- ================================================================
+
+CREATE TABLE sh17(id int PRIMARY KEY, val text) USING sorted_heap;
+INSERT INTO sh17 SELECT g, 'row-'||g FROM generate_series(1,10000) g;
+SELECT sorted_heap_compact('sh17'::regclass);
+ANALYZE sh17;
+
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+
+-- SH17-1: Point query with $1 under forced generic plan
+PREPARE sh17_point(int) AS SELECT count(*) FROM sh17 WHERE id = $1;
+SET plan_cache_mode = force_generic_plan;
+EXECUTE sh17_point(500);
+EXPLAIN (COSTS OFF) EXECUTE sh17_point(500);
+
+-- SH17-2: Range query with $1, $2
+PREPARE sh17_range(int,int) AS
+  SELECT count(*) FROM sh17 WHERE id BETWEEN $1 AND $2;
+EXECUTE sh17_range(100, 200);
+EXPLAIN (COSTS OFF) EXECUTE sh17_range(100, 200);
+
+-- SH17-3: Mixed Const + Param
+PREPARE sh17_mixed(int) AS
+  SELECT count(*) FROM sh17 WHERE id > 50 AND id < $1;
+EXECUTE sh17_mixed(200);
+
+-- SH17-4: Correctness cross-check (non-prepared must match)
+SELECT count(*) AS sh17_point_check FROM sh17 WHERE id = 500;
+SELECT count(*) AS sh17_range_check FROM sh17 WHERE id BETWEEN 100 AND 200;
+SELECT count(*) AS sh17_mixed_check FROM sh17 WHERE id > 50 AND id < 200;
+
+RESET plan_cache_mode;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DEALLOCATE ALL;
+DROP TABLE sh17;
+
 DROP FUNCTION sh6_plan_contains(text, text);
 
 DROP EXTENSION clustered_pg;

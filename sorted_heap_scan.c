@@ -77,6 +77,14 @@ typedef struct SortedHeapScanState
 	BlockNumber		last_blk;			/* track block transitions */
 	/* Parallel support: PG's parallel table scan descriptor in DSM */
 	ParallelTableScanDesc pscan;		/* NULL for serial scans */
+	/* Runtime parameter resolution (Path B — prepared statements) */
+	bool			runtime_bounds;		/* true if bounds have Param nodes */
+	int				n_runtime_exprs;
+	List		   *runtime_exprstates;	/* ExprState* list */
+	int			   *runtime_strategies;
+	bool		   *runtime_is_col2;
+	Oid			   *runtime_typids;
+	SortedHeapScanBounds const_bounds;	/* Const-only baseline for rescan */
 } SortedHeapScanState;
 
 /* ----------------------------------------------------------------
@@ -91,7 +99,13 @@ static bool sorted_heap_extract_bounds(RelOptInfo *rel,
 									   Oid pk_typid,
 									   AttrNumber pk_attno2,
 									   Oid pk_typid2,
-									   SortedHeapScanBounds *bounds);
+									   SortedHeapScanBounds *bounds,
+									   List **runtime_exprs,
+									   List **runtime_meta,
+									   List **pk_clauses);
+static void sorted_heap_apply_bound(SortedHeapScanBounds *bounds,
+									int strategy, bool is_col2, int64 val);
+static void sorted_heap_resolve_runtime_bounds(SortedHeapScanState *shstate);
 static void sorted_heap_compute_block_range(SortedHeapRelInfo *info,
 											SortedHeapScanBounds *bounds,
 											BlockNumber total_blocks,
@@ -276,89 +290,139 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	/* Extract PK bounds from baserestrictinfo */
-	if (!sorted_heap_extract_bounds(rel, info->attNums[0],
-									info->zm_pk_typid,
-									info->zm_col2_usable ?
-									info->attNums[1] : 0,
-									info->zm_pk_typid2,
-									&bounds))
 	{
+		List	   *runtime_exprs = NIL;
+		List	   *runtime_meta = NIL;
+		List	   *pk_clauses = NIL;
+
+		if (!sorted_heap_extract_bounds(rel, info->attNums[0],
+										info->zm_pk_typid,
+										info->zm_col2_usable ?
+										info->attNums[1] : 0,
+										info->zm_pk_typid2,
+										&bounds,
+										&runtime_exprs,
+										&runtime_meta,
+										&pk_clauses))
+		{
+			table_close(table_rel, NoLock);
+			return;
+		}
+
+		total_blocks = RelationGetNumberOfBlocks(table_rel);
 		table_close(table_rel, NoLock);
-		return;
-	}
 
-	/* Compute pruned block range */
-	total_blocks = RelationGetNumberOfBlocks(table_rel);
-	sorted_heap_compute_block_range(info, &bounds, total_blocks,
-									&start_block, &nblocks);
-	table_close(table_rel, NoLock);
+		if (total_blocks <= 1)
+			return;
 
-	/* If no pruning benefit, don't bother */
-	if (nblocks >= total_blocks || total_blocks <= 1)
-		return;
+		/* Create CustomPath */
+		cpath = makeNode(CustomPath);
+		cpath->path.type = T_CustomPath;
+		cpath->path.pathtype = T_CustomScan;
+		cpath->path.parent = rel;
+		cpath->path.pathtarget = rel->reltarget;
+		cpath->path.param_info = NULL;
+		cpath->path.parallel_aware = false;
+		cpath->path.parallel_safe = rel->consider_parallel;
+		cpath->path.parallel_workers = 0;
+		cpath->path.pathkeys = NIL;
+		cpath->flags = 0;
+		cpath->methods = &sorted_heap_path_methods;
 
-	/* Create CustomPath */
-	cpath = makeNode(CustomPath);
-	cpath->path.type = T_CustomPath;
-	cpath->path.pathtype = T_CustomScan;
-	cpath->path.parent = rel;
-	cpath->path.pathtarget = rel->reltarget;
-	cpath->path.param_info = NULL;
-	cpath->path.parallel_aware = false;
-	cpath->path.parallel_safe = rel->consider_parallel;
-	cpath->path.parallel_workers = 0;
-	cpath->path.pathkeys = NIL;
+		if (runtime_exprs == NIL)
+		{
+			/* Path A: all Const — compute block range now */
+			sorted_heap_compute_block_range(info, &bounds, total_blocks,
+											&start_block, &nblocks);
 
-	/* Cost: only scan pruned block range */
-	sel = (double) nblocks / (double) total_blocks;
-	cpath->path.rows = clamp_row_est(rel->rows * sel);
-	cpath->path.startup_cost = 0;
-	cpath->path.total_cost = seq_page_cost * nblocks +
-		cpu_tuple_cost * rel->tuples * sel +
-		cpu_operator_cost * rel->tuples * sel;
+			if (nblocks >= total_blocks)
+				return;
 
-	cpath->flags = 0;
-	cpath->methods = &sorted_heap_path_methods;
+			sel = (double) nblocks / (double) total_blocks;
+			cpath->path.rows = clamp_row_est(rel->rows * sel);
+			cpath->path.startup_cost = 0;
+			cpath->path.total_cost = seq_page_cost * nblocks +
+				cpu_tuple_cost * rel->tuples * sel +
+				cpu_operator_cost * rel->tuples * sel;
 
-	/* Store range and bounds in custom_private as two IntLists
-	 * wrapped in a pointer list: list_make2(range_list, bounds_list) */
-	{
-		List *range_list = NIL;
-		List *bounds_list = NIL;
+			/* Pack range + bounds into custom_private */
+			{
+				List *range_list = NIL;
+				List *bounds_list = NIL;
 
-		range_list = lappend_int(range_list, (int32) start_block);
-		range_list = lappend_int(range_list, (int32) nblocks);
-		range_list = lappend_int(range_list, (int32) total_blocks);
+				range_list = lappend_int(range_list, (int32) start_block);
+				range_list = lappend_int(range_list, (int32) nblocks);
+				range_list = lappend_int(range_list, (int32) total_blocks);
 
-		bounds_list = lappend_int(bounds_list, bounds.has_lo ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.has_hi ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.lo_inclusive ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.hi_inclusive ? 1 : 0);
-		/* Store int64 as two int32 values */
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.lo >> 32));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.lo & 0xFFFFFFFF));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.hi >> 32));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.hi & 0xFFFFFFFF));
+				bounds_list = lappend_int(bounds_list, bounds.has_lo ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.has_hi ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.lo_inclusive ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.hi_inclusive ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.lo >> 32));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.lo & 0xFFFFFFFF));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.hi >> 32));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.hi & 0xFFFFFFFF));
 
-		/* Column 2 bounds (indices 8-15) */
-		bounds_list = lappend_int(bounds_list, bounds.has_lo2 ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.has_hi2 ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.lo2_inclusive ? 1 : 0);
-		bounds_list = lappend_int(bounds_list, bounds.hi2_inclusive ? 1 : 0);
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.lo2 >> 32));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.lo2 & 0xFFFFFFFF));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.hi2 >> 32));
-		bounds_list = lappend_int(bounds_list,
-								 (int32) (bounds.hi2 & 0xFFFFFFFF));
+				bounds_list = lappend_int(bounds_list, bounds.has_lo2 ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.has_hi2 ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.lo2_inclusive ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, bounds.hi2_inclusive ? 1 : 0);
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.lo2 >> 32));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.lo2 & 0xFFFFFFFF));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.hi2 >> 32));
+				bounds_list = lappend_int(bounds_list, (int32) (bounds.hi2 & 0xFFFFFFFF));
 
-		cpath->custom_private = list_make2(range_list, bounds_list);
+				cpath->custom_private = list_make2(range_list, bounds_list);
+			}
+		}
+		else
+		{
+			/* Path B: has Params — defer block range to executor */
+			Selectivity		pk_sel;
+			List		   *meta_list = NIL;
+			List		   *const_bounds_list = NIL;
+
+			pk_sel = clauselist_selectivity(root, pk_clauses,
+											0, JOIN_INNER, NULL);
+			nblocks = (BlockNumber) clamp_row_est(total_blocks * pk_sel);
+			if (nblocks < 1)
+				nblocks = 1;
+
+			sel = (double) nblocks / (double) total_blocks;
+			cpath->path.rows = clamp_row_est(rel->rows * sel);
+			cpath->path.startup_cost = 0;
+			cpath->path.total_cost = seq_page_cost * nblocks +
+				cpu_tuple_cost * rel->tuples * sel +
+				cpu_operator_cost * rel->tuples * sel;
+
+			/* Meta: [total_blocks, n_runtime_exprs] */
+			meta_list = lappend_int(meta_list, (int32) total_blocks);
+			meta_list = lappend_int(meta_list,
+									list_length(runtime_exprs));
+
+			/* Pack Const-only bounds (baseline for mixed Const+Param) */
+			const_bounds_list = lappend_int(const_bounds_list, bounds.has_lo ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.has_hi ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.lo_inclusive ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.hi_inclusive ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.lo >> 32));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.lo & 0xFFFFFFFF));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.hi >> 32));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.hi & 0xFFFFFFFF));
+
+			const_bounds_list = lappend_int(const_bounds_list, bounds.has_lo2 ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.has_hi2 ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.lo2_inclusive ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, bounds.hi2_inclusive ? 1 : 0);
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.lo2 >> 32));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.lo2 & 0xFFFFFFFF));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.hi2 >> 32));
+			const_bounds_list = lappend_int(const_bounds_list, (int32) (bounds.hi2 & 0xFFFFFFFF));
+
+			cpath->custom_private = list_make4(meta_list, runtime_meta,
+											   const_bounds_list,
+											   runtime_exprs);
+		}
 	}
 
 	add_path(rel, &cpath->path);
@@ -399,13 +463,126 @@ sorted_heap_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /* ----------------------------------------------------------------
+ *  Apply a single bound (strategy + value) to a SortedHeapScanBounds.
+ *  Shared by plan-time Const extraction and runtime Param resolution.
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_apply_bound(SortedHeapScanBounds *bounds,
+						int strategy, bool is_col2, int64 val)
+{
+	if (!is_col2)
+	{
+		switch (strategy)
+		{
+			case BTEqualStrategyNumber:
+				bounds->has_lo = true;
+				bounds->lo = val;
+				bounds->lo_inclusive = true;
+				bounds->has_hi = true;
+				bounds->hi = val;
+				bounds->hi_inclusive = true;
+				break;
+			case BTLessStrategyNumber:
+				if (!bounds->has_hi || val < bounds->hi ||
+					(val == bounds->hi && bounds->hi_inclusive))
+				{
+					bounds->has_hi = true;
+					bounds->hi = val;
+					bounds->hi_inclusive = false;
+				}
+				break;
+			case BTLessEqualStrategyNumber:
+				if (!bounds->has_hi || val < bounds->hi)
+				{
+					bounds->has_hi = true;
+					bounds->hi = val;
+					bounds->hi_inclusive = true;
+				}
+				break;
+			case BTGreaterStrategyNumber:
+				if (!bounds->has_lo || val > bounds->lo ||
+					(val == bounds->lo && bounds->lo_inclusive))
+				{
+					bounds->has_lo = true;
+					bounds->lo = val;
+					bounds->lo_inclusive = false;
+				}
+				break;
+			case BTGreaterEqualStrategyNumber:
+				if (!bounds->has_lo || val > bounds->lo)
+				{
+					bounds->has_lo = true;
+					bounds->lo = val;
+					bounds->lo_inclusive = true;
+				}
+				break;
+			default:
+				break;
+		}
+	}
+	else
+	{
+		switch (strategy)
+		{
+			case BTEqualStrategyNumber:
+				bounds->has_lo2 = true;
+				bounds->lo2 = val;
+				bounds->lo2_inclusive = true;
+				bounds->has_hi2 = true;
+				bounds->hi2 = val;
+				bounds->hi2_inclusive = true;
+				break;
+			case BTLessStrategyNumber:
+				if (!bounds->has_hi2 || val < bounds->hi2 ||
+					(val == bounds->hi2 && bounds->hi2_inclusive))
+				{
+					bounds->has_hi2 = true;
+					bounds->hi2 = val;
+					bounds->hi2_inclusive = false;
+				}
+				break;
+			case BTLessEqualStrategyNumber:
+				if (!bounds->has_hi2 || val < bounds->hi2)
+				{
+					bounds->has_hi2 = true;
+					bounds->hi2 = val;
+					bounds->hi2_inclusive = true;
+				}
+				break;
+			case BTGreaterStrategyNumber:
+				if (!bounds->has_lo2 || val > bounds->lo2 ||
+					(val == bounds->lo2 && bounds->lo2_inclusive))
+				{
+					bounds->has_lo2 = true;
+					bounds->lo2 = val;
+					bounds->lo2_inclusive = false;
+				}
+				break;
+			case BTGreaterEqualStrategyNumber:
+				if (!bounds->has_lo2 || val > bounds->lo2)
+				{
+					bounds->has_lo2 = true;
+					bounds->lo2 = val;
+					bounds->lo2_inclusive = true;
+				}
+				break;
+			default:
+				break;
+		}
+	}
+}
+
+/* ----------------------------------------------------------------
  *  Extract PK bounds from baserestrictinfo
  * ---------------------------------------------------------------- */
 static bool
 sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 						   Oid pk_typid, AttrNumber pk_attno2,
 						   Oid pk_typid2,
-						   SortedHeapScanBounds *bounds)
+						   SortedHeapScanBounds *bounds,
+						   List **runtime_exprs,
+						   List **runtime_meta,
+						   List **pk_clauses_out)
 {
 	ListCell   *lc;
 	Oid			opfamily;
@@ -413,6 +590,9 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 	Oid			opfamily2 = InvalidOid;
 
 	memset(bounds, 0, sizeof(SortedHeapScanBounds));
+	*runtime_exprs = NIL;
+	*runtime_meta = NIL;
+	*pk_clauses_out = NIL;
 
 	/* Get btree opfamily for column 1 */
 	opcid = GetDefaultOpClass(pk_typid, BTREE_AM_OID);
@@ -436,10 +616,10 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 		OpExpr	   *opexpr;
 		Var		   *var;
-		Const	   *cnst;
+		Node	   *val_node;
 		int			strategy;
 		bool		varonleft;
-		int64		val;
+		bool		is_const;
 		bool		is_col2 = false;
 		Oid			match_typid;
 
@@ -450,23 +630,27 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		if (list_length(opexpr->args) != 2)
 			continue;
 
-		/* Check for Var op Const or Const op Var */
+		/* Check for Var op {Const|Param} or {Const|Param} op Var */
 		if (IsA(linitial(opexpr->args), Var) &&
-			IsA(lsecond(opexpr->args), Const))
+			(IsA(lsecond(opexpr->args), Const) ||
+			 IsA(lsecond(opexpr->args), Param)))
 		{
 			var = (Var *) linitial(opexpr->args);
-			cnst = (Const *) lsecond(opexpr->args);
+			val_node = (Node *) lsecond(opexpr->args);
 			varonleft = true;
 		}
-		else if (IsA(linitial(opexpr->args), Const) &&
+		else if ((IsA(linitial(opexpr->args), Const) ||
+				  IsA(linitial(opexpr->args), Param)) &&
 				 IsA(lsecond(opexpr->args), Var))
 		{
-			cnst = (Const *) linitial(opexpr->args);
+			val_node = (Node *) linitial(opexpr->args);
 			var = (Var *) lsecond(opexpr->args);
 			varonleft = false;
 		}
 		else
 			continue;
+
+		is_const = IsA(val_node, Const);
 
 		/* Match to PK column 1 or column 2 */
 		if (var->varattno == pk_attno)
@@ -483,7 +667,7 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 		else
 			continue;
 
-		if (cnst->constisnull)
+		if (is_const && ((Const *) val_node)->constisnull)
 			continue;
 
 		/* Determine btree strategy */
@@ -512,116 +696,32 @@ sorted_heap_extract_bounds(RelOptInfo *rel, AttrNumber pk_attno,
 			}
 		}
 
-		/* Convert constant to int64 */
-		if (!sorted_heap_key_to_int64(cnst->constvalue, match_typid, &val))
-			continue;
+		/* Collect matching RestrictInfo for selectivity estimation */
+		*pk_clauses_out = lappend(*pk_clauses_out, rinfo);
 
-		/* Update bounds for column 1 or column 2 */
-		if (!is_col2)
+		if (is_const)
 		{
-			switch (strategy)
-			{
-				case BTEqualStrategyNumber:
-					bounds->has_lo = true;
-					bounds->lo = val;
-					bounds->lo_inclusive = true;
-					bounds->has_hi = true;
-					bounds->hi = val;
-					bounds->hi_inclusive = true;
-					break;
-				case BTLessStrategyNumber:
-					if (!bounds->has_hi || val < bounds->hi ||
-						(val == bounds->hi && bounds->hi_inclusive))
-					{
-						bounds->has_hi = true;
-						bounds->hi = val;
-						bounds->hi_inclusive = false;
-					}
-					break;
-				case BTLessEqualStrategyNumber:
-					if (!bounds->has_hi || val < bounds->hi)
-					{
-						bounds->has_hi = true;
-						bounds->hi = val;
-						bounds->hi_inclusive = true;
-					}
-					break;
-				case BTGreaterStrategyNumber:
-					if (!bounds->has_lo || val > bounds->lo ||
-						(val == bounds->lo && bounds->lo_inclusive))
-					{
-						bounds->has_lo = true;
-						bounds->lo = val;
-						bounds->lo_inclusive = false;
-					}
-					break;
-				case BTGreaterEqualStrategyNumber:
-					if (!bounds->has_lo || val > bounds->lo)
-					{
-						bounds->has_lo = true;
-						bounds->lo = val;
-						bounds->lo_inclusive = true;
-					}
-					break;
-				default:
-					break;
-			}
+			/* Const: resolve at plan time */
+			int64	int_val;
+
+			if (!sorted_heap_key_to_int64(((Const *) val_node)->constvalue,
+										  match_typid, &int_val))
+				continue;
+			sorted_heap_apply_bound(bounds, strategy, is_col2, int_val);
 		}
 		else
 		{
-			/* Column 2 bounds */
-			switch (strategy)
-			{
-				case BTEqualStrategyNumber:
-					bounds->has_lo2 = true;
-					bounds->lo2 = val;
-					bounds->lo2_inclusive = true;
-					bounds->has_hi2 = true;
-					bounds->hi2 = val;
-					bounds->hi2_inclusive = true;
-					break;
-				case BTLessStrategyNumber:
-					if (!bounds->has_hi2 || val < bounds->hi2 ||
-						(val == bounds->hi2 && bounds->hi2_inclusive))
-					{
-						bounds->has_hi2 = true;
-						bounds->hi2 = val;
-						bounds->hi2_inclusive = false;
-					}
-					break;
-				case BTLessEqualStrategyNumber:
-					if (!bounds->has_hi2 || val < bounds->hi2)
-					{
-						bounds->has_hi2 = true;
-						bounds->hi2 = val;
-						bounds->hi2_inclusive = true;
-					}
-					break;
-				case BTGreaterStrategyNumber:
-					if (!bounds->has_lo2 || val > bounds->lo2 ||
-						(val == bounds->lo2 && bounds->lo2_inclusive))
-					{
-						bounds->has_lo2 = true;
-						bounds->lo2 = val;
-						bounds->lo2_inclusive = false;
-					}
-					break;
-				case BTGreaterEqualStrategyNumber:
-					if (!bounds->has_lo2 || val > bounds->lo2)
-					{
-						bounds->has_lo2 = true;
-						bounds->lo2 = val;
-						bounds->lo2_inclusive = true;
-					}
-					break;
-				default:
-					break;
-			}
+			/* Param: defer to executor */
+			*runtime_exprs = lappend(*runtime_exprs, val_node);
+			*runtime_meta = lappend_int(*runtime_meta, strategy);
+			*runtime_meta = lappend_int(*runtime_meta, is_col2 ? 1 : 0);
+			*runtime_meta = lappend_int(*runtime_meta, (int) match_typid);
 		}
 	}
 
 	return bounds->has_lo || bounds->has_hi ||
-		   bounds->has_lo2 || bounds->has_hi2;
+		   bounds->has_lo2 || bounds->has_hi2 ||
+		   *runtime_exprs != NIL;
 }
 
 /* ----------------------------------------------------------------
@@ -680,6 +780,52 @@ zm_bsearch_last(SortedHeapRelInfo *info, int64 hi, bool inclusive,
 			low = mid + 1;
 	}
 	return low;		/* one-past-last matching index */
+}
+
+/* ----------------------------------------------------------------
+ *  Resolve runtime bounds at executor startup (Path B).
+ *
+ *  Evaluates Param expressions, merges with Const-only baseline bounds,
+ *  and computes the block range from the zone map.
+ * ---------------------------------------------------------------- */
+static void
+sorted_heap_resolve_runtime_bounds(SortedHeapScanState *shstate)
+{
+	ExprContext *econtext = shstate->css.ss.ps.ps_ExprContext;
+	Relation	rel = shstate->css.ss.ss_currentRelation;
+	ListCell   *lc;
+	int			i;
+
+	/* Start from Const-only baseline */
+	shstate->bounds = shstate->const_bounds;
+
+	/* Evaluate each runtime Param expression and apply bound */
+	i = 0;
+	foreach(lc, shstate->runtime_exprstates)
+	{
+		ExprState  *exprstate = (ExprState *) lfirst(lc);
+		bool		isnull;
+		Datum		val;
+		int64		int_val;
+
+		val = ExecEvalExprSwitchContext(exprstate, econtext, &isnull);
+		if (!isnull &&
+			sorted_heap_key_to_int64(val, shstate->runtime_typids[i], &int_val))
+		{
+			sorted_heap_apply_bound(&shstate->bounds,
+									shstate->runtime_strategies[i],
+									shstate->runtime_is_col2[i],
+									int_val);
+		}
+		i++;
+	}
+
+	/* Compute block range from zone map using resolved bounds */
+	shstate->total_blocks = RelationGetNumberOfBlocks(rel);
+	sorted_heap_compute_block_range(shstate->relinfo, &shstate->bounds,
+									shstate->total_blocks,
+									&shstate->scan_start,
+									&shstate->scan_nblocks);
 }
 
 /* ----------------------------------------------------------------
@@ -893,7 +1039,30 @@ sorted_heap_plan_custom_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cscan->scan.scanrelid = rel->relid;
 	cscan->flags = best_path->flags;
-	cscan->custom_private = best_path->custom_private;
+
+	/*
+	 * Detect Path B (runtime bounds): move runtime_exprs from
+	 * custom_private[3] to custom_exprs so PG deep-copies Param
+	 * nodes for generic plan caching.
+	 *
+	 * Path A: custom_private has 2 elements (range_list, bounds_list)
+	 * Path B: custom_private has 4 elements (meta, runtime_meta,
+	 *         const_bounds, runtime_exprs)
+	 */
+	{
+		if (list_length(best_path->custom_private) == 4)
+		{
+			cscan->custom_exprs = (List *) lfourth(best_path->custom_private);
+			cscan->custom_private = list_make3(linitial(best_path->custom_private),
+											   lsecond(best_path->custom_private),
+											   lthird(best_path->custom_private));
+		}
+		else
+		{
+			cscan->custom_private = best_path->custom_private;
+		}
+	}
+
 	cscan->custom_scan_tlist = NIL;
 	cscan->custom_plans = NIL;
 	cscan->scan.plan.targetlist = tlist;
@@ -928,43 +1097,6 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	rel = node->ss.ss_currentRelation;
-	List	   *range_list;
-	List	   *bounds_list;
-
-	/* Extract range from custom_private: list_make2(range_list, bounds_list) */
-	range_list = (List *) linitial(cscan->custom_private);
-	shstate->scan_start = (BlockNumber) linitial_int(range_list);
-	shstate->scan_nblocks = (BlockNumber) lsecond_int(range_list);
-	shstate->total_blocks = (BlockNumber) lthird_int(range_list);
-
-	/* Extract bounds */
-	bounds_list = (List *) lsecond(cscan->custom_private);
-	shstate->bounds.has_lo = list_nth_int(bounds_list, 0) != 0;
-	shstate->bounds.has_hi = list_nth_int(bounds_list, 1) != 0;
-	shstate->bounds.lo_inclusive = list_nth_int(bounds_list, 2) != 0;
-	shstate->bounds.hi_inclusive = list_nth_int(bounds_list, 3) != 0;
-	shstate->bounds.lo = ((int64) list_nth_int(bounds_list, 4) << 32) |
-		((int64) (uint32) list_nth_int(bounds_list, 5));
-	shstate->bounds.hi = ((int64) list_nth_int(bounds_list, 6) << 32) |
-		((int64) (uint32) list_nth_int(bounds_list, 7));
-
-	/* Column 2 bounds (indices 8-15) */
-	if (list_length(bounds_list) >= 16)
-	{
-		shstate->bounds.has_lo2 = list_nth_int(bounds_list, 8) != 0;
-		shstate->bounds.has_hi2 = list_nth_int(bounds_list, 9) != 0;
-		shstate->bounds.lo2_inclusive = list_nth_int(bounds_list, 10) != 0;
-		shstate->bounds.hi2_inclusive = list_nth_int(bounds_list, 11) != 0;
-		shstate->bounds.lo2 = ((int64) list_nth_int(bounds_list, 12) << 32) |
-			((int64) (uint32) list_nth_int(bounds_list, 13));
-		shstate->bounds.hi2 = ((int64) list_nth_int(bounds_list, 14) << 32) |
-			((int64) (uint32) list_nth_int(bounds_list, 15));
-	}
-	else
-	{
-		shstate->bounds.has_lo2 = false;
-		shstate->bounds.has_hi2 = false;
-	}
 
 	/* Load relinfo for per-block zone map checks */
 	shstate->relinfo = sorted_heap_get_relinfo(rel);
@@ -974,6 +1106,126 @@ sorted_heap_begin_custom_scan(CustomScanState *node, EState *estate,
 	shstate->pruned_blocks = 0;
 	shstate->last_blk = InvalidBlockNumber;
 	shstate->pscan = NULL;
+	shstate->runtime_bounds = false;
+
+	/*
+	 * Path A: custom_private has 2 elements (range_list, bounds_list)
+	 * Path B: custom_private has 3 elements (meta_list, runtime_meta,
+	 *         const_bounds_list) — runtime_exprs moved to custom_exprs
+	 *         by plan_custom_path.
+	 */
+	if (list_length(cscan->custom_private) == 3)
+	{
+		/*
+		 * Path B: runtime bounds with Param nodes.
+		 * custom_private = list_make3(meta_list, runtime_meta, const_bounds_list)
+		 * custom_exprs = runtime Expr* nodes (Param/Const)
+		 */
+		List	   *meta_list = (List *) linitial(cscan->custom_private);
+		List	   *runtime_meta = (List *) lsecond(cscan->custom_private);
+		List	   *const_bounds_list = (List *) lthird(cscan->custom_private);
+		int			n_runtime;
+		int			i;
+		ListCell   *lc;
+
+		shstate->runtime_bounds = true;
+		shstate->total_blocks = (BlockNumber) linitial_int(meta_list);
+		n_runtime = lsecond_int(meta_list);
+		shstate->n_runtime_exprs = n_runtime;
+
+		/* Initialize ExprStates from custom_exprs */
+		shstate->runtime_exprstates =
+			ExecInitExprList(cscan->custom_exprs, &node->ss.ps);
+
+		/* Unpack runtime metadata: 3 ints per expression (strategy, is_col2, typid) */
+		shstate->runtime_strategies = palloc(sizeof(int) * n_runtime);
+		shstate->runtime_is_col2 = palloc(sizeof(bool) * n_runtime);
+		shstate->runtime_typids = palloc(sizeof(Oid) * n_runtime);
+
+		i = 0;
+		lc = list_head(runtime_meta);
+		while (i < n_runtime && lc != NULL)
+		{
+			shstate->runtime_strategies[i] = lfirst_int(lc);
+			lc = lnext(runtime_meta, lc);
+			shstate->runtime_is_col2[i] = lfirst_int(lc) != 0;
+			lc = lnext(runtime_meta, lc);
+			shstate->runtime_typids[i] = (Oid) lfirst_int(lc);
+			lc = lnext(runtime_meta, lc);
+			i++;
+		}
+
+		/* Unpack Const-only baseline bounds */
+		shstate->const_bounds.has_lo = list_nth_int(const_bounds_list, 0) != 0;
+		shstate->const_bounds.has_hi = list_nth_int(const_bounds_list, 1) != 0;
+		shstate->const_bounds.lo_inclusive = list_nth_int(const_bounds_list, 2) != 0;
+		shstate->const_bounds.hi_inclusive = list_nth_int(const_bounds_list, 3) != 0;
+		shstate->const_bounds.lo = ((int64) list_nth_int(const_bounds_list, 4) << 32) |
+			((int64) (uint32) list_nth_int(const_bounds_list, 5));
+		shstate->const_bounds.hi = ((int64) list_nth_int(const_bounds_list, 6) << 32) |
+			((int64) (uint32) list_nth_int(const_bounds_list, 7));
+
+		if (list_length(const_bounds_list) >= 16)
+		{
+			shstate->const_bounds.has_lo2 = list_nth_int(const_bounds_list, 8) != 0;
+			shstate->const_bounds.has_hi2 = list_nth_int(const_bounds_list, 9) != 0;
+			shstate->const_bounds.lo2_inclusive = list_nth_int(const_bounds_list, 10) != 0;
+			shstate->const_bounds.hi2_inclusive = list_nth_int(const_bounds_list, 11) != 0;
+			shstate->const_bounds.lo2 = ((int64) list_nth_int(const_bounds_list, 12) << 32) |
+				((int64) (uint32) list_nth_int(const_bounds_list, 13));
+			shstate->const_bounds.hi2 = ((int64) list_nth_int(const_bounds_list, 14) << 32) |
+				((int64) (uint32) list_nth_int(const_bounds_list, 15));
+		}
+		else
+		{
+			shstate->const_bounds.has_lo2 = false;
+			shstate->const_bounds.has_hi2 = false;
+		}
+
+		/* Resolve runtime bounds: evaluate Params, compute block range */
+		sorted_heap_resolve_runtime_bounds(shstate);
+	}
+	else
+	{
+		/*
+		 * Path A: all Const bounds — block range computed at plan time.
+		 * custom_private = list_make2(range_list, bounds_list)
+		 */
+		List	   *range_list = (List *) linitial(cscan->custom_private);
+		List	   *bounds_list = (List *) lsecond(cscan->custom_private);
+
+		shstate->scan_start = (BlockNumber) linitial_int(range_list);
+		shstate->scan_nblocks = (BlockNumber) lsecond_int(range_list);
+		shstate->total_blocks = (BlockNumber) lthird_int(range_list);
+
+		/* Extract bounds */
+		shstate->bounds.has_lo = list_nth_int(bounds_list, 0) != 0;
+		shstate->bounds.has_hi = list_nth_int(bounds_list, 1) != 0;
+		shstate->bounds.lo_inclusive = list_nth_int(bounds_list, 2) != 0;
+		shstate->bounds.hi_inclusive = list_nth_int(bounds_list, 3) != 0;
+		shstate->bounds.lo = ((int64) list_nth_int(bounds_list, 4) << 32) |
+			((int64) (uint32) list_nth_int(bounds_list, 5));
+		shstate->bounds.hi = ((int64) list_nth_int(bounds_list, 6) << 32) |
+			((int64) (uint32) list_nth_int(bounds_list, 7));
+
+		/* Column 2 bounds (indices 8-15) */
+		if (list_length(bounds_list) >= 16)
+		{
+			shstate->bounds.has_lo2 = list_nth_int(bounds_list, 8) != 0;
+			shstate->bounds.has_hi2 = list_nth_int(bounds_list, 9) != 0;
+			shstate->bounds.lo2_inclusive = list_nth_int(bounds_list, 10) != 0;
+			shstate->bounds.hi2_inclusive = list_nth_int(bounds_list, 11) != 0;
+			shstate->bounds.lo2 = ((int64) list_nth_int(bounds_list, 12) << 32) |
+				((int64) (uint32) list_nth_int(bounds_list, 13));
+			shstate->bounds.hi2 = ((int64) list_nth_int(bounds_list, 14) << 32) |
+				((int64) (uint32) list_nth_int(bounds_list, 15));
+		}
+		else
+		{
+			shstate->bounds.has_lo2 = false;
+			shstate->bounds.has_hi2 = false;
+		}
+	}
 
 	/*
 	 * For parallel-aware scans, defer scan creation to the DSM
@@ -1173,6 +1425,15 @@ sorted_heap_rescan_custom_scan(CustomScanState *node)
 {
 	SortedHeapScanState *shstate = (SortedHeapScanState *) node;
 
+	/* Path B: re-evaluate runtime bounds (params may change in NestLoop) */
+	if (shstate->runtime_bounds)
+	{
+		sorted_heap_resolve_runtime_bounds(shstate);
+		shstate->scanned_blocks = 0;
+		shstate->pruned_blocks = 0;
+		shstate->last_blk = InvalidBlockNumber;
+	}
+
 	if (shstate->heap_scan)
 	{
 		table_rescan(shstate->heap_scan, NULL);
@@ -1198,10 +1459,18 @@ sorted_heap_explain_custom_scan(CustomScanState *node, List *ancestors,
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "%u of %u blocks (pruned %u)",
-					 shstate->scan_nblocks,
-					 shstate->total_blocks,
-					 shstate->total_blocks - shstate->scan_nblocks);
+	if (shstate->runtime_bounds && !es->analyze)
+	{
+		appendStringInfo(&buf, "%u total blocks (runtime bounds)",
+						 shstate->total_blocks);
+	}
+	else
+	{
+		appendStringInfo(&buf, "%u of %u blocks (pruned %u)",
+						 shstate->scan_nblocks,
+						 shstate->total_blocks,
+						 shstate->total_blocks - shstate->scan_nblocks);
+	}
 	ExplainPropertyText("Zone Map", buf.data, es);
 	pfree(buf.data);
 

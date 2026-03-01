@@ -106,10 +106,11 @@ extract_ms() {
 
 # --- Helper: run pgbench and extract TPS ---
 run_pgbench() {
-  local script_file="$1" scale="$2"
+  local script_file="$1" scale="$2" mode="${3:-simple}"
   local output
   output=$("$PG_BINDIR/pgbench" -h "$TMP_DIR" -p "$PORT" postgres \
     -n -T "$PGBENCH_DURATION" -f "$script_file" \
+    -M "$mode" \
     -D scale="$scale" -c 1 -j 1 2>&1)
   local tps
   tps=$(echo "$output" | grep -oE 'tps = [0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
@@ -329,6 +330,38 @@ for N in "${SCALES[@]}"; do
   if [ "$N" -ge 200000 ]; then
     tps_sh=$(run_pgbench "$TMP_DIR/bench/wide_sh_bench.sql" "$N")
     tps_heap=$(run_pgbench "$TMP_DIR/bench/wide_heap_bench.sql" "$N")
+    printf "  Wide (100K):     sorted_heap %s tps | heap+btree %s tps\n" \
+      "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+      "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+  fi
+
+  # ============================================================
+  # pgbench throughput — prepared statements (plan once, execute many)
+  # ============================================================
+  echo ""
+  echo "--- pgbench throughput — prepared (${PGBENCH_DURATION}s, 1 client) ---"
+
+  tps_sh=$(run_pgbench "$TMP_DIR/bench/point_sh_bench.sql" "$N" prepared)
+  tps_heap=$(run_pgbench "$TMP_DIR/bench/point_heap_bench.sql" "$N" prepared)
+  printf "  Point (1 row):   sorted_heap %s tps | heap+btree %s tps\n" \
+    "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+    "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+  tps_sh=$(run_pgbench "$TMP_DIR/bench/narrow_sh_bench.sql" "$N" prepared)
+  tps_heap=$(run_pgbench "$TMP_DIR/bench/narrow_heap_bench.sql" "$N" prepared)
+  printf "  Narrow (100):    sorted_heap %s tps | heap+btree %s tps\n" \
+    "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+    "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+  tps_sh=$(run_pgbench "$TMP_DIR/bench/medium_sh_bench.sql" "$N" prepared)
+  tps_heap=$(run_pgbench "$TMP_DIR/bench/medium_heap_bench.sql" "$N" prepared)
+  printf "  Medium (5K):     sorted_heap %s tps | heap+btree %s tps\n" \
+    "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
+    "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
+
+  if [ "$N" -ge 200000 ]; then
+    tps_sh=$(run_pgbench "$TMP_DIR/bench/wide_sh_bench.sql" "$N" prepared)
+    tps_heap=$(run_pgbench "$TMP_DIR/bench/wide_heap_bench.sql" "$N" prepared)
     printf "  Wide (100K):     sorted_heap %s tps | heap+btree %s tps\n" \
       "$(fmt "$(echo "$tps_sh" | awk '{printf "%.0f",$1}')")" \
       "$(fmt "$(echo "$tps_heap" | awk '{printf "%.0f",$1}')")"
