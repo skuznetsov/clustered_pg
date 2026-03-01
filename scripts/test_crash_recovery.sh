@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/test_crash_recovery.sh [tmp_root] [base_port]
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 BASE_PORT="${2:-65491}"
 
 if [[ "$TMP_ROOT" != /* ]]; then

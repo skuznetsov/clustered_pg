@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/test_dump_restore.sh [tmp_root] [port]
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 PORT="${2:-65495}"
 
 if [[ "$TMP_ROOT" != /* ]]; then

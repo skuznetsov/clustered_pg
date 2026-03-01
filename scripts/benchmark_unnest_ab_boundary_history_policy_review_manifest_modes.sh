@@ -6,7 +6,7 @@ if [ "$#" -gt 7 ]; then
   exit 2
 fi
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 SUMMARY_FILES="${2:-2000}"
 ITERATIONS="${3:-10}"
 SAMPLES="${4:-1}"

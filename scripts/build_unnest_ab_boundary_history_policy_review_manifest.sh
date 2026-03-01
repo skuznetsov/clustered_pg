@@ -49,7 +49,7 @@ file_mtime_size() {
   return 1
 }
 
-TMP_DIR="$(mktemp -d "/private/tmp/pg_sorted_heap_policy_review_manifest_build.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pg_sorted_heap_policy_review_manifest_build.XXXXXX")"
 TMP_OUT="$TMP_DIR/policy_review.manifest.tsv"
 cleanup() {
   rm -rf "$TMP_DIR"

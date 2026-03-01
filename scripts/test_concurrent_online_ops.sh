@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/test_concurrent_online_ops.sh [tmp_root] [port]
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 PORT="${2:-65490}"
 INITIAL_ROWS=50000
 INSERT_RANGE_START=100001

@@ -15,7 +15,7 @@ set -euo pipefail
 #   scales:  comma-separated list, e.g. "1000000,10000000,100000000"
 #   clients: number of concurrent pgbench clients (default 1)
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 PORT="${2:-65494}"
 SCALES_CSV="${3:-1000000,10000000}"
 CLIENTS="${4:-1}"

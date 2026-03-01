@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/test_toast_and_concurrent_compact.sh [tmp_root] [port]
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 PORT="${2:-65492}"
 
 if [[ "$TMP_ROOT" != /* ]]; then

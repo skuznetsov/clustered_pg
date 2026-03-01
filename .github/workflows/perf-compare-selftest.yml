@@ -106,6 +106,7 @@ on:
       - docs/perf-baselines/unnest_ab_profile_boundary_nightly_baseline.kv
       - .github/workflows/perf-compare-selftest.yml
       - .github/workflows/policy-safety-selftest.yml
+      - .github/workflows/ci.yml
       - Makefile
   push:
     paths:
@@ -212,6 +213,7 @@ on:
       - docs/perf-baselines/unnest_ab_profile_boundary_nightly_baseline.kv
       - .github/workflows/perf-compare-selftest.yml
       - .github/workflows/policy-safety-selftest.yml
+      - .github/workflows/ci.yml
       - Makefile
 
 concurrency:

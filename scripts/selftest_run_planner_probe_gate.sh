@@ -6,7 +6,7 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 if [[ "$TMP_ROOT" != /* ]]; then
   echo "tmp_root_abs_dir must be absolute: $TMP_ROOT" >&2
   exit 2
@@ -91,7 +91,7 @@ out="$(
   PLANNER_PROBE_SUMMARY_SCRIPT="$MOCK_PROBE_OK" \
   PLANNER_RATIO_CHECK_SCRIPT="$MOCK_CHECK" \
   PLANNER_DEFAULT_PATH_CHECK_SCRIPT="$MOCK_DEFAULT_CHECK" \
-  "$GATE_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:/private/tmp" "123.0" "10000"
+  "$GATE_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:${TMPDIR:-/tmp}" "123.0" "10000"
 )"
 printf "%s\n" "$out"
 
@@ -107,7 +107,7 @@ if ! printf "%s\n" "$out" | grep -Fq "mock_default_check args=$MOCK_LOG,10000"; 
   echo "expected mocked default-path checker invocation" >&2
   exit 1
 fi
-if ! grep -Fq "probe|rows_csv=100,200|port=65508|out=auto:/private/tmp|format=json|summary_out=auto:/private/tmp" "$CALLS_LOG"; then
+if ! grep -Fq "probe|rows_csv=100,200|port=65508|out=auto:${TMPDIR:-/tmp}|format=json|summary_out=auto:${TMPDIR:-/tmp}" "$CALLS_LOG"; then
   echo "expected probe-summary invocation in success path" >&2
   cat "$CALLS_LOG" >&2
   exit 1
@@ -126,8 +126,8 @@ fi
 : >"$CALLS_LOG"
 expect_fail_contains "failed to capture planner probe log path from probe-summary output" \
   env PLANNER_PROBE_SUMMARY_SCRIPT="$MOCK_PROBE_BAD" PLANNER_RATIO_CHECK_SCRIPT="$MOCK_CHECK" PLANNER_DEFAULT_PATH_CHECK_SCRIPT="$MOCK_DEFAULT_CHECK" \
-  "$GATE_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:/private/tmp" "123.0" "10000"
-if ! grep -Fq "probe|rows_csv=100,200|port=65508|out=auto:/private/tmp|format=json|summary_out=auto:/private/tmp" "$CALLS_LOG"; then
+  "$GATE_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:${TMPDIR:-/tmp}" "123.0" "10000"
+if ! grep -Fq "probe|rows_csv=100,200|port=65508|out=auto:${TMPDIR:-/tmp}|format=json|summary_out=auto:${TMPDIR:-/tmp}" "$CALLS_LOG"; then
   echo "expected probe-summary invocation before missing-log-path failure" >&2
   cat "$CALLS_LOG" >&2
   exit 1
@@ -142,7 +142,7 @@ MISSING_PROBE_SUMMARY="$WORKDIR/missing_probe_summary.sh"
 : >"$CALLS_LOG"
 expect_fail_contains "probe-summary script not executable: $MISSING_PROBE_SUMMARY" \
   env PLANNER_PROBE_SUMMARY_SCRIPT="$MISSING_PROBE_SUMMARY" PLANNER_RATIO_CHECK_SCRIPT="$MOCK_CHECK" PLANNER_DEFAULT_PATH_CHECK_SCRIPT="$MOCK_DEFAULT_CHECK" \
-  "$GATE_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:/private/tmp" "123.0" "10000"
+  "$GATE_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:${TMPDIR:-/tmp}" "123.0" "10000"
 if [ -s "$CALLS_LOG" ]; then
   echo "expected no probe/check calls when probe-summary preflight fails" >&2
   cat "$CALLS_LOG" >&2
@@ -153,7 +153,7 @@ MISSING_RATIO_CHECK="$WORKDIR/missing_ratio_check.sh"
 : >"$CALLS_LOG"
 expect_fail_contains "ratio check script not executable: $MISSING_RATIO_CHECK" \
   env PLANNER_PROBE_SUMMARY_SCRIPT="$MOCK_PROBE_OK" PLANNER_RATIO_CHECK_SCRIPT="$MISSING_RATIO_CHECK" PLANNER_DEFAULT_PATH_CHECK_SCRIPT="$MOCK_DEFAULT_CHECK" \
-  "$GATE_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:/private/tmp" "123.0" "10000"
+  "$GATE_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:${TMPDIR:-/tmp}" "123.0" "10000"
 if [ -s "$CALLS_LOG" ]; then
   echo "expected no probe/check calls when ratio-check preflight fails" >&2
   cat "$CALLS_LOG" >&2
@@ -164,7 +164,7 @@ MISSING_DEFAULT_CHECK="$WORKDIR/missing_default_check.sh"
 : >"$CALLS_LOG"
 expect_fail_contains "default-path check script not executable: $MISSING_DEFAULT_CHECK" \
   env PLANNER_PROBE_SUMMARY_SCRIPT="$MOCK_PROBE_OK" PLANNER_RATIO_CHECK_SCRIPT="$MOCK_CHECK" PLANNER_DEFAULT_PATH_CHECK_SCRIPT="$MISSING_DEFAULT_CHECK" \
-  "$GATE_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:/private/tmp" "123.0" "10000"
+  "$GATE_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:${TMPDIR:-/tmp}" "123.0" "10000"
 if [ -s "$CALLS_LOG" ]; then
   echo "expected no probe/check calls when default-check preflight fails" >&2
   cat "$CALLS_LOG" >&2

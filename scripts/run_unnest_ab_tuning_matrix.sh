@@ -8,12 +8,12 @@ BATCHES="${3:-20}"
 SELECT_ITERS="${4:-60}"
 PROBE_SIZE="${5:-64}"
 BASE_PORT="${6:-65520}"
-OUT_PATH="${7:-auto:/private/tmp}"
+OUT_PATH="${7:-auto:${TMPDIR:-/tmp}}"
 TRIGGER_LIST="${8:-1,2,4}"
 MIN_DISTINCT_LIST="${9:-2,4,8}"
 MAX_TIDS_LIST="${10:-65536,262144}"
 PROBE_SCRIPT="${UNNEST_TUNE_PROBE_SCRIPT:-$ROOT_DIR/scripts/run_unnest_ab_probe.sh}"
-PROBE_OUT_ROOT="${UNNEST_TUNE_PROBE_OUT_ROOT:-/private/tmp}"
+PROBE_OUT_ROOT="${UNNEST_TUNE_PROBE_OUT_ROOT:-${TMPDIR:-/tmp}}"
 
 for v in "$RUNS" "$BATCH_SIZE" "$BATCHES" "$SELECT_ITERS" "$PROBE_SIZE" "$BASE_PORT"; do
   if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -le 0 ]; then
@@ -70,7 +70,7 @@ if [ "$DERIVED_MAX_PORT" -ge 65535 ]; then
 fi
 
 if [ "$OUT_PATH" = "auto" ]; then
-  OUT_PATH="/private/tmp/pg_sorted_heap_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="${TMPDIR:-/tmp}/pg_sorted_heap_unnest_tuning_matrix_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [[ "$OUT_PATH" == auto:* ]]; then
   OUT_DIR="${OUT_PATH#auto:}"
   if [ -z "$OUT_DIR" ]; then

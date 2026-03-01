@@ -30,7 +30,7 @@ if [ "$SUMMARY_FORMAT" != "json" ] && [ "$SUMMARY_FORMAT" != "csv" ]; then
 fi
 
 if [ -z "$PROBE_OUT" ]; then
-  PROBE_OUT="auto:/private/tmp"
+  PROBE_OUT="auto:${TMPDIR:-/tmp}"
 fi
 
 probe_output="$("$PROBE_SCRIPT" "$ROWS_CSV" "$PORT" "$PROBE_OUT")"

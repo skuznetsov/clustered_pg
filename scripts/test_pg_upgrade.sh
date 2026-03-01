@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/test_pg_upgrade.sh [tmp_root] [port_old] [port_new]
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 PORT_OLD="${2:-65496}"
 PORT_NEW="${3:-65497}"
 

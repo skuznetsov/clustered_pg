@@ -6,7 +6,7 @@ if [ "$#" -gt 6 ]; then
   exit 2
 fi
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 MAP_ENTRIES="${2:-20000}"
 ITERATIONS="${3:-20}"
 BENCH_MODE="${4:-pipeline}"

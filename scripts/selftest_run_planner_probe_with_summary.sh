@@ -6,7 +6,7 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
-TMP_ROOT="${1:-/private/tmp}"
+TMP_ROOT="${1:-${TMPDIR:-/tmp}}"
 if [[ "$TMP_ROOT" != /* ]]; then
   echo "tmp_root_abs_dir must be absolute: $TMP_ROOT" >&2
   exit 2
@@ -89,7 +89,7 @@ expect_fail_contains() {
 OUT_OK_DEFAULT="$WORKDIR/out_ok_default.log"
 PLANNER_PROBE_SCRIPT="$MOCK_PROBE_OK" \
 PLANNER_SUMMARY_SCRIPT="$MOCK_SUMMARY" \
-  "$RUN_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" >"$OUT_OK_DEFAULT"
+  "$RUN_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" >"$OUT_OK_DEFAULT"
 
 if ! grep -Fq "planner_probe_summary_status=ok" "$OUT_OK_DEFAULT"; then
   echo "expected planner_probe_summary_status=ok in default-summary run output" >&2
@@ -111,7 +111,7 @@ fi
 OUT_OK_AUTO_DIR="$WORKDIR/out_ok_auto_dir.log"
 PLANNER_PROBE_SCRIPT="$MOCK_PROBE_OK" \
 PLANNER_SUMMARY_SCRIPT="$MOCK_SUMMARY" \
-  "$RUN_SCRIPT" "100,200" "65508" "auto:/private/tmp" "csv" "auto:$SUMMARY_DIR" >"$OUT_OK_AUTO_DIR"
+  "$RUN_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "csv" "auto:$SUMMARY_DIR" >"$OUT_OK_AUTO_DIR"
 
 EXPECTED_AUTO_SUMMARY="$SUMMARY_DIR/$(basename "${MOCK_LOG%.log}").summary.csv"
 if ! grep -Fq "summary_call|log=$MOCK_LOG|format=csv|out=$EXPECTED_AUTO_SUMMARY" "$CALLS_LOG"; then
@@ -127,7 +127,7 @@ fi
 : >"$CALLS_LOG"
 expect_fail_contains "unsupported summary_format: bad (supported: json|csv)" \
   env PLANNER_PROBE_SCRIPT="$MOCK_PROBE_OK" PLANNER_SUMMARY_SCRIPT="$MOCK_SUMMARY" \
-  "$RUN_SCRIPT" "100,200" "65508" "auto:/private/tmp" "bad"
+  "$RUN_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "bad"
 if [ -s "$CALLS_LOG" ]; then
   echo "expected no probe/summary calls when summary_format preflight fails" >&2
   cat "$CALLS_LOG" >&2
@@ -137,8 +137,8 @@ fi
 : >"$CALLS_LOG"
 expect_fail_contains "failed to capture planner probe output path from probe run" \
   env PLANNER_PROBE_SCRIPT="$MOCK_PROBE_BAD" PLANNER_SUMMARY_SCRIPT="$MOCK_SUMMARY" \
-  "$RUN_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json"
-if ! grep -Fq "probe_call|rows_csv=100,200|port=65508|out=auto:/private/tmp" "$CALLS_LOG"; then
+  "$RUN_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json"
+if ! grep -Fq "probe_call|rows_csv=100,200|port=65508|out=auto:${TMPDIR:-/tmp}" "$CALLS_LOG"; then
   echo "expected probe invocation before missing-log-path failure" >&2
   cat "$CALLS_LOG" >&2
   exit 1
@@ -174,8 +174,8 @@ fi
 : >"$CALLS_LOG"
 expect_fail_contains "summary auto directory must be an absolute path: auto:relative/path" \
   env PLANNER_PROBE_SCRIPT="$MOCK_PROBE_OK" PLANNER_SUMMARY_SCRIPT="$MOCK_SUMMARY" \
-  "$RUN_SCRIPT" "100,200" "65508" "auto:/private/tmp" "json" "auto:relative/path"
-if ! grep -Fq "probe_call|rows_csv=100,200|port=65508|out=auto:/private/tmp" "$CALLS_LOG"; then
+  "$RUN_SCRIPT" "100,200" "65508" "auto:${TMPDIR:-/tmp}" "json" "auto:relative/path"
+if ! grep -Fq "probe_call|rows_csv=100,200|port=65508|out=auto:${TMPDIR:-/tmp}" "$CALLS_LOG"; then
   echo "expected probe invocation before relative auto-summary-dir failure" >&2
   cat "$CALLS_LOG" >&2
   exit 1

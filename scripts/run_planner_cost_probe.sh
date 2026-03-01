@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROWS_CSV="${1:-1000,10000,50000}"
 PORT="${2:-65496}"
 PROBE_OUT="${3:-}"
-TMP_ROOT="${TMPDIR:-/private/tmp}"
+TMP_ROOT="${TMPDIR:-${TMPDIR:-/tmp}}"
 TMP_DIR=""
 
 if [[ "$PROBE_OUT" == auto:* ]]; then
@@ -20,7 +20,7 @@ if [[ "$PROBE_OUT" == auto:* ]]; then
   fi
   PROBE_OUT="$PROBE_OUT_DIR/pg_sorted_heap_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [ "$PROBE_OUT" = "auto" ]; then
-  PROBE_OUT="/private/tmp/pg_sorted_heap_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
+  PROBE_OUT="${TMPDIR:-/tmp}/pg_sorted_heap_planner_probe_$(date +%Y%m%d_%H%M%S)_$$.log"
 fi
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -le 1024 ] || [ "$PORT" -ge 65535 ]; then

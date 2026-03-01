@@ -6,7 +6,7 @@ if [ "$#" -gt 2 ]; then
   exit 2
 fi
 
-ROOT="${1:-/private/tmp}"
+ROOT="${1:-${TMPDIR:-/tmp}}"
 MIN_AGE_SECONDS="${2:-0}"
 if [[ "$ROOT" != /* ]]; then
   echo "tmp_root_abs_dir must be absolute: $ROOT" >&2

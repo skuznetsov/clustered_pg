@@ -796,7 +796,7 @@ if [ "$selected_count" -eq 0 ]; then
   exit 2
 fi
 
-WORKDIR="$(mktemp -d "/private/tmp/pg_sorted_heap_boundary_policy_review_window.XXXXXX")"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pg_sorted_heap_boundary_policy_review_window.XXXXXX")"
 STAGE_DIR="$WORKDIR/selected"
 AGGREGATE_SUMMARY="$WORKDIR/aggregate.summary"
 mkdir -p "$STAGE_DIR"

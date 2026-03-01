@@ -13,11 +13,11 @@ EMIT_OBSERVABILITY_RAW="${UNNEST_AB_EMIT_OBSERVABILITY:-off}"
 EMIT_OBSERVABILITY="off"
 WARMUP_SELECTS_RAW="${UNNEST_AB_WARMUP_SELECTS:-1}"
 WARMUP_SELECTS="1"
-TMP_ROOT="${TMPDIR:-/private/tmp}"
+TMP_ROOT="${TMPDIR:-${TMPDIR:-/tmp}}"
 TMP_DIR=""
 
 if [ "$OUT_PATH" = "auto" ]; then
-  OUT_PATH="/private/tmp/pg_sorted_heap_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
+  OUT_PATH="${TMPDIR:-/tmp}/pg_sorted_heap_unnest_ab_$(date +%Y%m%d_%H%M%S)_$$.log"
 elif [[ "$OUT_PATH" == auto:* ]]; then
   OUT_DIR="${OUT_PATH#auto:}"
   if [ -z "$OUT_DIR" ]; then
